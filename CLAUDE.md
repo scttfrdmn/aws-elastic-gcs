@@ -9,6 +9,19 @@ The primary use case is fronting the **AWS Open Data Registry** with Globus endp
 **Owner:** Scott Friedman (github.com/scttfrdmn)
 **Target conference:** GlobusWorld 2026 (Chicago Apr 21-22, Raleigh Jun 2-3)
 
+## Project Tracking
+
+All work is tracked in GitHub:
+- **Project board:** https://github.com/users/scttfrdmn/projects/27
+- **Issues:** https://github.com/scttfrdmn/elastic-gcs/issues
+- **Milestones:** v0.2 (scaling fixes), v0.3 (cost/reliability), v0.4 (observability/multi-region)
+
+| Milestone | Focus | Key Issues |
+|-----------|-------|------------|
+| v0.2 | Correct automatic scaling | #1 SNS fix, #2 MaxDTNs config, #3 demand monitor, #4 scale-in guard, #5 cache eviction TTL, #6 warm pool CDK |
+| v0.3 | Cost & reliability | #7 Spot instances, #8 t4g.medium control node, #9 stale node cleanup, #10 S3 VPC endpoint |
+| v0.4 | Observability & multi-region | #11 open_data.go, #12 CloudWatch dashboard, #13 structured logging, #14 version drift detection |
+
 ## Key Repositories
 
 - **This repo:** CDK infrastructure + orchestration Lambda functions + operational tooling
@@ -215,52 +228,32 @@ elastic-gcs/
         └── timing_test.go             # Benchmark: measure each phase of scale-out
 ```
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Single Node Baseline (START HERE)
-**Goal:** Get GCS running on one EC2 instance with S3 connector fronting an Open Data bucket.
+### v0.1 — Completed ✅
+Single-region deployment with control node, ASG + warm pool, Lambda lifecycle hooks, EIP-based node slot assignment, boot/shutdown scripts with GCS node disable/enable, lock file fix, and validated end-to-end Globus transfer against the 1000 Genomes Open Data bucket.
 
-1. Create CDK stack for: VPC, security group (TCP 443 + 50000-51000), single EC2 instance (t4g.medium)
-2. UserData script installs GCS, runs `endpoint setup`, `node setup`
-3. Configure S3 storage gateway pointing at a public Open Data bucket
-4. Create a mapped collection
-5. **Validation:** Browse and transfer files via Globus web app
+**What works:**
+- Control node boots, runs GCS endpoint setup, pre-creates node identities in Secrets Manager
+- DTN warm pool (2 stopped instances) with EIP slot assignment via tags
+- Scale-out: DTN resumes in ~60s, `node enable` succeeds, transfer completes
+- Scale-in: lifecycle hook calls `node disable` before instance stops
+- Lock file fix: `chown gcsweb:gcsweb subscription_pause` after each root GCS CLI call
 
-**Open Data bucket for initial test:** `1000genomes` in us-east-1 (well-known, large, genomics audience)
+**Known gaps → see v0.2 issues:**
+- Scale-out alarm never fires (demand monitor Lambda missing, `ActiveTransfers` metric not published)
+- Scale-in alarm fires immediately after scale-out (no active transfer guard)
+- `MaxDTNs` config doesn't exist; ASG max capped at `warmPoolSize + 1 = 3`
+- Warm pool `MinSize=2` reset on every `cdk deploy` (no CDK custom resource)
 
-**IAM considerations for Open Data:**
-- Public buckets: read-only access, no special IAM beyond standard S3 GetObject
-- Requester-pays buckets: need s3:GetObject + s3:GetBucketRequestPayment
-- Create an IAM role for the GCS instance with scoped S3 read permissions
+### v0.2 — Correct Automatic Scaling
+See GitHub milestone [v0.2](https://github.com/scttfrdmn/elastic-gcs/milestone/1) and issues [#1–#6](https://github.com/scttfrdmn/elastic-gcs/issues).
 
-### Phase 2: Multi-Node + Node Lifecycle Validation
-**Goal:** Prove that node create → import → disable → stop → resume → enable works.
+### v0.3 — Cost & Reliability
+See GitHub milestone [v0.3](https://github.com/scttfrdmn/elastic-gcs/milestone/2) and issues [#7–#10](https://github.com/scttfrdmn/elastic-gcs/issues).
 
-1. On control node, run `node create --export-node` to pre-create a DTN identity
-2. Launch second EC2 instance, run `node setup --import-node`
-3. Verify both nodes in `node list`, both active
-4. Run a transfer, check which node(s) handle it
-5. `node disable` on DTN → stop instance → resume → `node enable`
-6. Verify DTN rejoins and serves transfers
-7. **Measure and record timing of each step**
-
-### Phase 3: ASG + Warm Pool Automation
-**Goal:** Automate the scale-out/in lifecycle.
-
-1. Build DTN AMI with GCS pre-installed (use EC2 Image Builder or Packer)
-2. Pre-create node identities, store in Secrets Manager
-3. CDK stack: ASG with warm pool, EIP allocation per DTN slot
-4. Lambda lifecycle hooks: disable before stop, enable after resume
-5. CloudWatch alarm or Globus webhook trigger for scale-out
-6. Cache eviction Lambda (terminate warm instances after 72h)
-
-### Phase 4: Multi-Region Open Data
-**Goal:** Deploy to multiple regions to colocate with Open Data.
-
-1. Parameterize CDK stacks by region
-2. Create `config/open_data_buckets.yaml` mapping buckets to regions
-3. Deploy to us-east-1, us-west-2, eu-west-1 (start with these)
-4. Optionally: build a routing layer / Globus Flow that directs users to the nearest endpoint
+### v0.4 — Observability & Multi-Region
+See GitHub milestone [v0.4](https://github.com/scttfrdmn/elastic-gcs/milestone/3) and issues [#11–#14](https://github.com/scttfrdmn/elastic-gcs/issues).
 
 ## Key Design Decisions
 
@@ -318,16 +311,21 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 
 ## Testing Strategy
 
-### Integration Tests
-- **Node lifecycle:** Programmatically run through disable → stop → resume → enable, assert node status
-- **Transfer end-to-end:** Submit transfer via globus-go-sdk, verify completion
-- **Scale-out latency:** Trigger scale-out, measure wall-clock time to first successful transfer on new DTN
+### Validated (v0.1)
+- Node lifecycle (disable → stop → resume → enable) via warm pool scale events
+- End-to-end transfer: 1000 Genomes → Globus Tutorial Collection 1 (15KB file, 3s, SUCCEEDED)
+- Scale-out latency: ~60s DTN InService, ~30s node enable → first transfer
 
-### Benchmarks (for GlobusWorld presentation)
-- Time each phase: instance resume, GCS service start, node enable, DNS propagation, first transfer byte
-- Compare cold vs warm vs hot paths
-- Measure throughput with 1, 2, 3 DTNs active (parallel transfers)
-- Cost comparison: elastic vs static for realistic academic workload patterns
+### Integration Tests (planned)
+- Programmatic node lifecycle via globus-go-sdk assertions
+- Transfer throughput at 1, 2, 3 concurrent DTNs
+- Scale-out latency cold vs warm vs hot path timing
+
+### Benchmarks (GlobusWorld 2026 presentation)
+- Instance resume timing per instance type
+- GCS service start + node enable + DNS propagation breakdown
+- Throughput comparison: elastic vs static for bursty academic workload
+- Cost model: elastic vs always-on for various utilization patterns
 
 ## Important Notes
 
