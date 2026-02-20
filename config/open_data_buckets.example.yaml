@@ -1,0 +1,58 @@
+# AWS Open Data Registry buckets to front with Globus
+# Reference: https://registry.opendata.aws/
+#
+# Each bucket becomes a storage gateway + mapped collection on the
+# regional Elastic GCS endpoint.
+
+buckets:
+  # === us-east-1 ===
+  - name: "1000 Genomes"
+    bucket: "1000genomes"
+    region: us-east-1
+    description: "Human genetic variation data from the 1000 Genomes Project"
+    requester_pays: false
+    read_only: true
+
+  - name: "OpenNeuro"
+    bucket: "openneuro.org"
+    region: us-east-1
+    description: "Open platform for sharing MRI, MEG, EEG, iEEG, ECoG, ASL, and PET data"
+    requester_pays: false
+    read_only: true
+
+  - name: "Allen Brain Observatory"
+    bucket: "allen-brain-observatory"
+    region: us-east-1
+    description: "Survey of physiological activity in the mouse visual cortex"
+    requester_pays: false
+    read_only: true
+
+  # === us-west-2 ===
+  - name: "NOAA NEXRAD Level 2"
+    bucket: "noaa-nexrad-level2"
+    region: us-west-2
+    description: "Real-time and archival NEXRAD radar data"
+    requester_pays: false
+    read_only: true
+
+  - name: "Landsat 8"
+    bucket: "landsat-pds"
+    region: us-west-2
+    description: "Landsat 8 satellite imagery"
+    requester_pays: false
+    read_only: true
+
+  - name: "Sentinel-2 L2A COGs"
+    bucket: "sentinel-cogs"
+    region: us-west-2
+    description: "Sentinel-2 L2A data in Cloud Optimized GeoTIFF format"
+    requester_pays: true
+    read_only: true
+
+  # === eu-west-1 ===
+  - name: "Copernicus DEM"
+    bucket: "copernicus-dem-30m"
+    region: eu-west-1
+    description: "Copernicus Digital Elevation Model at 30m resolution"
+    requester_pays: false
+    read_only: true

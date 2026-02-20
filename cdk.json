@@ -1,0 +1,32 @@
+{
+  "app": "go run cdk.go",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "CLAUDE.md",
+      "cdk*.json",
+      "**/*.d.ts",
+      "**/*.js",
+      "node_modules",
+      "test",
+      ".git"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:target-partitions": ["aws"],
+
+    "globus:subscriptionId": "1e8d2d5b-d29f-46a1-b152-059a7c3c9971",
+    "globus:endpointOwner": "scofri@globusid.org",
+    "globus:endpointDisplayName": "Elastic GCS - Open Data",
+    "globus:organizationName": "Elastic GCS",
+
+    "adminCIDR": "",
+
+    "elastic-gcs:warmPoolSize": 2,
+    "elastic-gcs:cooldownMinutes": 15,
+    "elastic-gcs:cacheEvictionHours": 72
+  }
+}

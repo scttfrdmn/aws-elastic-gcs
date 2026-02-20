@@ -1,0 +1,27 @@
+# CDK
+cdk.out/
+cdk.context.json
+
+# Go
+bin/
+*.exe
+
+# Lambda binaries
+lambda/*/bootstrap
+
+# Config (contains secrets/credentials)
+config/regions.yaml
+config/open_data_buckets.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Secrets (NEVER commit these)
+deployment-key.json
+*.pem
+*.key

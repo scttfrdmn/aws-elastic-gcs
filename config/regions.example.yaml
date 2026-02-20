@@ -1,0 +1,22 @@
+# Regions to deploy Elastic GCS endpoints
+# Start with us-east-1 for Phase 1, expand later
+
+regions:
+  - name: us-east-1
+    control_instance: t4g.medium      # 4 vCPU, 8GB — GCS minimum
+    dtn_instance: m6i.xlarge           # 4 vCPU, 16GB, up to 12.5 Gbps
+    warm_pool_size: 2                  # Keep 2 stopped DTNs ready
+    key_pair_name: ""                  # Your EC2 key pair name
+
+  # Uncomment for Phase 4 multi-region
+  # - name: us-west-2
+  #   control_instance: t4g.medium
+  #   dtn_instance: m6i.xlarge
+  #   warm_pool_size: 2
+  #   key_pair_name: ""
+
+  # - name: eu-west-1
+  #   control_instance: t4g.medium
+  #   dtn_instance: m6i.xlarge
+  #   warm_pool_size: 1
+  #   key_pair_name: ""

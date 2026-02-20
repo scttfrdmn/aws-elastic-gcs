@@ -1,0 +1,19 @@
+[Unit]
+Description=Elastic GCS DTN Lifecycle Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/elastic-gcs/scripts/dtn_boot.sh
+ExecStop=/opt/elastic-gcs/scripts/dtn_shutdown.sh
+TimeoutStartSec=600
+TimeoutStopSec=300
+# AWS_REGION and SECRETS_PREFIX are injected by the CDK launch template UserData.
+# DTN_SLOT_NUMBER and EIP are discovered at runtime via EC2 tag-based EIP discovery.
+Environment=AWS_REGION=${AWS_REGION}
+Environment=SECRETS_PREFIX=${SECRETS_PREFIX}
+
+[Install]
+WantedBy=multi-user.target
