@@ -29,6 +29,10 @@ type ControlNodeStackProps struct {
 
 	// SSH access restriction. Empty string allows 0.0.0.0/0 (not recommended for prod).
 	AdminCIDR string
+
+	// MaxDTNs is the maximum number of simultaneously active DTN nodes.
+	// TOTAL_SLOTS = MaxDTNs + WarmPoolSize identities are pre-created.
+	MaxDTNs int
 }
 
 // ControlNodeStack is the CDK stack for the GCS control node.
@@ -270,6 +274,8 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export GLOBUS_OWNER_IDENTITY=%q", props.GlobusOwnerIdentity)),
 		jsii.String(fmt.Sprintf("export GLOBUS_SUBSCRIPTION_ID=%q", props.GlobusSubscriptionID)),
 		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.RegionConfig.WarmPoolSize)),
+		// TOTAL_SLOTS = maxDTNs + warmPoolSize: every EIP slot needs a node identity.
+		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.MaxDTNs+props.RegionConfig.WarmPoolSize)),
 		// JSON-encode the buckets array — shell-safe quoting via printf
 		jsii.String(fmt.Sprintf("export OPEN_DATA_BUCKETS_JSON=%q", string(bucketsJSON))),
 		// Run the init script (shebang on line 1 is a no-op comment here)

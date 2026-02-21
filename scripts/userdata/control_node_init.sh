@@ -16,7 +16,8 @@ set -euo pipefail
 #   - ENDPOINT_DISPLAY_NAME: Display name for the endpoint
 #   - ORGANIZATION_NAME: Organization name for the endpoint
 #   - AWS_REGION: Current AWS region
-#   - WARM_POOL_SIZE: Number of DTN node identities to pre-create
+#   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
+#   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
 #   - OPEN_DATA_BUCKETS_JSON: JSON array of bucket configs
 #   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
 # =============================================================================
@@ -84,10 +85,21 @@ export GCS_CLI_CLIENT_SECRET="$GLOBUS_CLIENT_SECRET"
 # --- 3. Set up endpoint ---
 echo ">>> Setting up GCS endpoint..."
 
-# Check if endpoint already exists (idempotency for instance replacement)
-if [ -f /var/lib/globus-connect-server/deployment-key.json ]; then
-    echo ">>> Endpoint already configured, skipping endpoint setup."
+# deployment-key.json is created in CWD by endpoint setup.
+# UserData CWD is /, so the file lands at /deployment-key.json.
+DEPLOY_KEY_PATH="/deployment-key.json"
+
+# Idempotency: check Secrets Manager first.
+# If an existing deployment key is stored (from a prior deploy), retrieve it
+# and skip endpoint setup. This prevents creating a new endpoint on every
+# control node replacement.
+if aws secretsmanager get-secret-value \
+    --secret-id "${SECRETS_PREFIX}/deployment-key" \
+    --query SecretString --output text --region "$AWS_REGION" \
+    > "$DEPLOY_KEY_PATH" 2>/dev/null && [ -s "$DEPLOY_KEY_PATH" ]; then
+    echo ">>> Deployment key retrieved from Secrets Manager — reusing existing endpoint."
 else
+    rm -f "$DEPLOY_KEY_PATH"
     globus-connect-server endpoint setup \
         "$ENDPOINT_DISPLAY_NAME" \
         --organization "$ORGANIZATION_NAME" \
@@ -95,7 +107,7 @@ else
         --contact-email "$GLOBUS_OWNER_IDENTITY" \
         --dont-set-advertised-owner \
         --agree-to-letsencrypt-tos
-
+    # deployment-key.json is created in CWD (/)
     echo ">>> Endpoint setup complete."
 fi
 
@@ -109,6 +121,7 @@ PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
     http://169.254.169.254/latest/meta-data/public-ipv4)
 
 globus-connect-server node setup \
+    --deployment-key "$DEPLOY_KEY_PATH" \
     --ip-address "$PUBLIC_IP"
 
 echo ">>> Node setup complete."
@@ -116,8 +129,10 @@ echo ">>> Node setup complete."
 # --- 5. Configure endpoint credentials and subscription ---
 echo ">>> Configuring endpoint..."
 
-# Get endpoint ID and export for subsequent CLI calls
-ENDPOINT_ID=$(globus-connect-server endpoint show -F json | jq -r '.id')
+# Read endpoint ID from info.json — avoids a circular dependency where
+# `endpoint show` requires GCS_CLI_ENDPOINT_ID but we don't have it yet.
+# info.json is written by `node setup` and always has the endpoint_id.
+ENDPOINT_ID=$(jq -r '.endpoint_id' /var/lib/globus-connect-server/info.json)
 export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
 
 # Grant the client app admin rights so it can manage storage gateways and
@@ -182,16 +197,15 @@ echo "$OPEN_DATA_BUCKETS_JSON" | jq -c '.[]' | while read -r bucket_config; do
 done
 
 # --- 7. Pre-create DTN node identities ---
-echo ">>> Pre-creating $WARM_POOL_SIZE DTN node identities..."
+# TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible EIP slot needs an identity.
+echo ">>> Pre-creating $TOTAL_SLOTS DTN node identities..."
 
-DEPLOYMENT_KEY="/var/lib/globus-connect-server/deployment-key.json"
-
-for i in $(seq 1 "$WARM_POOL_SIZE"); do
+for i in $(seq 1 "$TOTAL_SLOTS"); do
     NODE_FILE="/tmp/dtn-slot-${i}.json"
 
     echo ">>> Creating node identity for DTN slot $i..."
     globus-connect-server node create \
-        --deployment-key "$DEPLOYMENT_KEY" \
+        --deployment-key "$DEPLOY_KEY_PATH" \
         --export-node "$NODE_FILE"
 
     # Store in Secrets Manager
@@ -209,15 +223,15 @@ for i in $(seq 1 "$WARM_POOL_SIZE"); do
     rm -f "$NODE_FILE"
 done
 
-# Also store the deployment key in Secrets Manager
+# Also store the deployment key in Secrets Manager (upsert)
 aws secretsmanager create-secret \
     --name "${SECRETS_PREFIX}/deployment-key" \
-    --secret-string "file://${DEPLOYMENT_KEY}" \
+    --secret-string "file://${DEPLOY_KEY_PATH}" \
     --region "$AWS_REGION" \
     2>/dev/null \
 || aws secretsmanager put-secret-value \
     --secret-id "${SECRETS_PREFIX}/deployment-key" \
-    --secret-string "file://${DEPLOYMENT_KEY}" \
+    --secret-string "file://${DEPLOY_KEY_PATH}" \
     --region "$AWS_REGION"
 
 # --- 8. Store endpoint metadata in SSM ---
@@ -252,5 +266,5 @@ echo "Endpoint ID: $ENDPOINT_ID"
 echo "Instance ID: $INSTANCE_ID"
 echo "Public IP:   $PUBLIC_IP"
 echo "Region:      $AWS_REGION"
-echo "DTN slots pre-created: $WARM_POOL_SIZE"
+echo "DTN slots pre-created: $TOTAL_SLOTS"
 echo "=================================="

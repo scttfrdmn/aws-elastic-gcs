@@ -53,6 +53,19 @@ func main() {
 
 		// Phase 1 + 2: Network + Control Node
 		controlStackName := fmt.Sprintf("ElasticGCS-Control-%s", region.Name)
+		// Phase 3: DTN Pool (depends on control stack)
+		cacheHours := 72
+		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
+			fmt.Sscanf(h, "%d", &cacheHours)
+		}
+		maxDTNs := 0
+		if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
+			fmt.Sscanf(m, "%d", &maxDTNs)
+		}
+		if maxDTNs == 0 {
+			maxDTNs = region.WarmPoolSize + 1
+		}
+
 		controlStack := stacks.NewControlNodeStack(app, controlStackName, &stacks.ControlNodeStackProps{
 			StackProps: awscdk.StackProps{
 				Env:         env,
@@ -65,17 +78,8 @@ func main() {
 			EndpointDisplayName:  endpointDisplayName,
 			OrganizationName:     orgName,
 			AdminCIDR:            adminCIDR,
+			MaxDTNs:              maxDTNs,
 		})
-
-		// Phase 3: DTN Pool (depends on control stack)
-		cacheHours := 72
-		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
-			fmt.Sscanf(h, "%d", &cacheHours)
-		}
-		maxDTNs := 0
-		if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
-			fmt.Sscanf(m, "%d", &maxDTNs)
-		}
 		dtnStackName := fmt.Sprintf("ElasticGCS-DTNPool-%s", region.Name)
 		stacks.NewDTNPoolStack(app, dtnStackName, &stacks.DTNPoolStackProps{
 			StackProps: awscdk.StackProps{
