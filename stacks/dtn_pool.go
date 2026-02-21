@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2/awslogs"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssns"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssnssubscriptions"
+	"github.com/aws/aws-cdk-go/awscdk/v2/customresources"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 
@@ -32,17 +33,19 @@ type DTNPoolStackProps struct {
 	ControlStack       *ControlNodeStack
 	OpenDataBuckets    []config.OpenDataBucket
 	CacheEvictionHours int // default 72h if 0
+	MaxDTNs            int // default WarmPoolSize+1 if 0
 }
 
 // NewDTNPoolStack creates the Phase 3 DTN pool infrastructure:
-//   - Elastic IPs (one per warm pool slot, persist through stop/start)
+//   - Elastic IPs (one per warm pool slot + one per max active DTN)
 //   - IAM role for DTN instances
 //   - EC2 Launch Template with dtn_boot.sh UserData
-//   - Auto Scaling Group (min=0, max=WarmPoolSize+1) with stopped warm pool
+//   - Auto Scaling Group (min=0, max=MaxDTNs) with stopped warm pool
+//   - Warm pool via CDK AwsCustomResource (bypasses CFN WarmPool resource bug)
 //   - Lifecycle hooks for graceful GCS node enable/disable
-//   - Lambda functions: lifecycle, scaleout, scalein, cache_eviction
+//   - Lambda functions: lifecycle, scaleout, scalein, cache_eviction, demand_monitor
 //   - EventBridge rules wiring it all together
-//   - CloudWatch alarms for scale-out/in triggers
+//   - CloudWatch alarms for scale-out/in triggers (based on ActiveTransfers metric)
 func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackProps) awscdk.Stack {
 	var sprops awscdk.StackProps
 	if props != nil {
@@ -57,9 +60,22 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	if warmPoolSize <= 0 {
 		warmPoolSize = 2
 	}
-	// Max capacity = warm pool + 1 active burst slot. The warm pool itself
-	// holds up to warmPoolSize stopped instances; ASG desired goes 0→1→... .
-	maxCapacity := warmPoolSize + 1
+
+	// MaxDTNs: maximum number of simultaneously running (InService) DTNs.
+	// Defaults to warmPoolSize+1 if not set.
+	maxDTNs := props.MaxDTNs
+	if maxDTNs <= 0 {
+		if props.RegionConfig.MaxDTNs > 0 {
+			maxDTNs = props.RegionConfig.MaxDTNs
+		} else {
+			maxDTNs = warmPoolSize + 1
+		}
+	}
+
+	// Total EIP slots = maxDTNs (InService) + warmPoolSize (Warmed:Stopped).
+	// Each running or stopped DTN holds its EIP even when stopped, so all
+	// slots need an EIP simultaneously.
+	totalSlots := maxDTNs + warmPoolSize
 
 	cacheEvictionHours := props.CacheEvictionHours
 	if cacheEvictionHours <= 0 {
@@ -72,15 +88,12 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 
 	// -------------------------------------------------------------------------
 	// Elastic IPs
-	// One EIP per possible instance slot (warmPoolSize + 1 for InService).
-	// When an InService instance holds its EIP and warm pool instances hold
-	// theirs, a replacement warm pool instance needs a free slot to claim.
-	// So total EIPs needed = maxCapacity = warmPoolSize + 1.
+	// One EIP per possible instance slot (maxDTNs InService + warmPoolSize stopped).
 	// Tagged with slot number so the DTN boot script can discover and claim
 	// one at runtime (tag-based association).
 	// Free when attached to a running instance; $3.60/month when unattached.
 	// -------------------------------------------------------------------------
-	for i := 1; i <= maxCapacity; i++ {
+	for i := 1; i <= totalSlots; i++ {
 		awsec2.NewCfnEIP(stack, jsii.String(fmt.Sprintf("DTNSlot%dEIP", i)), &awsec2.CfnEIPProps{
 			Domain: jsii.String("vpc"),
 			Tags: &[]*awscdk.CfnTag{
@@ -313,10 +326,10 @@ fi
 		LaunchTemplateName: jsii.String(fmt.Sprintf("elastic-gcs-dtn-%s", region)),
 		InstanceType:       awsec2.NewInstanceType(jsii.String(dtnInstanceStr)),
 		MachineImage:       dtnAMI,
-		SecurityGroup: props.ControlStack.SecurityGroup,
-		Role:          dtnRole,
-		UserData:      ud,
-		RequireImdsv2: jsii.Bool(true),
+		SecurityGroup:      props.ControlStack.SecurityGroup,
+		Role:               dtnRole,
+		UserData:           ud,
+		RequireImdsv2:      jsii.Bool(true),
 		// 20GB gp3 root volume — DTNs need less storage than control node
 		BlockDevices: &[]*awsec2.BlockDevice{
 			{
@@ -340,7 +353,7 @@ fi
 	// -------------------------------------------------------------------------
 	// Auto Scaling Group
 	// Min=0 so there are no running DTNs when idle (only stopped in warm pool).
-	// Max=warmPoolSize+1 allows one DTN beyond the warm pool to handle bursts.
+	// MaxCapacity=maxDTNs caps the number of simultaneously active DTNs.
 	// DefaultInstanceWarmup=0 disables the built-in warmup delay; our lifecycle
 	// hook handles readiness signaling instead.
 	// -------------------------------------------------------------------------
@@ -350,33 +363,66 @@ fi
 		VpcSubnets: &awsec2.SubnetSelection{
 			SubnetType: awsec2.SubnetType_PUBLIC,
 		},
-		LaunchTemplate:      lt,
-		MinCapacity:         jsii.Number(0),
-		MaxCapacity:         jsii.Number(float64(maxCapacity)),
-		DesiredCapacity:     jsii.Number(0),
+		LaunchTemplate:        lt,
+		MinCapacity:           jsii.Number(0),
+		MaxCapacity:           jsii.Number(float64(maxDTNs)),
+		DesiredCapacity:       jsii.Number(0),
 		DefaultInstanceWarmup: awscdk.Duration_Seconds(jsii.Number(0)),
 	})
 
 	// -------------------------------------------------------------------------
-	// Warm Pool — created via CLI post-deploy, NOT managed by CloudFormation.
+	// Warm Pool — created via CDK AwsCustomResource (putWarmPool API call).
 	//
-	// AWS::AutoScaling::WarmPool has a known CFN bug where the "eventual
-	// consistency check" loops indefinitely, leaving the stack stuck in
-	// CREATE_IN_PROGRESS. The warm pool is created correctly but CFN never
-	// sees it as complete.
+	// We use a custom resource instead of the native AWS::AutoScaling::WarmPool
+	// CloudFormation resource type because the CFN resource has a known bug
+	// where the "eventual consistency check" loops indefinitely, leaving the
+	// stack stuck in CREATE_IN_PROGRESS even though the warm pool is created.
 	//
-	// Workaround: omit from CDK and create with the CLI after deploy:
-	//   aws autoscaling put-warm-pool \
-	//     --auto-scaling-group-name elastic-gcs-dtn-us-east-1 \
-	//     --max-group-prepared-capacity 2 \
-	//     --min-size 2 \
-	//     --pool-state Stopped \
-	//     --instance-reuse-policy ReuseOnScaleIn=true
-	//
-	// Use --min-size 2 (not 0) so the ASG proactively maintains 2 stopped
-	// instances. With min-size=0, instances evicted from the warm pool are
-	// not automatically replaced until a scale-in event returns one.
+	// The AwsCustomResource directly calls the AutoScaling SDK, bypassing CFN.
 	// -------------------------------------------------------------------------
+	warmPoolParams := &map[string]interface{}{
+		"AutoScalingGroupName":     jsii.String(asgName),
+		"MinSize":                  jsii.Number(float64(warmPoolSize)),
+		"MaxGroupPreparedCapacity": jsii.Number(float64(warmPoolSize)),
+		"PoolState":                jsii.String("Stopped"),
+		"InstanceReusePolicy": map[string]interface{}{
+			"ReuseOnScaleIn": jsii.Bool(true),
+		},
+	}
+	warmPoolCR := customresources.NewAwsCustomResource(stack, jsii.String("WarmPoolCR"),
+		&customresources.AwsCustomResourceProps{
+			OnCreate: &customresources.AwsSdkCall{
+				Service:    jsii.String("AutoScaling"),
+				Action:     jsii.String("putWarmPool"),
+				Parameters: warmPoolParams,
+				PhysicalResourceId: customresources.PhysicalResourceId_Of(
+					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
+			},
+			OnUpdate: &customresources.AwsSdkCall{
+				Service:    jsii.String("AutoScaling"),
+				Action:     jsii.String("putWarmPool"),
+				Parameters: warmPoolParams,
+				PhysicalResourceId: customresources.PhysicalResourceId_Of(
+					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
+			},
+			OnDelete: &customresources.AwsSdkCall{
+				Service: jsii.String("AutoScaling"),
+				Action:  jsii.String("deleteWarmPool"),
+				Parameters: &map[string]interface{}{
+					"AutoScalingGroupName": jsii.String(asgName),
+					"ForceDelete":          jsii.Bool(true),
+				},
+				PhysicalResourceId: customresources.PhysicalResourceId_Of(
+					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
+			},
+			Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
+				&customresources.SdkCallsPolicyOptions{
+					Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
+				}),
+			InstallLatestAwsSdk: jsii.Bool(false),
+		})
+	// Warm pool must be created after the ASG
+	warmPoolCR.Node().AddDependency(asg)
 
 	// -------------------------------------------------------------------------
 	// Lifecycle Hooks
@@ -410,8 +456,8 @@ fi
 	// Each function gets a dedicated log group with 1-week retention.
 	// -------------------------------------------------------------------------
 	commonLambdaEnv := &map[string]*string{
-		"ASG_NAME":      asg.AutoScalingGroupName(),
-		"REGION":        jsii.String(region),
+		"ASG_NAME":       asg.AutoScalingGroupName(),
+		"REGION":         jsii.String(region),
 		"SECRETS_PREFIX": jsii.String(secretsPrefix),
 	}
 
@@ -426,7 +472,7 @@ fi
 		Environment:  commonLambdaEnv,
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	// Lifecycle Lambda needs SSM (node disable), ASG (complete hook), EC2 (describe)
+	// Lifecycle Lambda needs SSM (node disable), ASG (complete hook), EC2 (describe + CreateTags)
 	lifecycleFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:    jsii.String("LifecycleLambdaPerms"),
 		Effect: awsiam.Effect_ALLOW,
@@ -436,6 +482,7 @@ fi
 			"ssm:SendCommand",
 			"ssm:GetCommandInvocation",
 			"ec2:DescribeInstances",
+			"ec2:CreateTags",
 		),
 		Resources: jsii.Strings("*"),
 	}))
@@ -450,7 +497,7 @@ fi
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":       asg.AutoScalingGroupName(),
-			"MAX_DTNS":       jsii.String(fmt.Sprintf("%d", maxCapacity)),
+			"MAX_DTNS":       jsii.String(fmt.Sprintf("%d", maxDTNs)),
 			"REGION":         jsii.String(region),
 			"SECRETS_PREFIX": jsii.String(secretsPrefix),
 		},
@@ -476,7 +523,12 @@ fi
 		Code:         awslambda.Code_FromAsset(jsii.String("lambda/scalein"), nil),
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(5)),
 		MemorySize:   jsii.Number(128),
-		Environment:  commonLambdaEnv,
+		Environment: &map[string]*string{
+			"ASG_NAME":         asg.AutoScalingGroupName(),
+			"REGION":           jsii.String(region),
+			"SECRETS_PREFIX":   jsii.String(secretsPrefix),
+			"METRIC_NAMESPACE": jsii.String("ElasticGCS"),
+		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	scaleInFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
@@ -522,6 +574,36 @@ fi
 		Resources: jsii.Strings("*"),
 	}))
 
+	// Demand monitor Lambda: polls Globus Transfer API every 1 minute and
+	// publishes ElasticGCS/ActiveTransfers metric. This metric drives both
+	// the scale-out alarm (> 0) and the scale-in alarm (== 0 for 15 min).
+	demandMonitorFn := awslambda.NewFunction(stack, jsii.String("DemandMonitorFn"), &awslambda.FunctionProps{
+		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-demand-monitor-%s", region)),
+		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
+		Architecture: awslambda.Architecture_ARM_64(),
+		Handler:      jsii.String("bootstrap"),
+		Code:         awslambda.Code_FromAsset(jsii.String("lambda/demand_monitor"), nil),
+		Timeout:      awscdk.Duration_Minutes(jsii.Number(1)),
+		MemorySize:   jsii.Number(128),
+		Environment: &map[string]*string{
+			"REGION":            jsii.String(region),
+			"SECRETS_PREFIX":    jsii.String(secretsPrefix),
+			"ENDPOINT_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)),
+			"METRIC_NAMESPACE":  jsii.String("ElasticGCS"),
+		},
+		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+	})
+	demandMonitorFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:    jsii.String("DemandMonitorLambdaPerms"),
+		Effect: awsiam.Effect_ALLOW,
+		Actions: jsii.Strings(
+			"ssm:GetParameter",
+			"secretsmanager:GetSecretValue",
+			"cloudwatch:PutMetricData",
+		),
+		Resources: jsii.Strings("*"),
+	}))
+
 	// -------------------------------------------------------------------------
 	// EventBridge: ASG Lifecycle Hook Events → Lifecycle Lambda
 	// ASG publishes lifecycle events to EventBridge automatically.
@@ -555,16 +637,25 @@ fi
 	cacheEvictionRule.AddTarget(awseventstargets.NewLambdaFunction(cacheEvictionFn, nil))
 
 	// -------------------------------------------------------------------------
+	// EventBridge: Demand Monitor Schedule (every 1 minute)
+	// -------------------------------------------------------------------------
+	demandMonitorRule := awsevents.NewRule(stack, jsii.String("DemandMonitorRule"), &awsevents.RuleProps{
+		Description: jsii.String(fmt.Sprintf(
+			"Poll Globus Transfer API for active transfers every 1 min in %s", region)),
+		Schedule: awsevents.Schedule_Rate(awscdk.Duration_Minutes(jsii.Number(1))),
+	})
+	demandMonitorRule.AddTarget(awseventstargets.NewLambdaFunction(demandMonitorFn, nil))
+
+	// -------------------------------------------------------------------------
 	// CloudWatch Alarms + SNS → Scale-Out / Scale-In Lambdas
 	//
-	// Scale-out trigger: custom metric ElasticGCS/ActiveTransfers > 0
-	//   Published by the control node when it detects active Globus transfers.
-	//   Use the Globus webhook path (future) or a polling script on the control
-	//   node that calls `globus-connect-server endpoint show` and publishes.
+	// Both alarms use the ElasticGCS/ActiveTransfers metric published by the
+	// demand monitor Lambda. This is a precise signal: scale out when there
+	// are active transfers, scale in when there have been none for 15 minutes.
 	//
-	// Scale-in trigger: ASG NetworkIn < threshold for 15 consecutive minutes
-	//   When all running DTNs are idle, scale the ASG desired capacity back to 0.
-	//   Instances move to the warm pool (stopped) via ReuseOnScaleIn.
+	// TreatMissingData=NOT_BREACHING on both alarms: if the demand monitor
+	// Lambda is unavailable (e.g. during a deploy), don't trigger false
+	// scale-out or scale-in events.
 	// -------------------------------------------------------------------------
 	scaleOutTopic := awssns.NewTopic(stack, jsii.String("ScaleOutTopic"), &awssns.TopicProps{
 		TopicName:   jsii.String(fmt.Sprintf("elastic-gcs-scaleout-%s", region)),
@@ -579,8 +670,6 @@ fi
 	scaleInTopic.AddSubscription(awssnssubscriptions.NewLambdaSubscription(scaleInFn, nil))
 
 	// Scale-out alarm: fires when ElasticGCS/ActiveTransfers > 0 for 1 minute.
-	// The control node publishes this custom metric (implement in a monitoring
-	// script or Lambda that polls the Globus Transfer API for active tasks).
 	scaleOutAlarmName := fmt.Sprintf("elastic-gcs-scaleout-%s", region)
 	scaleOutAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ScaleOutAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName:        jsii.String(scaleOutAlarmName),
@@ -592,7 +681,7 @@ fi
 				"Region": jsii.String(region),
 			},
 			Period:    awscdk.Duration_Minutes(jsii.Number(1)),
-			Statistic: jsii.String("Sum"),
+			Statistic: jsii.String("Maximum"),
 		}),
 		Threshold:          jsii.Number(0),
 		ComparisonOperator: awscloudwatch.ComparisonOperator_GREATER_THAN_THRESHOLD,
@@ -601,27 +690,27 @@ fi
 	})
 	scaleOutAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleOutTopic))
 
-	// Scale-in alarm: fires when DTN aggregate NetworkIn is very low for 15 min.
-	// Threshold: 5MB aggregate over 5 min (3 periods = 15 min). If all running
-	// DTNs together receive < 5MB in 15 min, the endpoint is effectively idle.
+	// Scale-in alarm: fires when ElasticGCS/ActiveTransfers == 0 for 15 min.
+	// Three consecutive 5-minute periods with Maximum <= 0 means no active
+	// transfers for at least 15 minutes.
 	scaleInAlarmName := fmt.Sprintf("elastic-gcs-scalein-%s", region)
 	scaleInAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ScaleInAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName: jsii.String(scaleInAlarmName),
 		AlarmDescription: jsii.String(
-			"Trigger DTN scale-in when network throughput is below idle threshold"),
+			"Trigger DTN scale-in when no active Globus transfers for 15 minutes"),
 		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-			Namespace:  jsii.String("AWS/EC2"),
-			MetricName: jsii.String("NetworkIn"),
+			Namespace:  jsii.String("ElasticGCS"),
+			MetricName: jsii.String("ActiveTransfers"),
 			DimensionsMap: &map[string]*string{
-				"AutoScalingGroupName": jsii.String(asgName),
+				"Region": jsii.String(region),
 			},
 			Period:    awscdk.Duration_Minutes(jsii.Number(5)),
-			Statistic: jsii.String("Sum"),
+			Statistic: jsii.String("Maximum"),
 		}),
-		Threshold:          jsii.Number(5_000_000), // 5 MB aggregate
+		Threshold:          jsii.Number(0),
 		ComparisonOperator: awscloudwatch.ComparisonOperator_LESS_THAN_OR_EQUAL_TO_THRESHOLD,
-		EvaluationPeriods:  jsii.Number(3), // 15 minutes of low activity
-		TreatMissingData:   awscloudwatch.TreatMissingData_BREACHING, // no data = no DTNs needed
+		EvaluationPeriods:  jsii.Number(3), // 3 × 5min = 15 min with no active transfers
+		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING, // demand monitor down = don't scale in
 	})
 	scaleInAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleInTopic))
 
@@ -637,6 +726,11 @@ fi
 	awscdk.NewCfnOutput(stack, jsii.String("WarmPoolSize"), &awscdk.CfnOutputProps{
 		Value:       jsii.String(fmt.Sprintf("%d", warmPoolSize)),
 		Description: jsii.String("Number of DTN slots in the warm pool"),
+	})
+
+	awscdk.NewCfnOutput(stack, jsii.String("MaxDTNs"), &awscdk.CfnOutputProps{
+		Value:       jsii.String(fmt.Sprintf("%d", maxDTNs)),
+		Description: jsii.String("Maximum number of simultaneously active DTNs"),
 	})
 
 	awscdk.NewCfnOutput(stack, jsii.String("ScaleOutAlarmName"), &awscdk.CfnOutputProps{

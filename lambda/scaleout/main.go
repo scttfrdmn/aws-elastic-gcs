@@ -15,21 +15,55 @@ import (
 )
 
 // ScaleOutEvent is the payload for manual or alarm-triggered scale-out.
-// When triggered by CloudWatch alarm (via SNS), the SNS wrapper is stripped
-// by the Lambda runtime before we see this struct.
 type ScaleOutEvent struct {
 	Source    string `json:"source"`     // "cloudwatch", "globus_webhook", "manual"
 	Reason    string `json:"reason"`     // Human-readable reason
 	TargetDTN int    `json:"target_dtn"` // Specific DTN count to target (0 = auto +1)
 }
 
+// snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.
+type snsEnvelope struct {
+	Records []struct {
+		SNS struct {
+			Message string `json:"Message"`
+		} `json:"Sns"`
+	} `json:"Records"`
+}
+
+// parseEvent unwraps SNS envelope if present, then parses ScaleOutEvent.
+// CloudWatch alarms route through SNS, wrapping the inner message as a JSON
+// string in Records[0].Sns.Message.
+func parseEvent(rawEvent json.RawMessage) ScaleOutEvent {
+	var event ScaleOutEvent
+
+	// Try SNS envelope first
+	var env snsEnvelope
+	if err := json.Unmarshal(rawEvent, &env); err == nil &&
+		len(env.Records) > 0 && env.Records[0].SNS.Message != "" {
+		// Inner message is another JSON string — parse it
+		if err := json.Unmarshal([]byte(env.Records[0].SNS.Message), &event); err != nil {
+			// CloudWatch alarm SNS payloads don't have our fields — that's OK
+			event.Source = "cloudwatch"
+			event.Reason = "alarm triggered"
+		}
+		return event
+	}
+
+	// Fall back to direct parse (manual invocation or webhook)
+	if err := json.Unmarshal(rawEvent, &event); err != nil {
+		event.Source = "unknown"
+		event.Reason = "parse error"
+	}
+	return event
+}
+
 // handler processes scale-out triggers by increasing ASG desired capacity.
 //
 // Logic:
-//   1. Get current ASG desired capacity
-//   2. If target specified, use that; otherwise increment by 1
-//   3. Cap at MAX_DTNS
-//   4. Call SetDesiredCapacity — ASG resumes a warm pool instance
+//  1. Get current ASG desired capacity
+//  2. If target specified, use that; otherwise increment by 1
+//  3. Cap at MAX_DTNS
+//  4. Call SetDesiredCapacity — ASG resumes a warm pool instance
 func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	asgName := os.Getenv("ASG_NAME")
 	region := os.Getenv("AWS_REGION")
@@ -38,15 +72,7 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		maxDTNs = 3
 	}
 
-	// Parse event — may be wrapped in SNS envelope from CloudWatch alarm
-	var event ScaleOutEvent
-	// Try direct parse first
-	if err := json.Unmarshal(rawEvent, &event); err != nil {
-		// Ignore parse errors — alarm triggers won't have our fields
-		event.Source = "unknown"
-		event.Reason = "parse error"
-	}
-
+	event := parseEvent(rawEvent)
 	log.Printf("Scale-out triggered: source=%s reason=%s region=%s asg=%s",
 		event.Source, event.Reason, region, asgName)
 

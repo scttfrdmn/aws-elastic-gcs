@@ -13,17 +13,22 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
+
+const warmPoolEntryTagKey = "elastic-gcs:warm-pool-entry-time"
 
 // handler terminates warm pool instances that have been stopped too long.
 //
 // Triggered by: EventBridge scheduled rule (daily)
 //
 // Logic:
-//   1. List instances in ASG warm pool with state "Warmed:Stopped"
-//   2. For each, check the EC2 instance's StateTransitionReason / launch time
-//   3. If stopped for longer than CACHE_EVICTION_HOURS → terminate it
-//   4. ASG automatically launches a replacement (cold boot from AMI)
+//  1. List instances in ASG warm pool with state "Warmed:Stopped"
+//  2. For each, check the elastic-gcs:warm-pool-entry-time EC2 tag (set by
+//     the lifecycle Lambda when the instance was scaled in to the warm pool).
+//     Falls back to LaunchTime if the tag is absent.
+//  3. If stopped for longer than CACHE_EVICTION_HOURS → terminate it
+//  4. ASG automatically launches a replacement (cold boot from AMI)
 //
 // Note: We do NOT run node cleanup before termination here. The GCS node
 // was already disabled when the instance moved to Warmed:Stopped (via
@@ -77,7 +82,7 @@ func handler(ctx context.Context, _ interface{}) error {
 
 	log.Printf("Checking %d stopped warm pool instances for eviction (TTL=%dh)", len(stoppedIDs), evictionHours)
 
-	// Describe EC2 instances to get launch time / state transition time
+	// Describe EC2 instances to get tags and launch time
 	ec2Instances, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: stoppedIDs,
 	})
@@ -91,17 +96,16 @@ func handler(ctx context.Context, _ interface{}) error {
 	for _, reservation := range ec2Instances.Reservations {
 		for _, inst := range reservation.Instances {
 			instanceID := aws.ToString(inst.InstanceId)
-			launchTime := aws.ToTime(inst.LaunchTime)
 
-			// Use launch time as proxy for "time in warm pool".
-			// Instances that were launched long ago and are still stopped are
-			// candidates for eviction. A more precise approach would track the
-			// time they entered Warmed:Stopped, but launch time is sufficient
-			// for the 72-hour TTL use case.
-			age := time.Since(launchTime)
-			log.Printf("Instance %s: launch=%s age=%s", instanceID, launchTime.Format(time.RFC3339), age.Round(time.Minute))
+			// Prefer warm-pool entry time tag (set by lifecycle Lambda on scale-in).
+			// Fall back to launch time if tag is absent (instances created before this fix).
+			entryTime := warmPoolEntryTime(inst.Tags, aws.ToTime(inst.LaunchTime))
 
-			if launchTime.Before(evictionCutoff) {
+			age := time.Since(entryTime)
+			log.Printf("Instance %s: warm-pool-entry=%s age=%s",
+				instanceID, entryTime.Format(time.RFC3339), age.Round(time.Minute))
+
+			if entryTime.Before(evictionCutoff) {
 				log.Printf("Evicting %s (age %s > TTL %dh)", instanceID, age.Round(time.Hour), evictionHours)
 				_, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 					InstanceIds: []string{instanceID},
@@ -118,6 +122,20 @@ func handler(ctx context.Context, _ interface{}) error {
 
 	log.Printf("Cache eviction complete: checked=%d evicted=%d", len(stoppedIDs), evicted)
 	return nil
+}
+
+// warmPoolEntryTime returns the time the instance entered the warm pool.
+// Uses the elastic-gcs:warm-pool-entry-time tag when present (set by the
+// lifecycle Lambda), falling back to the EC2 launch time if the tag is absent.
+func warmPoolEntryTime(tags []ec2types.Tag, launchTime time.Time) time.Time {
+	for _, tag := range tags {
+		if aws.ToString(tag.Key) == warmPoolEntryTagKey {
+			if t, err := time.Parse(time.RFC3339, aws.ToString(tag.Value)); err == nil {
+				return t
+			}
+		}
+	}
+	return launchTime
 }
 
 func main() {

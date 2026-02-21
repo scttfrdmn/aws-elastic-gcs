@@ -1,4 +1,4 @@
-.PHONY: build synth deploy-control deploy-dtn test benchmark clean ami
+.PHONY: build synth deploy-control deploy-dtn deploy-all destroy test test-integration benchmark ami status clean
 
 # === Build ===
 
@@ -10,6 +10,7 @@ build-lambdas:
 	GOOS=linux GOARCH=arm64 go build -o lambda/scaleout/bootstrap ./lambda/scaleout/
 	GOOS=linux GOARCH=arm64 go build -o lambda/scalein/bootstrap ./lambda/scalein/
 	GOOS=linux GOARCH=arm64 go build -o lambda/cache_eviction/bootstrap ./lambda/cache_eviction/
+	GOOS=linux GOARCH=arm64 go build -o lambda/demand_monitor/bootstrap ./lambda/demand_monitor/
 
 build-ctl:
 	@echo "Building CLI tool..."

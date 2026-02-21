@@ -13,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 )
@@ -29,16 +31,18 @@ type LifecycleEvent struct {
 // Handler processes ASG lifecycle hook events for DTN nodes.
 //
 // Scale-out flow (LAUNCHING):
-//   The boot script (dtn_boot.sh) handles its own lifecycle completion via
-//   CompleteLifecycleAction when the GCS node becomes active. This Lambda is
-//   a no-op for LAUNCHING events since the boot script signals first.
+//
+//	The boot script (dtn_boot.sh) handles its own lifecycle completion via
+//	CompleteLifecycleAction when the GCS node becomes active. This Lambda is
+//	a no-op for LAUNCHING events since the boot script signals first.
 //
 // Scale-in flow (TERMINATING):
-//   1. Receives the lifecycle hook event before the instance stops
-//   2. Sends SSM Run Command to run: globus-connect-server node disable
-//   3. Waits for command completion (up to 90 seconds)
-//   4. Signals CONTINUE — ASG then stops/terminates the instance
-//   5. systemd ExecStop also runs dtn_shutdown.sh (idempotent second disable)
+//  1. Receives the lifecycle hook event before the instance stops
+//  2. Sends SSM Run Command to run: globus-connect-server node disable
+//  3. Waits for command completion (up to 90 seconds)
+//  4. Tags the instance with elastic-gcs:warm-pool-entry-time (for TTL eviction)
+//  5. Signals CONTINUE — ASG then stops/terminates the instance
+//  6. systemd ExecStop also runs dtn_shutdown.sh (idempotent second disable)
 func handler(ctx context.Context, event events.CloudWatchEvent) error {
 	var lifecycle LifecycleEvent
 	if err := json.Unmarshal(event.Detail, &lifecycle); err != nil {
@@ -57,10 +61,11 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 	}
 	asgClient := autoscaling.NewFromConfig(cfg)
 	ssmClient := ssm.NewFromConfig(cfg)
+	ec2Client := ec2.NewFromConfig(cfg)
 
 	switch lifecycle.LifecycleTransition {
 	case "autoscaling:EC2_INSTANCE_TERMINATING":
-		return handleScaleIn(ctx, ssmClient, asgClient, lifecycle)
+		return handleScaleIn(ctx, ssmClient, asgClient, ec2Client, lifecycle)
 	case "autoscaling:EC2_INSTANCE_LAUNCHING":
 		// Boot script handles its own completion. Lambda is a no-op here.
 		log.Printf("Scale-out LAUNCHING: boot script handles lifecycle, no Lambda action needed")
@@ -71,10 +76,11 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 	}
 }
 
-// handleScaleIn disables the GCS node via SSM before allowing the instance to stop.
+// handleScaleIn disables the GCS node via SSM before allowing the instance to stop,
+// then tags the instance with the time it entered the warm pool (for TTL eviction).
 // Preventing a node from stopping while still registered in GCS DNS avoids
 // the "endpoint unreliable" state documented in the GCS docs.
-func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autoscaling.Client, event LifecycleEvent) error {
+func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autoscaling.Client, ec2Client *ec2.Client, event LifecycleEvent) error {
 	log.Printf("Scale-in: disabling GCS node on %s", event.EC2InstanceID)
 
 	// Send node disable command via SSM Run Command.
@@ -93,6 +99,7 @@ func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autosc
 		// SSM may fail if agent isn't running (e.g. already stopping).
 		// The systemd ExecStop will run dtn_shutdown.sh when the instance stops.
 		log.Printf("WARNING: SSM SendCommand failed: %v — relying on systemd ExecStop for node disable", err)
+		tagWarmPoolEntry(ctx, ec2Client, event.EC2InstanceID)
 		return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 	}
 
@@ -125,19 +132,43 @@ func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autosc
 				output = output[:200] + "..."
 			}
 			log.Printf("Node disable output: %s", output)
+			tagWarmPoolEntry(ctx, ec2Client, event.EC2InstanceID)
 			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 
 		case ssmtypes.CommandInvocationStatusTimedOut,
 			ssmtypes.CommandInvocationStatusCancelled,
 			ssmtypes.CommandInvocationStatusCancelling:
 			log.Printf("SSM command in terminal error state: %s — proceeding with CONTINUE", inv.Status)
+			tagWarmPoolEntry(ctx, ec2Client, event.EC2InstanceID)
 			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 		}
 		// InProgress / Pending — keep polling
 	}
 
 	log.Printf("Timed out waiting for SSM node disable — proceeding with CONTINUE")
+	tagWarmPoolEntry(ctx, ec2Client, event.EC2InstanceID)
 	return completeLifecycle(ctx, asgClient, event, "CONTINUE")
+}
+
+// tagWarmPoolEntry records the time this instance entered the warm pool.
+// The cache eviction Lambda uses this tag to calculate the correct TTL,
+// since LaunchTime does not reset when an instance is stopped and resumed.
+func tagWarmPoolEntry(ctx context.Context, ec2Client *ec2.Client, instanceID string) {
+	entryTime := time.Now().UTC().Format(time.RFC3339)
+	_, err := ec2Client.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{instanceID},
+		Tags: []ec2types.Tag{
+			{
+				Key:   aws.String("elastic-gcs:warm-pool-entry-time"),
+				Value: aws.String(entryTime),
+			},
+		},
+	})
+	if err != nil {
+		log.Printf("WARNING: failed to tag instance %s with warm-pool-entry-time: %v", instanceID, err)
+	} else {
+		log.Printf("Tagged instance %s warm-pool-entry-time=%s", instanceID, entryTime)
+	}
 }
 
 // completeLifecycle signals the ASG lifecycle hook with the given result (CONTINUE or ABANDON).

@@ -72,6 +72,10 @@ func main() {
 		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
 			fmt.Sscanf(h, "%d", &cacheHours)
 		}
+		maxDTNs := 0
+		if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
+			fmt.Sscanf(m, "%d", &maxDTNs)
+		}
 		dtnStackName := fmt.Sprintf("ElasticGCS-DTNPool-%s", region.Name)
 		stacks.NewDTNPoolStack(app, dtnStackName, &stacks.DTNPoolStackProps{
 			StackProps: awscdk.StackProps{
@@ -82,6 +86,7 @@ func main() {
 			ControlStack:       controlStack,
 			OpenDataBuckets:    regionBuckets,
 			CacheEvictionHours: cacheHours,
+			MaxDTNs:            maxDTNs,
 		})
 	}
 

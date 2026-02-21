@@ -10,8 +10,9 @@ import (
 type RegionConfig struct {
 	Name            string `yaml:"name"`
 	ControlInstance string `yaml:"control_instance"`
-	DTNInstance      string `yaml:"dtn_instance"`
+	DTNInstance     string `yaml:"dtn_instance"`
 	WarmPoolSize    int    `yaml:"warm_pool_size"`
+	MaxDTNs         int    `yaml:"max_dtns"`
 	KeyPairName     string `yaml:"key_pair_name"`
 }
 
