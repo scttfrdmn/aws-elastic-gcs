@@ -9,6 +9,10 @@ The primary use case is fronting the **AWS Open Data Registry** with Globus endp
 **Owner:** Scott Friedman (github.com/scttfrdmn)
 **Target conference:** GlobusWorld 2026 (Chicago Apr 21-22, Raleigh Jun 2-3)
 
+**Globus endpoint owner identity:** `scofri@globusid.org`
+**Globus subscription ID:** `1e8d2d5b-d29f-46a1-b152-059a7c3c9971`
+(Always use `scofri@globusid.org` when running `globus-connect-server login` — NOT `scttfrdmn@globusid.org`)
+
 ## Project Tracking
 
 All work is tracked in GitHub:
