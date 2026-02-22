@@ -86,6 +86,18 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	s.Vpc = vpc
 
 	// -------------------------------------------------------------------------
+	// S3 Gateway Endpoint
+	// Routes S3 traffic from DTNs through the VPC gateway endpoint instead of
+	// over the public internet. S3 gateway endpoints are free (no hourly charge,
+	// no data processing charge) and eliminate S3 data transfer costs for traffic
+	// that stays within the same region. For DTNs reading Open Data buckets in
+	// the same region this is a significant cost saving at high throughput.
+	// -------------------------------------------------------------------------
+	vpc.AddGatewayEndpoint(jsii.String("S3Endpoint"), &awsec2.GatewayVpcEndpointOptions{
+		Service: awsec2.GatewayVpcEndpointAwsService_S3(),
+	})
+
+	// -------------------------------------------------------------------------
 	// Security Group
 	// GCS requires:
 	//   TCP 443 inbound:         GCS Manager (HTTPS control channel)
