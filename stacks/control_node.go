@@ -337,6 +337,29 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	s.ControlInstance = instance
 
 	// -------------------------------------------------------------------------
+	// Elastic IP for the control node.
+	// Without an EIP, every stop/start (including CDK deploys that change
+	// UserData) assigns a new ephemeral public IP. GCS nodes are registered
+	// by IP in Globus DNS, so an IP change requires a manual `node update`.
+	// An EIP costs nothing when attached to a running instance (~$3.60/mo if
+	// stopped), and the control node should always be running.
+	// -------------------------------------------------------------------------
+	eip := awsec2.NewCfnEIP(stack, jsii.String("ControlNodeEIP"), &awsec2.CfnEIPProps{
+		Tags: &[]*awscdk.CfnTag{
+			{Key: jsii.String("Name"), Value: jsii.String(fmt.Sprintf("elastic-gcs-control-%s", region))},
+			{Key: jsii.String("elastic-gcs:region"), Value: jsii.String(region)},
+			{Key: jsii.String("elastic-gcs:role"), Value: jsii.String("control")},
+		},
+	})
+
+	eipAssoc := awsec2.NewCfnEIPAssociation(stack, jsii.String("ControlNodeEIPAssoc"), &awsec2.CfnEIPAssociationProps{
+		AllocationId: eip.AttrAllocationId(),
+		InstanceId:   instance.InstanceId(),
+	})
+	// Explicit dependency ensures the instance exists before association.
+	eipAssoc.AddDependency(instance.Node().DefaultChild().(awscdk.CfnResource))
+
+	// -------------------------------------------------------------------------
 	// Stack Outputs
 	// VpcId and SecurityGroupId are consumed by the DTN Pool stack.
 	// InstanceId and PublicIP are for operational reference.
@@ -360,8 +383,8 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	})
 
 	awscdk.NewCfnOutput(stack, jsii.String("ControlNodePublicIp"), &awscdk.CfnOutputProps{
-		Value:       instance.InstancePublicIp(),
-		Description: jsii.String("Control node public IP — SSH and Globus Manager endpoint"),
+		Value:       eip.AttrPublicIp(),
+		Description: jsii.String("Control node Elastic IP — stable across stop/start and CDK deploys"),
 	})
 
 	awscdk.NewCfnOutput(stack, jsii.String("SecretsPrefix"), &awscdk.CfnOutputProps{
