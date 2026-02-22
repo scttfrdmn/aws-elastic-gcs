@@ -128,11 +128,28 @@ if [ -d "$GCS_STATE_DIR" ] && [ -s "$GCS_STATE_DIR/info.json" ]; then
     systemctl start globus-connect-server 2>/dev/null || true
     sleep 3
 
-    # Use node update --ip-address to both correct the IP (if the EIP's public
-    # address has changed since first boot) and enable the node in one step.
-    # The node ID is read from the Secrets Manager identity file for this slot —
-    # the same JSON that was imported during first boot, so it's always accurate.
-    NODE_ID=$(get_secret "${SECRETS_PREFIX}/node-slot-${DTN_SLOT_NUMBER}" | jq -r '.node_id')
+    # node update requires GCS CLI auth (client credentials).
+    # The endpoint ID comes from the local info.json (always accurate).
+    ENDPOINT_ID=$(jq -r '.endpoint_id' "$GCS_STATE_DIR/info.json")
+    export GCS_CLI_CLIENT_ID=$(get_secret "${SECRETS_PREFIX}/globus-client-id")
+    export GCS_CLI_CLIENT_SECRET=$(get_secret "${SECRETS_PREFIX}/globus-client-secret")
+    export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
+
+    # Use node update --ip-address to both correct the IP (changes every
+    # resume since we no longer use EIPs) and enable the node in one step.
+    # The node ID is read from the persistent file written at first boot,
+    # ensuring we always update the correct node regardless of slot claim order.
+    NODE_ID_FILE="/var/lib/elastic-gcs/node-id"
+    if [ -s "$NODE_ID_FILE" ]; then
+        NODE_ID=$(cat "$NODE_ID_FILE")
+    else
+        # Fallback: derive node_id from the claimed slot's Secrets Manager entry.
+        # This can mismatch if the instance claims a different slot than first boot;
+        # see GitHub issue #16. The node-id file prevents this on subsequent resumes.
+        NODE_ID=$(get_secret "${SECRETS_PREFIX}/node-slot-${DTN_SLOT_NUMBER}" | jq -r '.node_id')
+        echo "WARNING: node-id file missing, falling back to slot $DTN_SLOT_NUMBER node_id"
+    fi
+
     echo ">>> Running: globus-connect-server node update $NODE_ID --ip-address $PUBLIC_IP --enable"
     globus-connect-server node update "$NODE_ID" \
         --ip-address "$PUBLIC_IP" \
@@ -163,6 +180,12 @@ else
 
     echo ">>> Retrieving node identity for slot $DTN_SLOT_NUMBER..."
     get_secret "${SECRETS_PREFIX}/node-slot-${DTN_SLOT_NUMBER}" > "$NODE_IDENTITY_FILE"
+
+    # Persist the node_id so the resume path can find it regardless of
+    # which slot this instance claims on a subsequent boot (fixes issue #16).
+    NODE_ID=$(jq -r '.node_id' "$NODE_IDENTITY_FILE")
+    mkdir -p /var/lib/elastic-gcs
+    echo "$NODE_ID" > /var/lib/elastic-gcs/node-id
 
     echo ">>> Running: globus-connect-server node setup --import-node (may take several minutes)"
     globus-connect-server node setup \
