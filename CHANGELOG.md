@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-22
+
+### Fixed
+- `control_node_init.sh`: IMDS token TTL increased from 60 s to 3600 s — the 60 s TTL
+  expired during the multi-minute setup sequence, leaving `INSTANCE_ID` empty and causing
+  `aws ssm put-parameter` to fail with `ValidationException` (#18)
+- `control_node_init.sh`: Storage gateway/collection idempotency — skip creating a storage
+  gateway if one with the same display name already exists, preventing duplicate collections
+  on every control node replacement
+- `control_node_init.sh`: DTN node identity idempotency — skip `node create` for slots
+  where a valid `node_id` already exists in Secrets Manager, preventing orphaned nodes on
+  control node replacement
+- `stacks/control_node.go`: Comment clarifies GCS 5.4 is x86-64 only; t4g (Graviton) is
+  not usable until Globus publishes aarch64 EL9 packages
+
+### Validated
+- End-to-end transfer SUCCEEDED after control node replacement:
+  `1000genomes/release/20130502/20140625_related_individuals.txt`
+  (1,168 bytes, task `d0875190-102b-11f1-811a-025da3873719`)
+
 ## [0.2.1] - 2026-02-22
 
 ### Added

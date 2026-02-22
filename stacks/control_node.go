@@ -296,10 +296,10 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 
 	// -------------------------------------------------------------------------
 	// EC2 Instance for control node.
-	// GCS 5.4 requires x86-64 and 8GB RAM minimum. The instance type comes from
-	// regions.yaml (control_instance field); default is t3a.large (2 vCPU, 8GB).
-	// AMI: Rocky Linux 9 x86-64 (RHEL 9 compatible, supported by GCS 5.4).
-	// Rocky Linux publishes official AMIs via AWS SSM parameters.
+	// GCS 5.4 only publishes RPM packages for x86-64 (EL8/EL9 aarch64 returns 404).
+	// Default: t3a.large (AMD EPYC, 2 vCPU, 8GB) — cheapest x86-64 meeting 8GB minimum.
+	// Note: t4g (Graviton) is NOT usable until Globus publishes aarch64 EL9 packages.
+	// Instance type comes from regions.yaml (control_instance field).
 	// -------------------------------------------------------------------------
 	controlInstanceStr := props.RegionConfig.ControlInstance
 	if controlInstanceStr == "" {

@@ -42,7 +42,7 @@ if [ -s "$GCS_INFO" ]; then
 
     # Get current public IP via IMDSv2
     IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-        -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 3600")
     PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
         http://169.254.169.254/latest/meta-data/public-ipv4)
     INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
@@ -177,7 +177,7 @@ echo ">>> Setting up control node..."
 
 # Get public IP via IMDSv2
 IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-    -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 3600")
 PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
     http://169.254.169.254/latest/meta-data/public-ipv4)
 
@@ -219,10 +219,19 @@ echo ">>> Configuring S3 storage gateways..."
 # OPEN_DATA_BUCKETS_JSON is a JSON array like:
 # [{"name":"1000 Genomes","bucket":"1000genomes","requester_pays":false}]
 
+# Idempotency: fetch existing storage gateways once; skip buckets already configured.
+EXISTING_GWS=$(globus-connect-server storage-gateway list -F json 2>/dev/null | jq -r '.[].display_name' || true)
+
 echo "$OPEN_DATA_BUCKETS_JSON" | jq -c '.[]' | while read -r bucket_config; do
     BUCKET_NAME=$(echo "$bucket_config" | jq -r '.name')
     BUCKET_S3=$(echo "$bucket_config" | jq -r '.bucket')
     REQUESTER_PAYS=$(echo "$bucket_config" | jq -r '.requester_pays')
+
+    # Skip if a storage gateway with this display_name already exists.
+    if echo "$EXISTING_GWS" | grep -qF "$BUCKET_NAME"; then
+        echo ">>> Storage gateway already exists for: $BUCKET_NAME — skipping."
+        continue
+    fi
 
     echo ">>> Creating storage gateway for: $BUCKET_NAME ($BUCKET_S3)"
 
@@ -258,11 +267,26 @@ echo "$OPEN_DATA_BUCKETS_JSON" | jq -c '.[]' | while read -r bucket_config; do
 done
 
 # --- 7. Pre-create DTN node identities ---
-# TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible EIP slot needs an identity.
-echo ">>> Pre-creating $TOTAL_SLOTS DTN node identities..."
+# TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible slot needs an identity.
+# Idempotency: if a slot secret already exists AND its node_id is registered on this
+# endpoint, reuse it rather than creating an orphaned node on every control node replacement.
+echo ">>> Ensuring $TOTAL_SLOTS DTN node identities..."
 
 for i in $(seq 1 "$TOTAL_SLOTS"); do
     NODE_FILE="/tmp/dtn-slot-${i}.json"
+
+    # Check if the slot secret already exists with a valid node_id for this endpoint.
+    EXISTING_SECRET=$(aws secretsmanager get-secret-value \
+        --secret-id "${SECRETS_PREFIX}/node-slot-${i}" \
+        --query SecretString --output text --region "$AWS_REGION" 2>/dev/null || true)
+
+    if [ -n "$EXISTING_SECRET" ]; then
+        EXISTING_NODE_ID=$(echo "$EXISTING_SECRET" | jq -r '.node_id // empty' 2>/dev/null || true)
+        if [ -n "$EXISTING_NODE_ID" ]; then
+            echo ">>> Node identity for slot $i already exists (node_id: $EXISTING_NODE_ID) — skipping."
+            continue
+        fi
+    fi
 
     echo ">>> Creating node identity for DTN slot $i..."
     globus-connect-server node create \
