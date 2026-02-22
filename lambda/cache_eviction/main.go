@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 const warmPoolEntryTagKey = "elastic-gcs:warm-pool-entry-time"
@@ -52,6 +53,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	}
 	asgClient := autoscaling.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(cfg)
 
 	// List warm pool instances
 	warmPool, err := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
@@ -112,9 +114,28 @@ func handler(ctx context.Context, _ interface{}) error {
 				})
 				if err != nil {
 					log.Printf("WARNING: Failed to terminate %s: %v", instanceID, err)
+					continue
+				}
+				log.Printf("Terminated warm pool instance %s", instanceID)
+				evicted++
+
+				// Release the SSM slot lock for this instance. The instance was
+				// terminated hard — its shutdown script may not have run — so the
+				// lock could be orphaned. Read the slot number from the EC2 tag
+				// set by the boot script and delete the corresponding parameter.
+				slotNum := slotNumber(inst.Tags)
+				if slotNum != "" {
+					lockParam := fmt.Sprintf("/elastic-gcs/%s/slot-lock/%s", region, slotNum)
+					_, ssmErr := ssmClient.DeleteParameter(ctx, &ssm.DeleteParameterInput{
+						Name: aws.String(lockParam),
+					})
+					if ssmErr != nil {
+						log.Printf("WARNING: Could not release slot lock %s for %s: %v", lockParam, instanceID, ssmErr)
+					} else {
+						log.Printf("Released slot lock %s for terminated instance %s", lockParam, instanceID)
+					}
 				} else {
-					log.Printf("Terminated warm pool instance %s", instanceID)
-					evicted++
+					log.Printf("WARNING: No elastic-gcs:slot tag on %s — slot lock not released", instanceID)
 				}
 			}
 		}
@@ -122,6 +143,17 @@ func handler(ctx context.Context, _ interface{}) error {
 
 	log.Printf("Cache eviction complete: checked=%d evicted=%d", len(stoppedIDs), evicted)
 	return nil
+}
+
+// slotNumber returns the DTN slot number from the elastic-gcs:slot EC2 tag,
+// or an empty string if the tag is absent.
+func slotNumber(tags []ec2types.Tag) string {
+	for _, tag := range tags {
+		if aws.ToString(tag.Key) == "elastic-gcs:slot" {
+			return aws.ToString(tag.Value)
+		}
+	}
+	return ""
 }
 
 // warmPoolEntryTime returns the time the instance entered the warm pool.

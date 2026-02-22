@@ -37,7 +37,6 @@ type DTNPoolStackProps struct {
 }
 
 // NewDTNPoolStack creates the Phase 3 DTN pool infrastructure:
-//   - Elastic IPs (one per warm pool slot + one per max active DTN)
 //   - IAM role for DTN instances
 //   - EC2 Launch Template with dtn_boot.sh UserData
 //   - Auto Scaling Group (min=0, max=MaxDTNs) with stopped warm pool
@@ -72,9 +71,9 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		}
 	}
 
-	// Total EIP slots = maxDTNs (InService) + warmPoolSize (Warmed:Stopped).
-	// Each running or stopped DTN holds its EIP even when stopped, so all
-	// slots need an EIP simultaneously.
+	// Total slots = maxDTNs (InService) + warmPoolSize (Warmed:Stopped).
+	// Each slot needs a pre-created GCS node identity in Secrets Manager
+	// and an SSM slot-lock parameter path (/elastic-gcs/{region}/slot-lock/{N}).
 	totalSlots := maxDTNs + warmPoolSize
 
 	cacheEvictionHours := props.CacheEvictionHours
@@ -85,26 +84,6 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
 	// without relying on CDK tokens.
 	asgName := fmt.Sprintf("elastic-gcs-dtn-%s", region)
-
-	// -------------------------------------------------------------------------
-	// Elastic IPs
-	// One EIP per possible instance slot (maxDTNs InService + warmPoolSize stopped).
-	// Tagged with slot number so the DTN boot script can discover and claim
-	// one at runtime (tag-based association).
-	// Free when attached to a running instance; $3.60/month when unattached.
-	// -------------------------------------------------------------------------
-	for i := 1; i <= totalSlots; i++ {
-		awsec2.NewCfnEIP(stack, jsii.String(fmt.Sprintf("DTNSlot%dEIP", i)), &awsec2.CfnEIPProps{
-			Domain: jsii.String("vpc"),
-			Tags: &[]*awscdk.CfnTag{
-				{Key: jsii.String("Name"), Value: jsii.String(fmt.Sprintf("elastic-gcs-dtn-%s-slot%d", region, i))},
-				{Key: jsii.String("elastic-gcs:region"), Value: jsii.String(region)},
-				{Key: jsii.String("elastic-gcs:role"), Value: jsii.String("dtn")},
-				{Key: jsii.String("elastic-gcs:slot"), Value: jsii.String(fmt.Sprintf("%d", i))},
-				{Key: jsii.String("elastic-gcs:asg"), Value: jsii.String(asgName)},
-			},
-		})
-	}
 
 	// -------------------------------------------------------------------------
 	// DTN IAM Role
@@ -157,17 +136,27 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		),
 	}))
 
-	// EC2: associate EIP at boot, describe available EIPs for slot discovery
+	// EC2: tag this instance with its slot number (for cache eviction cleanup)
 	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("EIPAndDescribe"),
+		Sid:       jsii.String("EC2CreateTags"),
+		Effect:    awsiam.Effect_ALLOW,
+		Actions:   jsii.Strings("ec2:CreateTags"),
+		Resources: jsii.Strings("*"),
+	}))
+
+	// SSM slot-lock: atomic slot claim (PutParameter without --overwrite) and
+	// release (DeleteParameter) on shutdown. Read access is already covered by
+	// SSMParameterRead below (used to check for an existing lock on restart).
+	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:    jsii.String("SlotLockSSM"),
 		Effect: awsiam.Effect_ALLOW,
 		Actions: jsii.Strings(
-			"ec2:AssociateAddress",
-			"ec2:DescribeAddresses",
-			"ec2:DescribeInstances",
-			"ec2:DescribeTags",
+			"ssm:PutParameter",
+			"ssm:DeleteParameter",
 		),
-		Resources: jsii.Strings("*"),
+		Resources: jsii.Strings(
+			fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/slot-lock/*", region, region),
+		),
 	}))
 
 	// AutoScaling: signal lifecycle hook completion from boot script
@@ -227,9 +216,9 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	bootScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(bootScriptBytes))
 	shutdownScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(shutdownScriptBytes))
 
-	// Systemd service with region/secrets env vars baked in. DTN_SLOT_NUMBER
-	// and EIP_ALLOCATION_ID are NOT included — the boot script discovers them
-	// at runtime via EC2 tag-based EIP discovery.
+	// Systemd service with region/secrets/slot-count env vars baked in.
+	// DTN_SLOT_NUMBER is NOT included — the boot script claims a slot at runtime
+	// via SSM Parameter Store atomic locking (PutParameter without --overwrite).
 	svcContent := fmt.Sprintf(`[Unit]
 Description=Elastic GCS DTN Lifecycle Manager
 After=network-online.target
@@ -244,10 +233,11 @@ TimeoutStartSec=600
 TimeoutStopSec=300
 Environment=AWS_REGION=%s
 Environment=SECRETS_PREFIX=%s
+Environment=TOTAL_SLOTS=%d
 
 [Install]
 WantedBy=multi-user.target
-`, region, secretsPrefix)
+`, region, secretsPrefix, totalSlots)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
 
 	ud := awsec2.UserData_ForLinux(nil)
@@ -572,6 +562,14 @@ fi
 			"cloudwatch:PutMetricData",
 		),
 		Resources: jsii.Strings("*"),
+	}))
+	// Cache eviction also needs to release slot locks for instances it terminates,
+	// since those instances may not run their shutdown script before being killed.
+	cacheEvictionFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:       jsii.String("CacheEvictionSlotLockCleanup"),
+		Effect:    awsiam.Effect_ALLOW,
+		Actions:   jsii.Strings("ssm:DeleteParameter"),
+		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/slot-lock/*", region, region)),
 	}))
 
 	// Demand monitor Lambda: polls Globus Transfer API every 1 minute and

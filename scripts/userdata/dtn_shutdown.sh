@@ -40,4 +40,20 @@ echo ">>> Node disabled in ${DISABLE_MS}ms"
 # Note: DNS propagation takes up to 2 minutes per Globus docs.
 # The ASG lifecycle hook should allow for this delay.
 echo ">>> Node disabled. DNS propagation may take up to 2 minutes."
+
+# Release the SSM slot lock so the slot can be claimed by the next instance.
+SLOT_FILE="/var/lib/elastic-gcs/slot"
+if [ -f "$SLOT_FILE" ]; then
+    DTN_SLOT_NUMBER=$(cat "$SLOT_FILE")
+    echo ">>> Releasing SSM slot lock for slot $DTN_SLOT_NUMBER..."
+    aws ssm delete-parameter \
+        --name "/elastic-gcs/${AWS_REGION}/slot-lock/${DTN_SLOT_NUMBER}" \
+        --region "$AWS_REGION" 2>/dev/null \
+        && echo ">>> Slot $DTN_SLOT_NUMBER released." \
+        || echo "WARNING: Failed to release slot lock (may already be gone)."
+    rm -f "$SLOT_FILE"
+else
+    echo ">>> No slot file found — slot lock not released (first boot or already cleaned up)."
+fi
+
 echo "=== DTN Shutdown Complete ==="

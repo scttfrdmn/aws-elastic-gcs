@@ -48,70 +48,68 @@ get_metadata() {
 INSTANCE_ID=$(get_metadata "instance-id")
 echo "Instance ID: $INSTANCE_ID"
 
-# --- Tag-based EIP discovery and association ---
-# EIPs are tagged with elastic-gcs:role=dtn, elastic-gcs:slot=N, elastic-gcs:region=<region>.
-# On first attempt: find unassociated EIP and claim it (atomic via AssociateAddress).
-# On retry (service restart on same instance): EIP is already associated — detect and reuse.
-# This handles concurrent boot scenarios gracefully (EC2 AssociateAddress is atomic).
-echo ">>> Discovering available Elastic IP for slot assignment..."
+# --- SSM-based slot claim ---
+# Claim a DTN slot by atomically writing an SSM parameter. PutParameter without
+# --overwrite fails with ParameterAlreadyExists if the slot is taken, making it
+# atomic across concurrent boot attempts (same guarantee as EC2 AssociateAddress).
+#
+# On service restart on the same instance, the lock already has our instance ID —
+# detect and reuse it rather than trying to claim a new slot.
+#
+# Slot number is saved to /var/lib/elastic-gcs/slot for the shutdown script.
+echo ">>> Claiming DTN slot via SSM Parameter Store..."
 
-EIP_ALLOCATION_ID=""
+SLOT_LOCK_PREFIX="/elastic-gcs/${AWS_REGION}/slot-lock"
 DTN_SLOT_NUMBER=""
 
-# First: check if this instance already has an EIP assigned (handles service restart)
-EXISTING=$(aws ec2 describe-addresses \
-    --filters \
-        "Name=tag:elastic-gcs:region,Values=${AWS_REGION}" \
-        "Name=tag:elastic-gcs:role,Values=dtn" \
-        "Name=instance-id,Values=${INSTANCE_ID}" \
-    --query 'Addresses[*].[AllocationId, Tags[?Key==`elastic-gcs:slot`].Value|[0]]' \
-    --output text \
-    --region "$AWS_REGION" 2>/dev/null || echo "")
-
-if [ -n "$EXISTING" ]; then
-    EIP_ALLOCATION_ID=$(echo "$EXISTING" | head -1 | cut -f1)
-    DTN_SLOT_NUMBER=$(echo "$EXISTING" | head -1 | cut -f2)
-    echo ">>> Reusing existing EIP $EIP_ALLOCATION_ID (slot $DTN_SLOT_NUMBER)"
-else
-    # No EIP on this instance yet — find and claim an unassociated one
-    AVAILABLE_EIPS=$(aws ec2 describe-addresses \
-        --filters \
-            "Name=tag:elastic-gcs:region,Values=${AWS_REGION}" \
-            "Name=tag:elastic-gcs:role,Values=dtn" \
-        --query 'Addresses[?AssociationId==null].[AllocationId, Tags[?Key==`elastic-gcs:slot`].Value|[0]]' \
-        --output text \
+# First: check if this instance already owns a slot (handles service restart)
+for slot in $(seq 1 "$TOTAL_SLOTS"); do
+    OWNER=$(aws ssm get-parameter \
+        --name "${SLOT_LOCK_PREFIX}/${slot}" \
+        --query 'Parameter.Value' --output text \
         --region "$AWS_REGION" 2>/dev/null || echo "")
+    if [ "$OWNER" = "$INSTANCE_ID" ]; then
+        DTN_SLOT_NUMBER="$slot"
+        echo ">>> Reusing existing slot lock: slot $DTN_SLOT_NUMBER"
+        break
+    fi
+done
 
-    while IFS=$'\t' read -r alloc_id slot_num; do
-        [ -z "$alloc_id" ] || [ -z "$slot_num" ] && continue
-        echo ">>> Trying to associate EIP $alloc_id (slot $slot_num)..."
-        if aws ec2 associate-address \
-            --instance-id "$INSTANCE_ID" \
-            --allocation-id "$alloc_id" \
+# If no existing lock found, claim an available slot
+if [ -z "$DTN_SLOT_NUMBER" ]; then
+    for slot in $(seq 1 "$TOTAL_SLOTS"); do
+        echo ">>> Trying to claim slot $slot..."
+        if aws ssm put-parameter \
+            --name "${SLOT_LOCK_PREFIX}/${slot}" \
+            --value "$INSTANCE_ID" \
+            --type String \
             --region "$AWS_REGION" 2>/dev/null; then
-            EIP_ALLOCATION_ID="$alloc_id"
-            DTN_SLOT_NUMBER="$slot_num"
-            echo ">>> Associated EIP $EIP_ALLOCATION_ID as slot $DTN_SLOT_NUMBER"
+            DTN_SLOT_NUMBER="$slot"
+            echo ">>> Claimed slot $DTN_SLOT_NUMBER"
             break
         fi
-    done <<< "$AVAILABLE_EIPS"
+    done
 fi
 
-if [ -z "$EIP_ALLOCATION_ID" ]; then
-    echo "ERROR: Could not associate any Elastic IP. Check EIP allocation and tags."
-    echo "Expected tags: elastic-gcs:region=${AWS_REGION}, elastic-gcs:role=dtn"
+if [ -z "$DTN_SLOT_NUMBER" ]; then
+    echo "ERROR: Could not claim any DTN slot (tried 1..$TOTAL_SLOTS). Check slot locks in SSM."
     exit 1
 fi
 
-# Read the public IP directly from the EIP allocation record (authoritative).
-# Do NOT use IMDS here: IMDS can return the pre-EIP address for several seconds
-# after aws ec2 associate-address returns, which would cause node setup to
-# register the wrong IP in GCS. describe-addresses is always consistent.
-PUBLIC_IP=$(aws ec2 describe-addresses \
-    --allocation-ids "$EIP_ALLOCATION_ID" \
-    --query 'Addresses[0].PublicIp' \
-    --output text \
-    --region "$AWS_REGION")
+# Persist slot number for the shutdown script
+mkdir -p /var/lib/elastic-gcs
+echo "$DTN_SLOT_NUMBER" > /var/lib/elastic-gcs/slot
+
+# Tag the instance with its slot number (used by cache eviction Lambda for cleanup)
+aws ec2 create-tags \
+    --resources "$INSTANCE_ID" \
+    --tags "Key=elastic-gcs:slot,Value=${DTN_SLOT_NUMBER}" \
+    --region "$AWS_REGION" 2>/dev/null || true
+
+# Get public IP from IMDS. The ephemeral public IP is assigned at instance start
+# and is stable within a second or two. A brief sleep ensures it is populated.
+sleep 2
+PUBLIC_IP=$(get_metadata "public-ipv4")
 echo ">>> Public IP: $PUBLIC_IP (slot $DTN_SLOT_NUMBER)"
 
 # --- Detect: first boot vs resume ---
