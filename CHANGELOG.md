@@ -111,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scttfrdmn/elastic-gcs/releases/tag/v0.1.0
