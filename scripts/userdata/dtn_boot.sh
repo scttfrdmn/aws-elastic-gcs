@@ -103,9 +103,15 @@ if [ -z "$EIP_ALLOCATION_ID" ]; then
     exit 1
 fi
 
-# Give EC2 a moment to propagate the EIP association
-sleep 2
-PUBLIC_IP=$(get_metadata "public-ipv4")
+# Read the public IP directly from the EIP allocation record (authoritative).
+# Do NOT use IMDS here: IMDS can return the pre-EIP address for several seconds
+# after aws ec2 associate-address returns, which would cause node setup to
+# register the wrong IP in GCS. describe-addresses is always consistent.
+PUBLIC_IP=$(aws ec2 describe-addresses \
+    --allocation-ids "$EIP_ALLOCATION_ID" \
+    --query 'Addresses[0].PublicIp' \
+    --output text \
+    --region "$AWS_REGION")
 echo ">>> Public IP: $PUBLIC_IP (slot $DTN_SLOT_NUMBER)"
 
 # --- Detect: first boot vs resume ---
@@ -124,8 +130,15 @@ if [ -d "$GCS_STATE_DIR" ] && [ -s "$GCS_STATE_DIR/info.json" ]; then
     systemctl start globus-connect-server 2>/dev/null || true
     sleep 3
 
-    echo ">>> Running: globus-connect-server node enable"
-    globus-connect-server node enable
+    # Use node update --ip-address to both correct the IP (if the EIP's public
+    # address has changed since first boot) and enable the node in one step.
+    # The node ID is read from the Secrets Manager identity file for this slot —
+    # the same JSON that was imported during first boot, so it's always accurate.
+    NODE_ID=$(get_secret "${SECRETS_PREFIX}/node-slot-${DTN_SLOT_NUMBER}" | jq -r '.node_id')
+    echo ">>> Running: globus-connect-server node update $NODE_ID --ip-address $PUBLIC_IP --enable"
+    globus-connect-server node update "$NODE_ID" \
+        --ip-address "$PUBLIC_IP" \
+        --enable
 
     # Fix lock file ownership: GCS CLI runs as root, service runs as gcsweb.
     chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
