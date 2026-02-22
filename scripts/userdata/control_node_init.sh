@@ -26,6 +26,67 @@ LOG="/var/log/elastic-gcs-setup.log"
 exec > >(tee -a "$LOG") 2>&1
 echo "=== Elastic GCS Control Node Setup - $(date -u) ==="
 
+# --- Idempotency guard ---
+# cloud-init re-runs UserData on every stop/start (e.g. after a CDK deploy that
+# changes UserData). If GCS is already configured, skip the full setup and just
+# update the node's registered IP to the current public IP. This prevents
+# duplicate endpoint/node creation and avoids destroying existing state.
+GCS_INFO="/var/lib/globus-connect-server/info.json"
+if [ -s "$GCS_INFO" ]; then
+    echo "=== GCS already configured — skipping full setup (resume after stop/start) ==="
+
+    get_secret_resume() {
+        aws secretsmanager get-secret-value \
+            --secret-id "$1" --query SecretString --output text --region "$AWS_REGION"
+    }
+
+    # Get current public IP via IMDSv2
+    IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+    PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/public-ipv4)
+    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/instance-id)
+    DOMAIN_NAME=$(jq -r '.domain_name' "$GCS_INFO")
+    ENDPOINT_ID=$(jq -r '.endpoint_id' "$GCS_INFO")
+
+    echo ">>> Public IP: $PUBLIC_IP  Instance: $INSTANCE_ID  Domain: $DOMAIN_NAME"
+
+    # GCS CLI contacts the GCS Manager via the endpoint domain, which still
+    # resolves to the OLD IP. Route it through localhost so node update succeeds.
+    echo "127.0.0.1 ${DOMAIN_NAME}" >> /etc/hosts
+
+    export GCS_CLI_CLIENT_ID=$(get_secret_resume "${SECRETS_PREFIX}/globus-client-id")
+    export GCS_CLI_CLIENT_SECRET=$(get_secret_resume "${SECRETS_PREFIX}/globus-client-secret")
+    export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
+
+    # node show returns this node's details without needing to know the node ID up front.
+    CONTROL_NODE_ID=$(globus-connect-server node show -F json 2>/dev/null | jq -r '.id' || echo "")
+    if [ -n "$CONTROL_NODE_ID" ] && [ "$CONTROL_NODE_ID" != "null" ]; then
+        echo ">>> Updating control node $CONTROL_NODE_ID IP → $PUBLIC_IP"
+        globus-connect-server node update "$CONTROL_NODE_ID" \
+            --ip-address "$PUBLIC_IP" \
+            --enable
+        chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
+        echo ">>> Node IP updated and enabled."
+    else
+        echo "WARNING: Could not determine control node ID — IP not updated."
+    fi
+
+    # Remove the temporary hosts entry
+    sed -i "/${DOMAIN_NAME}/d" /etc/hosts
+
+    # Update SSM with current instance ID (in case instance was replaced)
+    aws ssm put-parameter \
+        --name "/elastic-gcs/${AWS_REGION}/control-node-id" \
+        --type String --value "$INSTANCE_ID" \
+        --overwrite --region "$AWS_REGION" \
+        && echo ">>> SSM control-node-id updated." || true
+
+    echo "=== Resume complete: IP=$PUBLIC_IP Endpoint=$ENDPOINT_ID ==="
+    exit 0
+fi
+
 # --- 1. Install prerequisites ---
 echo ">>> Installing prerequisites..."
 
