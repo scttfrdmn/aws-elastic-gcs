@@ -36,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scale-out (warm resume): **~64 seconds** desired=1 → InService
 - Resume latency (`node update --ip-address --enable`): **~7 seconds**
 - SSM slot locking: atomic claim verified across concurrent boot attempts
+- End-to-end transfer SUCCEEDED: `1000genomes/release/20130502/20140625_related_individuals.txt`
+  (1,168 bytes, task `c7c3d7e6-0fb5-11f1-ac79-025da3873719`)
+- Note: S3 connector path format with `s3_allow_multi_keys: true` uses first component as
+  bucket name — correct path is `/1000genomes/<key>`, not `/<key>`
 
 ## [0.2.0] - 2026-02-21
 
