@@ -195,8 +195,9 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	// DTN UserData
 	// On first EC2 boot (when entering the warm pool), this script:
 	//   1. Installs GCS if not pre-baked into the AMI
-	//   2. Installs dtn_boot.sh + dtn_shutdown.sh to /opt/elastic-gcs/scripts/
+	//   2. Installs dtn_boot.sh + dtn_shutdown.sh + spot_interrupt_monitor.sh
 	//   3. Installs and starts the elastic-gcs-dtn systemd service
+	//   4. Installs the elastic-gcs-spot-monitor systemd service
 	//
 	// The systemd service runs dtn_boot.sh on every subsequent start (resume),
 	// which handles first-boot vs warm-resume detection automatically.
@@ -209,12 +210,17 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	if err != nil {
 		panic(fmt.Sprintf("cannot read scripts/userdata/dtn_shutdown.sh: %v", err))
 	}
+	spotMonitorBytes, err := os.ReadFile("scripts/userdata/spot_interrupt_monitor.sh")
+	if err != nil {
+		panic(fmt.Sprintf("cannot read scripts/userdata/spot_interrupt_monitor.sh: %v", err))
+	}
 
 	// Strip comments and blank lines before encoding to stay within the 16 KB
 	// EC2 UserData limit. The source scripts are kept readable with full comments;
 	// only the embedded version is stripped. Shebang lines are preserved.
 	bootScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(bootScriptBytes))
 	shutdownScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(shutdownScriptBytes))
+	spotMonitorB64 := base64.StdEncoding.EncodeToString(stripShellComments(spotMonitorBytes))
 
 	// Systemd service with region/secrets/slot-count env vars baked in.
 	// DTN_SLOT_NUMBER is NOT included — the boot script claims a slot at runtime
@@ -239,6 +245,26 @@ Environment=TOTAL_SLOTS=%d
 WantedBy=multi-user.target
 `, region, secretsPrefix, totalSlots)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
+
+	// Spot interruption monitor — polls IMDS every 5 seconds for a spot
+	// termination/stop notice and disables the GCS node before shutdown.
+	// Harmless on on-demand instances (IMDS returns 404 for spot endpoint).
+	// Tied to elastic-gcs-dtn.service lifecycle via BindsTo.
+	spotMonitorSvcContent := `[Unit]
+Description=Spot Instance Interruption Monitor for Elastic GCS DTN
+After=elastic-gcs-dtn.service
+BindsTo=elastic-gcs-dtn.service
+
+[Service]
+Type=simple
+ExecStart=/opt/elastic-gcs/scripts/spot_interrupt_monitor.sh
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=elastic-gcs-dtn.service
+`
+	spotMonitorSvcB64 := base64.StdEncoding.EncodeToString([]byte(spotMonitorSvcContent))
 
 	ud := awsec2.UserData_ForLinux(nil)
 	ud.AddCommands(
@@ -275,10 +301,13 @@ fi
 		jsii.String("chmod +x /opt/elastic-gcs/scripts/dtn_boot.sh"),
 		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/dtn_shutdown.sh", shutdownScriptB64)),
 		jsii.String("chmod +x /opt/elastic-gcs/scripts/dtn_shutdown.sh"),
-		// Install and start systemd service
+		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/spot_interrupt_monitor.sh", spotMonitorB64)),
+		jsii.String("chmod +x /opt/elastic-gcs/scripts/spot_interrupt_monitor.sh"),
+		// Install systemd services
 		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /etc/systemd/system/elastic-gcs-dtn.service", svcB64)),
+		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /etc/systemd/system/elastic-gcs-spot-monitor.service", spotMonitorSvcB64)),
 		jsii.String("systemctl daemon-reload"),
-		jsii.String("systemctl enable elastic-gcs-dtn"),
+		jsii.String("systemctl enable elastic-gcs-dtn elastic-gcs-spot-monitor"),
 		jsii.String("systemctl start elastic-gcs-dtn"),
 	)
 
@@ -338,6 +367,9 @@ fi
 			jsii.String(props.RegionConfig.KeyPairName),
 		)
 	}
+	// Note: Spot options are NOT set on the launch template. ASG warm pools do not
+	// allow SpotOptions in the launch template; Spot must be configured via the
+	// ASG's MixedInstancesPolicy (see below).
 	lt := awsec2.NewLaunchTemplate(stack, jsii.String("DTNLaunchTemplate"), ltProps)
 
 	// -------------------------------------------------------------------------
@@ -346,19 +378,41 @@ fi
 	// MaxCapacity=maxDTNs caps the number of simultaneously active DTNs.
 	// DefaultInstanceWarmup=0 disables the built-in warmup delay; our lifecycle
 	// hook handles readiness signaling instead.
+	//
+	// Spot vs warm pool: AWS does not allow Spot instances with a warm pool
+	// (API error 400). The two modes are mutually exclusive:
+	//   use_spot=false  → warm pool (fast 30-60s scale-out, on-demand pricing)
+	//   use_spot=true   → no warm pool (2-3 min cold-start, ~70% cost savings)
+	// When UseSpot=true, warmPoolSize is forced to 0 (warm pool skipped).
 	// -------------------------------------------------------------------------
-	asg := awsautoscaling.NewAutoScalingGroup(stack, jsii.String("DTNASG"), &awsautoscaling.AutoScalingGroupProps{
+	asgProps := &awsautoscaling.AutoScalingGroupProps{
 		AutoScalingGroupName: jsii.String(asgName),
 		Vpc:                  props.ControlStack.Vpc,
 		VpcSubnets: &awsec2.SubnetSelection{
 			SubnetType: awsec2.SubnetType_PUBLIC,
 		},
-		LaunchTemplate:        lt,
 		MinCapacity:           jsii.Number(0),
 		MaxCapacity:           jsii.Number(float64(maxDTNs)),
 		DesiredCapacity:       jsii.Number(0),
 		DefaultInstanceWarmup: awscdk.Duration_Seconds(jsii.Number(0)),
-	})
+	}
+	if props.RegionConfig.UseSpot {
+		instancesDist := &awsautoscaling.InstancesDistribution{
+			OnDemandBaseCapacity:                jsii.Number(0),
+			OnDemandPercentageAboveBaseCapacity: jsii.Number(0),
+			SpotAllocationStrategy:              awsautoscaling.SpotAllocationStrategy_PRICE_CAPACITY_OPTIMIZED,
+		}
+		if props.RegionConfig.SpotMaxPrice != "" {
+			instancesDist.SpotMaxPrice = jsii.String(props.RegionConfig.SpotMaxPrice)
+		}
+		asgProps.MixedInstancesPolicy = &awsautoscaling.MixedInstancesPolicy{
+			LaunchTemplate:        lt,
+			InstancesDistribution: instancesDist,
+		}
+	} else {
+		asgProps.LaunchTemplate = lt
+	}
+	asg := awsautoscaling.NewAutoScalingGroup(stack, jsii.String("DTNASG"), asgProps)
 
 	// -------------------------------------------------------------------------
 	// Warm Pool — created via CDK AwsCustomResource (putWarmPool API call).
@@ -379,40 +433,43 @@ fi
 			"ReuseOnScaleIn": jsii.Bool(true),
 		},
 	}
-	warmPoolCR := customresources.NewAwsCustomResource(stack, jsii.String("WarmPoolCR"),
-		&customresources.AwsCustomResourceProps{
-			OnCreate: &customresources.AwsSdkCall{
-				Service:    jsii.String("AutoScaling"),
-				Action:     jsii.String("putWarmPool"),
-				Parameters: warmPoolParams,
-				PhysicalResourceId: customresources.PhysicalResourceId_Of(
-					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
-			},
-			OnUpdate: &customresources.AwsSdkCall{
-				Service:    jsii.String("AutoScaling"),
-				Action:     jsii.String("putWarmPool"),
-				Parameters: warmPoolParams,
-				PhysicalResourceId: customresources.PhysicalResourceId_Of(
-					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
-			},
-			OnDelete: &customresources.AwsSdkCall{
-				Service: jsii.String("AutoScaling"),
-				Action:  jsii.String("deleteWarmPool"),
-				Parameters: &map[string]interface{}{
-					"AutoScalingGroupName": jsii.String(asgName),
-					"ForceDelete":          jsii.Bool(true),
+	// Warm pool is skipped when UseSpot=true (AWS does not allow Spot + warm pool).
+	if !props.RegionConfig.UseSpot {
+		warmPoolCR := customresources.NewAwsCustomResource(stack, jsii.String("WarmPoolCR"),
+			&customresources.AwsCustomResourceProps{
+				OnCreate: &customresources.AwsSdkCall{
+					Service:    jsii.String("AutoScaling"),
+					Action:     jsii.String("putWarmPool"),
+					Parameters: warmPoolParams,
+					PhysicalResourceId: customresources.PhysicalResourceId_Of(
+						jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
 				},
-				PhysicalResourceId: customresources.PhysicalResourceId_Of(
-					jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
-			},
-			Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
-				&customresources.SdkCallsPolicyOptions{
-					Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
-				}),
-			InstallLatestAwsSdk: jsii.Bool(false),
-		})
-	// Warm pool must be created after the ASG
-	warmPoolCR.Node().AddDependency(asg)
+				OnUpdate: &customresources.AwsSdkCall{
+					Service:    jsii.String("AutoScaling"),
+					Action:     jsii.String("putWarmPool"),
+					Parameters: warmPoolParams,
+					PhysicalResourceId: customresources.PhysicalResourceId_Of(
+						jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
+				},
+				OnDelete: &customresources.AwsSdkCall{
+					Service: jsii.String("AutoScaling"),
+					Action:  jsii.String("deleteWarmPool"),
+					Parameters: &map[string]interface{}{
+						"AutoScalingGroupName": jsii.String(asgName),
+						"ForceDelete":          jsii.Bool(true),
+					},
+					PhysicalResourceId: customresources.PhysicalResourceId_Of(
+						jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
+				},
+				Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
+					&customresources.SdkCallsPolicyOptions{
+						Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
+					}),
+				InstallLatestAwsSdk: jsii.Bool(false),
+			})
+		// Warm pool must be created after the ASG
+		warmPoolCR.Node().AddDependency(asg)
+	}
 
 	// -------------------------------------------------------------------------
 	// Lifecycle Hooks

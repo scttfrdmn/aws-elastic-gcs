@@ -14,6 +14,9 @@ type RegionConfig struct {
 	WarmPoolSize    int    `yaml:"warm_pool_size"`
 	MaxDTNs         int    `yaml:"max_dtns"`
 	KeyPairName     string `yaml:"key_pair_name"`
+	// Spot instance settings for DTNs
+	UseSpot      bool   `yaml:"use_spot"`
+	SpotMaxPrice string `yaml:"spot_max_price"` // empty = up to on-demand price
 }
 
 // RegionsConfig is the top-level regions configuration

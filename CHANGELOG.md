@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-02-23
+
+### Added
+- **Spot instances for DTNs** (#7): DTNs can now launch as EC2 Spot instances.
+  Set `use_spot: true` in `config/regions.yaml` to enable.
+  Uses ASG `MixedInstancesPolicy` with `OnDemandPercentageAboveBaseCapacity=0`
+  and `SpotAllocationStrategy=PRICE_CAPACITY_OPTIMIZED`.
+  Optional `spot_max_price` (string, e.g. `"0.10"`) caps exposure; empty = up to on-demand.
+  Expected savings: 60–80% on active DTN compute cost vs on-demand m6i.xlarge.
+- **Spot interruption monitor** (`scripts/userdata/spot_interrupt_monitor.sh`):
+  Systemd service (`elastic-gcs-spot-monitor.service`) polls IMDS every 5 seconds for
+  a spot interruption notice (`/spot/instance-action`). On detection, calls
+  `globus-connect-server node disable` within the 2-minute warning window before
+  EC2 stops the instance. Harmless on on-demand instances (IMDS returns 404).
+- `config/config.go`: `UseSpot bool` and `SpotMaxPrice string` added to `RegionConfig`.
+- New DTN AMI `ami-072a6d44588f30309` (elastic-gcs-dtn-20260222, GCS 5.4.92) with
+  updated `dtn_shutdown.sh` (no slot lock release) and `spot_interrupt_monitor.sh`.
+
+### Changed
+- **Spot and warm pool are mutually exclusive** (AWS API constraint): when
+  `use_spot: true`, the warm pool is skipped — DTNs cold-start (2–3 min) but run
+  at ~70% lower cost. When `use_spot: false` (default), warm pool provides 30–60 s
+  scale-out at on-demand pricing. Choose based on workload: interactive = warm pool,
+  batch/cost-sensitive = Spot.
+
 ## [0.2.3] - 2026-02-23
 
 ### Added
@@ -138,7 +163,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.0...v0.2.1
