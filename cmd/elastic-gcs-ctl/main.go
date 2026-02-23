@@ -606,12 +606,34 @@ func runNodesDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot get control node ID: %w", err)
 	}
 
+	// Resolve a prefix (e.g. "12ba8822") to a full UUID by listing all nodes.
+	fullID := nodeID
+	if len(nodeID) < 36 {
+		nodeJSON, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
+			"globus-connect-server node list -F json 2>/dev/null")
+		if err != nil {
+			return fmt.Errorf("node list for ID resolution: %w", err)
+		}
+		var results []gcsNodeResult
+		if json.Unmarshal([]byte(nodeJSON), &results) == nil && len(results) > 0 {
+			for _, n := range results[0].Data {
+				if strings.HasPrefix(n.ID, nodeID) {
+					fullID = n.ID
+					break
+				}
+			}
+		}
+		if fullID == nodeID {
+			return fmt.Errorf("no node found with ID prefix %q", nodeID)
+		}
+	}
+
 	out, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
-		fmt.Sprintf("globus-connect-server node delete %s 2>&1", nodeID))
+		fmt.Sprintf("globus-connect-server node delete %s 2>&1", fullID))
 	if err != nil {
 		return fmt.Errorf("node delete failed: %w", err)
 	}
-	fmt.Printf("node delete %s:\n%s\n", nodeID, strings.TrimSpace(out))
+	fmt.Printf("%s\n", strings.TrimSpace(out))
 	return nil
 }
 
