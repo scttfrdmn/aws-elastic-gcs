@@ -433,7 +433,26 @@ fi
 			"ReuseOnScaleIn": jsii.Bool(true),
 		},
 	}
-	// Warm pool is skipped when UseSpot=true (AWS does not allow Spot + warm pool).
+	// Warm pool management via CDK AwsCustomResource.
+	//
+	// Switching modes requires careful ordering to avoid a CFN race condition:
+	//
+	// use_spot=false → use_spot=true:
+	//   The warm pool must be deleted BEFORE the ASG switches to MixedInstancesPolicy
+	//   (Spot + warm pool is an AWS API hard error). SpotCleanupCR handles this:
+	//   asg.Node().AddDependency(spotCleanupCR) makes CFN wait for deleteWarmPool
+	//   before updating the ASG. IgnoreErrorCodesMatching=".*" makes it a no-op
+	//   when no warm pool exists (first deploy with use_spot=true).
+	//
+	// use_spot=true → use_spot=false:
+	//   No warm pool exists; ASG switches back to LaunchTemplate (always succeeds),
+	//   then WarmPoolCR creates the warm pool. SpotCleanupCR is deleted (no OnDelete
+	//   configured → no-op). WarmPoolCR OnDelete uses IgnoreErrorCodesMatching=".*"
+	//   so stack deletion is idempotent whether or not a warm pool exists.
+	deleteWarmPoolParams := &map[string]interface{}{
+		"AutoScalingGroupName": jsii.String(asgName),
+		"ForceDelete":          jsii.Bool(true),
+	}
 	if !props.RegionConfig.UseSpot {
 		warmPoolCR := customresources.NewAwsCustomResource(stack, jsii.String("WarmPoolCR"),
 			&customresources.AwsCustomResourceProps{
@@ -452,12 +471,10 @@ fi
 						jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
 				},
 				OnDelete: &customresources.AwsSdkCall{
-					Service: jsii.String("AutoScaling"),
-					Action:  jsii.String("deleteWarmPool"),
-					Parameters: &map[string]interface{}{
-						"AutoScalingGroupName": jsii.String(asgName),
-						"ForceDelete":          jsii.Bool(true),
-					},
+					Service:                  jsii.String("AutoScaling"),
+					Action:                   jsii.String("deleteWarmPool"),
+					Parameters:               deleteWarmPoolParams,
+					IgnoreErrorCodesMatching: jsii.String(".*"),
 					PhysicalResourceId: customresources.PhysicalResourceId_Of(
 						jsii.String(fmt.Sprintf("WarmPool-%s", asgName))),
 				},
@@ -467,8 +484,41 @@ fi
 					}),
 				InstallLatestAwsSdk: jsii.Bool(false),
 			})
-		// Warm pool must be created after the ASG
+		// Warm pool must be created after the ASG exists.
 		warmPoolCR.Node().AddDependency(asg)
+	} else {
+		// Spot mode: delete any existing warm pool before the ASG switches to
+		// MixedInstancesPolicy. Parameters use the literal asgName string (not an
+		// ASG ref) so SpotCleanupCR has no formal CFN dependency on the ASG.
+		// asg.Node().AddDependency ensures the ASG update waits for this to finish.
+		spotCleanupCR := customresources.NewAwsCustomResource(stack, jsii.String("SpotCleanupCR"),
+			&customresources.AwsCustomResourceProps{
+				OnCreate: &customresources.AwsSdkCall{
+					Service:                  jsii.String("AutoScaling"),
+					Action:                   jsii.String("deleteWarmPool"),
+					Parameters:               deleteWarmPoolParams,
+					IgnoreErrorCodesMatching: jsii.String(".*"),
+					PhysicalResourceId: customresources.PhysicalResourceId_Of(
+						jsii.String(fmt.Sprintf("SpotCleanup-%s", asgName))),
+				},
+				OnUpdate: &customresources.AwsSdkCall{
+					Service:                  jsii.String("AutoScaling"),
+					Action:                   jsii.String("deleteWarmPool"),
+					Parameters:               deleteWarmPoolParams,
+					IgnoreErrorCodesMatching: jsii.String(".*"),
+					PhysicalResourceId: customresources.PhysicalResourceId_Of(
+						jsii.String(fmt.Sprintf("SpotCleanup-%s", asgName))),
+				},
+				// No OnDelete: switching back to warm pool mode leaves no warm pool
+				// to clean up (SpotCleanupCR already removed it).
+				Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
+					&customresources.SdkCallsPolicyOptions{
+						Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
+					}),
+				InstallLatestAwsSdk: jsii.Bool(false),
+			})
+		// ASG Spot update must wait for warm pool deletion to complete.
+		asg.Node().AddDependency(spotCleanupCR)
 	}
 
 	// -------------------------------------------------------------------------

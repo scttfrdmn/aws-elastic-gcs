@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-02-23
+
+### Fixed
+- **Spot↔warm pool mode switching** (`stacks/dtn_pool.go`): Switching `use_spot: true`
+  previously required manually deleting the warm pool before `cdk deploy` due to a CFN
+  race between the ASG update (MixedInstancesPolicy) and the WarmPoolCR deletion.
+  Fixed by adding `SpotCleanupCR` when `use_spot=true`: it calls `deleteWarmPool` with
+  `IgnoreErrorCodesMatching=".*"` (no-op if no warm pool exists), and
+  `asg.Node().AddDependency(spotCleanupCR)` ensures CFN deletes the warm pool before
+  updating the ASG. `WarmPoolCR.OnDelete` also gains `IgnoreErrorCodesMatching=".*"` to
+  make stack deletion and mode switching idempotent.
+
+### Validated
+- **Spot interruption test via AWS FIS** (`aws:ec2:send-spot-instance-interruptions`):
+  FIS experiment `EXPxWeT5b6mgJLscfU` sent 2-minute interruption notice to Spot DTN
+  `i-03353d4160e0859df`. Monitor detected within 5s, called `node disable`.
+  Instance terminated at t+135s; GCS node removed from active rotation. ASG launched
+  replacement Spot DTN `i-0dc33ee6445c4d1d5` (same slot/node identity), came InService,
+  endpoint remained healthy throughout. Spot interruption handler confirmed working.
+
 ## [0.3.0] - 2026-02-23
 
 ### Added
