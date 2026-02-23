@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-02-23
+
+### Added
+- **Stale GCS node cleanup** (#9): `lambda/cache_eviction/main.go` now sweeps orphaned GCS
+  nodes — nodes registered on the endpoint that have no corresponding live EC2 instance —
+  by running `globus-connect-server node delete NODE_ID` on the control node via SSM RunCommand.
+  Orphan sweep only proceeds when ALL warm pool + InService instances carry the
+  `elastic-gcs:gcs-node-id` tag, preventing false-positive deletes during the transition
+  period.
+- `dtn_boot.sh` now tags each instance with `elastic-gcs:gcs-node-id=NODE_ID` after the GCS
+  node is configured (first boot or resume), enabling the orphan sweep to correlate EC2
+  instances with their GCS nodes.
+- **Slot lock lifecycle fix**: SSM slot locks are now held for the lifetime of the EC2
+  instance, not just the running period. Locks are released only on permanent termination
+  (lifecycle Lambda `Destination=="EC2"`), preventing two warm pool instances from sharing
+  the same slot/GCS node identity when slots were prematurely released on stop.
+- `lambda/lifecycle/main.go`: `handleScaleIn` releases the slot lock on termination via
+  `releaseSlotLock`, with an ownership check to prevent releasing a lock held by a different
+  instance. Adds `Origin`/`Destination` fields to `LifecycleEvent`.
+- `stacks/dtn_pool.go`: Lifecycle Lambda IAM gains `ssm:GetParameter` + `ssm:DeleteParameter`
+  for slot lock release; cache eviction Lambda gains `CONTROL_NODE_ID_PARAM` env var and
+  `ssm:GetParameter` for control node SSM lookup.
+
+### Fixed
+- `dtn_shutdown.sh`: Removed slot lock release — locks are now managed exclusively by the
+  lifecycle Lambda, which has the context to distinguish warm-pool stop from termination.
+
 ## [0.2.2] - 2026-02-22
 
 ### Fixed
@@ -111,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.1.0...v0.2.0

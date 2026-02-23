@@ -462,7 +462,7 @@ fi
 		Environment:  commonLambdaEnv,
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	// Lifecycle Lambda needs SSM (node disable), ASG (complete hook), EC2 (describe + CreateTags)
+	// Lifecycle Lambda needs SSM (node disable + slot lock release), ASG (complete hook), EC2 (describe + CreateTags)
 	lifecycleFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:    jsii.String("LifecycleLambdaPerms"),
 		Effect: awsiam.Effect_ALLOW,
@@ -471,6 +471,8 @@ fi
 			"autoscaling:DescribeAutoScalingInstances",
 			"ssm:SendCommand",
 			"ssm:GetCommandInvocation",
+			"ssm:GetParameter",
+			"ssm:DeleteParameter",
 			"ec2:DescribeInstances",
 			"ec2:CreateTags",
 		),
@@ -542,10 +544,11 @@ fi
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(10)),
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
-			"ASG_NAME":             asg.AutoScalingGroupName(),
-			"REGION":               jsii.String(region),
-			"SECRETS_PREFIX":       jsii.String(secretsPrefix),
-			"CACHE_EVICTION_HOURS": jsii.String(fmt.Sprintf("%d", cacheEvictionHours)),
+			"ASG_NAME":              asg.AutoScalingGroupName(),
+			"REGION":                jsii.String(region),
+			"SECRETS_PREFIX":        jsii.String(secretsPrefix),
+			"CACHE_EVICTION_HOURS":  jsii.String(fmt.Sprintf("%d", cacheEvictionHours)),
+			"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -559,6 +562,7 @@ fi
 			"ec2:DescribeInstances",
 			"ssm:SendCommand",
 			"ssm:GetCommandInvocation",
+			"ssm:GetParameter",
 			"cloudwatch:PutMetricData",
 		),
 		Resources: jsii.Strings("*"),

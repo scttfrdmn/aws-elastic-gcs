@@ -203,6 +203,13 @@ else
     echo ">>> Node setup completed in ${SETUP_MS}ms"
 fi
 
+# Tag instance with GCS node ID so cache eviction Lambda can clean up stale
+# node registrations when this instance is terminated (issue #9).
+aws ec2 create-tags \
+    --resources "$INSTANCE_ID" \
+    --tags "Key=elastic-gcs:gcs-node-id,Value=${NODE_ID}" \
+    --region "$AWS_REGION" 2>/dev/null || true
+
 # --- Verify node is healthy ---
 echo ">>> Verifying node health..."
 sleep 5

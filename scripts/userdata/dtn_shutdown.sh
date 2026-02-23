@@ -41,19 +41,11 @@ echo ">>> Node disabled in ${DISABLE_MS}ms"
 # The ASG lifecycle hook should allow for this delay.
 echo ">>> Node disabled. DNS propagation may take up to 2 minutes."
 
-# Release the SSM slot lock so the slot can be claimed by the next instance.
-SLOT_FILE="/var/lib/elastic-gcs/slot"
-if [ -f "$SLOT_FILE" ]; then
-    DTN_SLOT_NUMBER=$(cat "$SLOT_FILE")
-    echo ">>> Releasing SSM slot lock for slot $DTN_SLOT_NUMBER..."
-    aws ssm delete-parameter \
-        --name "/elastic-gcs/${AWS_REGION}/slot-lock/${DTN_SLOT_NUMBER}" \
-        --region "$AWS_REGION" 2>/dev/null \
-        && echo ">>> Slot $DTN_SLOT_NUMBER released." \
-        || echo "WARNING: Failed to release slot lock (may already be gone)."
-    rm -f "$SLOT_FILE"
-else
-    echo ">>> No slot file found — slot lock not released (first boot or already cleaned up)."
-fi
+# Note: The SSM slot lock (/elastic-gcs/{region}/slot-lock/{N}) is released by
+# the lifecycle Lambda (lambda/lifecycle/main.go) when the instance is permanently
+# terminated (Destination=="EC2"). The shutdown script intentionally does NOT
+# release the lock here — doing so would allow a new instance to claim the slot
+# while this instance is merely entering the warm pool (Warmed:Stopped), causing
+# two instances to share the same GCS node identity.
 
 echo "=== DTN Shutdown Complete ==="
