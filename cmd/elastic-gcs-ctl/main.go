@@ -6,15 +6,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -37,8 +31,6 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
-
-	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
 )
 
 const toolVersion = "v0.4.0"
@@ -47,9 +39,6 @@ const toolVersion = "v0.4.0"
 const (
 	collection1000Genomes = "bb3e8265-a9f6-4179-a367-f6cfaf4a29af"
 	tutorialEndpoint2     = "31ce9ba0-176d-45a5-add3-f37d233ba47d"
-	// nativeAppClientID is the public (no-secret) Globus native app registration
-	// used for interactive CLI authentication (transfer test, etc.).
-	nativeAppClientID = "fd6f02b5-c2aa-4f69-9654-fd27e26f09da"
 	testTransferFile      = "/1000genomes/release/20130502/20140625_related_individuals.txt"
 	testTransferDest      = "/~/elastic-gcs-test.txt"
 )
@@ -1100,178 +1089,19 @@ func transferTestCmd() *cobra.Command {
 	}
 }
 
-// globusNativeAppAuth implements the Globus "native app" authorization code flow.
-// It prints an authorization URL for the user to open, Globus displays the auth
-// code on screen, the user pastes it back, and we exchange it for an access token.
-// This approach works with a confidential client and requires no redirect server.
-func globusNativeAppAuth(ctx context.Context, clientID, scope string) (string, error) {
-	const (
-		redirectURI  = "https://auth.globus.org/v2/web/auth-code"
-		authorizeURL = "https://auth.globus.org/v2/oauth2/authorize"
-		tokenURL     = "https://auth.globus.org/v2/oauth2/token"
-	)
-
-	// Step 1: generate PKCE code_verifier and code_challenge (RFC 7636).
-	verifierBytes := make([]byte, 32)
-	if _, err := rand.Read(verifierBytes); err != nil {
-		return "", fmt.Errorf("generate code verifier: %w", err)
-	}
-	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
-	challengeHash := sha256.Sum256([]byte(codeVerifier))
-	codeChallenge := base64.RawURLEncoding.EncodeToString(challengeHash[:])
-
-	// Step 2: build the authorization URL.
-	authURL := authorizeURL + "?" + url.Values{
-		"client_id":             {clientID},
-		"response_type":         {"code"},
-		"redirect_uri":          {redirectURI},
-		"scope":                 {scope},
-		"code_challenge":        {codeChallenge},
-		"code_challenge_method": {"S256"},
-	}.Encode()
-
-	bold := color.New(color.Bold)
-	fmt.Println()
-	bold.Println("Authenticate with your Globus identity:")
-	fmt.Println()
-	fmt.Println("  1. Open this URL in your browser:")
-	color.Cyan("     %s\n", authURL)
-	fmt.Println("  2. Log in and click Allow.")
-	fmt.Println("  3. Copy the authorization code shown and paste it here.")
-	fmt.Println()
-	fmt.Print("Authorization code: ")
-
-	// Step 2: read the code from stdin.
-	scanner := bufio.NewScanner(os.Stdin)
-	if !scanner.Scan() {
-		return "", fmt.Errorf("no authorization code provided")
-	}
-	authCode := strings.TrimSpace(scanner.Text())
-	if authCode == "" {
-		return "", fmt.Errorf("authorization code was empty")
-	}
-
-	// Step 3: exchange the code for tokens, including the PKCE code_verifier.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL,
-		strings.NewReader(url.Values{
-			"grant_type":    {"authorization_code"},
-			"code":          {authCode},
-			"redirect_uri":  {redirectURI},
-			"client_id":     {clientID},
-			"code_verifier": {codeVerifier},
-		}.Encode()))
-	if err != nil {
-		return "", fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("token exchange: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-
-	var tr struct {
-		AccessToken string `json:"access_token"`
-		Error       string `json:"error"`
-		ErrorDesc   string `json:"error_description"`
-	}
-	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("parse token response: %s", string(body))
-	}
-	if tr.Error != "" {
-		return "", fmt.Errorf("token error: %s — %s", tr.Error, tr.ErrorDesc)
-	}
-	if tr.AccessToken == "" {
-		return "", fmt.Errorf("no access token in response: %s", string(body))
-	}
-	color.Green("\nAuthenticated.\n\n")
-	return tr.AccessToken, nil
-}
-
-// staticBearerToken satisfies the globus-go-sdk auth.Authorizer interface.
-type staticBearerToken struct{ token string }
-
-func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string, error) {
-	return "Bearer " + a.token, nil
-}
-
 func runTransferTest(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
-
-	// GCS v5 collections require data_access dependent scopes in addition to the
-	// base transfer scope. Request both at once so consent covers the full transfer.
-	transferScope := fmt.Sprintf(
-		"urn:globus:auth:scope:transfer.api.globus.org:all[*https://auth.globus.org/scopes/%s/data_access *https://auth.globus.org/scopes/%s/data_access]",
-		collection1000Genomes, tutorialEndpoint2)
-
-	// Native app authorization code flow — authenticates as the operator's personal
-	// Globus identity using the public native app client (no secret required).
-	accessToken, err := globusNativeAppAuth(ctx, nativeAppClientID, transferScope)
-	if err != nil {
-		return fmt.Errorf("Globus authentication: %w", err)
-	}
-
-	transferClient, err := transfer.NewClient(
-		transfer.WithAuthorizer(&staticBearerToken{token: accessToken}))
-	if err != nil {
-		return fmt.Errorf("transfer.NewClient: %w", err)
-	}
-
-	fmt.Printf("Submitting test transfer:\n")
-	fmt.Printf("  Source:  collection %s\n          %s\n", collection1000Genomes, testTransferFile)
-	fmt.Printf("  Dest:    collection %s\n          %s\n\n", tutorialEndpoint2, testTransferDest)
-
-	startTime := time.Now()
-	label := fmt.Sprintf("elastic-gcs-ctl test %s", startTime.Format("20060102-150405"))
-
-	// The Transfer API requires a unique submission_id obtained from the service.
-	subIDResp, err := transferClient.GetSubmissionID(ctx)
-	if err != nil {
-		return fmt.Errorf("GetSubmissionID: %w", err)
-	}
-
-	task, err := transferClient.CreateTransferTask(ctx, &transfer.TransferTaskRequest{
-		SubmissionID:          subIDResp,
-		SourceEndpointID:      collection1000Genomes,
-		DestinationEndpointID: tutorialEndpoint2,
-		Label:                 label,
-		Items: []transfer.TransferItem{
-			{
-				SourcePath:      testTransferFile,
-				DestinationPath: testTransferDest,
-				Recursive:       false,
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("CreateTransferTask: %w", err)
-	}
-
-	taskID := task.TaskID
-	fmt.Printf("Task ID: %s\n\nPolling...\n", taskID)
-
-	for {
-		time.Sleep(3 * time.Second)
-		status, err := transferClient.GetTask(ctx, taskID)
-		if err != nil {
-			fmt.Printf("Warning: GetTask: %v\n", err)
-			continue
-		}
-		elapsed := time.Since(startTime).Round(time.Second)
-		fmt.Printf("\r  Status=%-12s  elapsed=%s  bytes=%d   ",
-			status.Status, elapsed, status.BytesTransferred)
-		switch status.Status {
-		case "SUCCEEDED":
-			fmt.Println()
-			color.Green("Transfer SUCCEEDED in %s (%d bytes)\n", elapsed, status.BytesTransferred)
-			return nil
-		case "FAILED":
-			fmt.Println()
-			return fmt.Errorf("transfer FAILED: %v", status.FatalErrorDetails)
-		}
-	}
+	label := fmt.Sprintf("elastic-gcs-ctl test %s", time.Now().Format("20060102-150405"))
+	fmt.Printf("Submitting test transfer via globus CLI:\n")
+	fmt.Printf("  Source: %s:%s\n", collection1000Genomes, testTransferFile)
+	fmt.Printf("  Dest:   %s:%s\n\n", tutorialEndpoint2, testTransferDest)
+	c := exec.Command("globus", "transfer",
+		collection1000Genomes+":"+testTransferFile,
+		tutorialEndpoint2+":"+testTransferDest,
+		"--label", label,
+		"--sync-level", "exists")
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
