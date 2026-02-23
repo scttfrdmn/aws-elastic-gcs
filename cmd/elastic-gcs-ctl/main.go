@@ -634,10 +634,13 @@ func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	lambdaClient := lambda.NewFromConfig(cfg)
+	logsClient := cloudwatchlogs.NewFromConfig(cfg)
 
 	fnName := fmt.Sprintf("elastic-gcs-version-check-%s", regionFlag)
-	fmt.Printf("Invoking %s (synchronous)...\n", fnName)
+	logGroup := fmt.Sprintf("/aws/lambda/%s", fnName)
+	fmt.Printf("Invoking %s...\n", fnName)
 
+	invokeStart := time.Now()
 	result, err := lambdaClient.Invoke(ctx, &lambda.InvokeInput{
 		FunctionName:   aws.String(fnName),
 		InvocationType: lambdatypes.InvocationTypeRequestResponse,
@@ -651,14 +654,75 @@ func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
 		if len(result.Payload) > 0 {
 			fmt.Printf("Payload: %s\n", string(result.Payload))
 		}
-	} else {
-		color.Green("Version check completed (HTTP %d)\n", result.StatusCode)
-		fmt.Println("Check ElasticGCS/GCSVersionDrift metric for results,")
-		fmt.Printf("or run: aws cloudwatch get-metric-statistics --namespace ElasticGCS \\\n")
-		fmt.Printf("  --metric-name GCSVersionDrift --dimensions Name=Region,Value=%s \\\n", regionFlag)
-		fmt.Printf("  --start-time $(date -u -v-1H +%%FT%%TZ) --end-time $(date -u +%%FT%%TZ) \\\n")
-		fmt.Printf("  --period 21600 --statistics Maximum\n")
+		return nil
 	}
+
+	// Lambda completed successfully. Pull the structured log lines from this
+	// invocation so we can show actual version data rather than just "check the metric".
+	// Retry for up to 15s to allow CloudWatch Logs to flush.
+	type logLine struct {
+		Msg      string              `json:"msg"`
+		Versions map[string]string   `json:"versions"`
+		Distinct int                 `json:"distinct_versions"`
+		Drift    int                 `json:"drift_count"`
+	}
+
+	startMS := invokeStart.UnixMilli()
+	var summary *logLine
+	for attempt := 0; attempt < 5; attempt++ {
+		time.Sleep(3 * time.Second)
+		filterOut, ferr := logsClient.FilterLogEvents(ctx, &cloudwatchlogs.FilterLogEventsInput{
+			LogGroupName:  aws.String(logGroup),
+			StartTime:     aws.Int64(startMS),
+			FilterPattern: aws.String("version check complete"),
+		})
+		if ferr != nil {
+			break
+		}
+		for _, ev := range filterOut.Events {
+			var ll logLine
+			if json.Unmarshal([]byte(aws.ToString(ev.Message)), &ll) == nil &&
+				ll.Msg == "version check complete" {
+				summary = &ll
+			}
+		}
+		if summary != nil {
+			break
+		}
+	}
+
+	if summary == nil {
+		color.Green("Version check completed.\n")
+		fmt.Println("(Log output not yet available — run `./elastic-gcs-ctl logs version-check --since 5m` to see results)")
+		return nil
+	}
+
+	fmt.Println()
+	if summary.Drift == 0 {
+		color.Green("GCSVersionDrift = 0  (all nodes agree)\n")
+	} else {
+		color.Red("GCSVersionDrift = %d  (VERSION DRIFT DETECTED)\n", summary.Drift)
+	}
+	fmt.Println()
+
+	// Print per-instance version table.
+	fmt.Printf("  %-22s  %s\n", "Instance", "GCS Version")
+	fmt.Printf("  %-22s  %s\n", strings.Repeat("─", 22), strings.Repeat("─", 12))
+	// Sort instances for stable output.
+	instances := make([]string, 0, len(summary.Versions))
+	for id := range summary.Versions {
+		instances = append(instances, id)
+	}
+	sort.Strings(instances)
+	for _, id := range instances {
+		ver := summary.Versions[id]
+		if ver == "unknown" {
+			color.Yellow("  %-22s  %s\n", id, ver)
+		} else {
+			fmt.Printf("  %-22s  %s\n", id, ver)
+		}
+	}
+	fmt.Println()
 	return nil
 }
 

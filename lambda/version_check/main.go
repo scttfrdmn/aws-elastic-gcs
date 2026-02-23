@@ -112,7 +112,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	}
 
 	logger.Info("version check complete",
-		"versions", fmt.Sprintf("%v", versions),
+		"versions", versions,
 		"distinct_versions", len(distinct),
 		"drift_count", driftCount,
 	)
@@ -120,7 +120,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	if driftCount > 0 {
 		logger.Warn("GCS version drift detected — all nodes must run the same GCS version",
 			"drift_count", driftCount,
-			"versions", fmt.Sprintf("%v", versions),
+			"versions", versions,
 		)
 	}
 
