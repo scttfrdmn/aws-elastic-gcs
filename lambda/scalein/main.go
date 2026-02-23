@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -14,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+
+	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
 
 // snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.
@@ -44,13 +45,13 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		metricNamespace = "ElasticGCS"
 	}
 
-	log.Printf("Scale-in evaluation triggered: region=%s asg=%s", region, asgName)
+	logger.Info("scale-in evaluation triggered", "region", region, "asg", asgName)
 
 	// Unwrap SNS envelope if present
 	var env snsEnvelope
 	if err := json.Unmarshal(rawEvent, &env); err == nil &&
 		len(env.Records) > 0 && env.Records[0].SNS.Message != "" {
-		log.Printf("Scale-in: unwrapped SNS envelope from CloudWatch alarm")
+		logger.Info("unwrapped SNS envelope from CloudWatch alarm")
 	}
 
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -73,10 +74,11 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		},
 	})
 	if err != nil {
-		log.Printf("WARNING: GetMetricStatistics failed: %v — proceeding with scale-in", err)
+		logger.Warn("GetMetricStatistics failed, proceeding with scale-in", "error", err.Error())
 	} else if len(stats.Datapoints) > 0 && aws.ToFloat64(stats.Datapoints[0].Maximum) > 0 {
-		log.Printf("Active transfers detected (%.0f) — skipping scale-in",
-			aws.ToFloat64(stats.Datapoints[0].Maximum))
+		logger.Info("active transfers detected, skipping scale-in",
+			"transfers", aws.ToFloat64(stats.Datapoints[0].Maximum),
+		)
 		return nil
 	}
 
@@ -97,12 +99,12 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	currentDesired := int(aws.ToInt32(asg.DesiredCapacity))
 
 	if currentDesired <= 0 {
-		log.Printf("Already at desired capacity 0 — no scale-in needed")
+		logger.Info("already at desired capacity 0, no scale-in needed")
 		return nil
 	}
 
 	newDesired := currentDesired - 1
-	log.Printf("Scaling in: setting ASG desired capacity %d → %d", currentDesired, newDesired)
+	logger.Info("scaling in", "from", currentDesired, "to", newDesired)
 
 	_, err = asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
 		AutoScalingGroupName: aws.String(asgName),
@@ -113,11 +115,12 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		return fmt.Errorf("SetDesiredCapacity failed: %w", err)
 	}
 
-	log.Printf("Scale-in complete: ASG=%s desired=%d → %d", asgName, currentDesired, newDesired)
+	logger.Info("scale-in complete", "asg", asgName, "from", currentDesired, "to", newDesired)
 	return nil
 }
 
 func main() {
-	log.Printf("Elastic GCS Scale-In Lambda starting")
+	region := os.Getenv("AWS_REGION")
+	logger.Init("elastic-gcs-scalein", region)
 	lambda.Start(handler)
 }

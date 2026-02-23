@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +17,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+
+	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
 
 const (
@@ -58,7 +59,11 @@ func handler(ctx context.Context, _ interface{}) error {
 		evictionHours = 72
 	}
 
-	log.Printf("Cache eviction check: region=%s asg=%s ttl=%dh", region, asgName, evictionHours)
+	logger.Info("cache eviction check starting",
+		"region", region,
+		"asg", asgName,
+		"ttl_hours", evictionHours,
+	)
 
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -75,10 +80,13 @@ func handler(ctx context.Context, _ interface{}) error {
 			Name: aws.String(controlNodeIDParam),
 		})
 		if err != nil {
-			log.Printf("WARNING: could not fetch control node ID from %s: %v — GCS node cleanup skipped", controlNodeIDParam, err)
+			logger.Warn("could not fetch control node ID, GCS node cleanup skipped",
+				"param", controlNodeIDParam,
+				"error", err.Error(),
+			)
 		} else {
 			controlNodeID = aws.ToString(paramOut.Parameter.Value)
-			log.Printf("Control node instance: %s", controlNodeID)
+			logger.Info("control node resolved", "instance", controlNodeID)
 		}
 	}
 
@@ -98,12 +106,15 @@ func handler(ctx context.Context, _ interface{}) error {
 	}
 
 	if len(stoppedIDs) == 0 {
-		log.Printf("No Warmed:Stopped instances to check")
+		logger.Info("no Warmed:Stopped instances to check")
 	} else {
-		log.Printf("Checking %d stopped warm pool instances for eviction (TTL=%dh)", len(stoppedIDs), evictionHours)
+		logger.Info("checking stopped warm pool instances for eviction",
+			"count", len(stoppedIDs),
+			"ttl_hours", evictionHours,
+		)
 		if err := evictStaleInstances(ctx, ec2Client, ssmClient, stoppedIDs,
 			evictionHours, region, secretsPrefix, controlNodeID); err != nil {
-			log.Printf("WARNING: eviction step failed: %v", err)
+			logger.Warn("eviction step failed", "error", err.Error())
 		}
 	}
 
@@ -111,10 +122,13 @@ func handler(ctx context.Context, _ interface{}) error {
 	// This catches nodes left behind by ABANDON'd lifecycle actions or hard terminates.
 	if controlNodeID != "" && secretsPrefix != "" {
 		if err := sweepOrphanedNodes(ctx, ssmClient, ec2Client, asgClient, controlNodeID, secretsPrefix, region, asgName); err != nil {
-			log.Printf("WARNING: orphan node sweep failed: %v", err)
+			logger.Warn("orphan node sweep failed", "error", err.Error())
 		}
 	} else {
-		log.Printf("Skipping orphan sweep: CONTROL_NODE_ID_PARAM=%q SECRETS_PREFIX=%q", controlNodeIDParam, secretsPrefix)
+		logger.Info("skipping orphan sweep",
+			"control_node_id_param", controlNodeIDParam,
+			"secrets_prefix", secretsPrefix,
+		)
 	}
 
 	return nil
@@ -140,22 +154,32 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 			instanceID := aws.ToString(inst.InstanceId)
 			entryTime := warmPoolEntryTime(inst.Tags, aws.ToTime(inst.LaunchTime))
 			age := time.Since(entryTime)
-			log.Printf("Instance %s: warm-pool-entry=%s age=%s",
-				instanceID, entryTime.Format(time.RFC3339), age.Round(time.Minute))
+			logger.Info("checking instance age",
+				"instance", instanceID,
+				"warm_pool_entry", entryTime.Format(time.RFC3339),
+				"age", age.Round(time.Minute).String(),
+			)
 
 			if !entryTime.Before(evictionCutoff) {
 				continue
 			}
 
-			log.Printf("Evicting %s (age %s > TTL %dh)", instanceID, age.Round(time.Hour), evictionHours)
+			logger.Info("evicting stale instance",
+				"instance", instanceID,
+				"age", age.Round(time.Hour).String(),
+				"ttl_hours", evictionHours,
+			)
 			_, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 				InstanceIds: []string{instanceID},
 			})
 			if err != nil {
-				log.Printf("WARNING: Failed to terminate %s: %v", instanceID, err)
+				logger.Warn("failed to terminate instance",
+					"instance", instanceID,
+					"error", err.Error(),
+				)
 				continue
 			}
-			log.Printf("Terminated warm pool instance %s", instanceID)
+			logger.Info("terminated warm pool instance", "instance", instanceID)
 			evicted++
 
 			// Release SSM slot lock (may be orphaned if shutdown script didn't run).
@@ -164,30 +188,47 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 				if _, ssmErr := ssmClient.DeleteParameter(ctx, &ssm.DeleteParameterInput{
 					Name: aws.String(lockParam),
 				}); ssmErr != nil {
-					log.Printf("WARNING: Could not release slot lock %s: %v", lockParam, ssmErr)
+					logger.Warn("could not release slot lock",
+						"param", lockParam,
+						"error", ssmErr.Error(),
+					)
 				} else {
-					log.Printf("Released slot lock %s for terminated instance %s", lockParam, instanceID)
+					logger.Info("released slot lock for terminated instance",
+						"param", lockParam,
+						"instance", instanceID,
+					)
 				}
 			} else {
-				log.Printf("WARNING: No elastic-gcs:slot tag on %s — slot lock not released", instanceID)
+				logger.Warn("no elastic-gcs:slot tag on instance, slot lock not released",
+					"instance", instanceID,
+				)
 			}
 
 			// Delete the GCS node registration for the terminated instance.
 			if controlNodeID != "" {
 				nodeID := gcsNodeIDTag(inst.Tags)
 				if nodeID != "" {
-					log.Printf("Deleting GCS node %s for evicted instance %s", nodeID, instanceID)
+					logger.Info("deleting GCS node for evicted instance",
+						"node", nodeID,
+						"instance", instanceID,
+					)
 					if err := deleteGCSNode(ctx, ssmClient, controlNodeID, secretsPrefix, region, nodeID); err != nil {
-						log.Printf("WARNING: GCS node delete failed for %s: %v — will be caught by orphan sweep", nodeID, err)
+						logger.Warn("GCS node delete failed, will be caught by orphan sweep",
+							"node", nodeID,
+							"error", err.Error(),
+						)
 					}
 				} else {
-					log.Printf("No %s tag on %s — GCS node not deleted; will be caught by orphan sweep", gcsNodeIDTagKey, instanceID)
+					logger.Warn("no gcs-node-id tag on instance, GCS node not deleted; will be caught by orphan sweep",
+						"tag", gcsNodeIDTagKey,
+						"instance", instanceID,
+					)
 				}
 			}
 		}
 	}
 
-	log.Printf("Eviction complete: checked=%d evicted=%d", len(instanceIDs), evicted)
+	logger.Info("eviction complete", "checked", len(instanceIDs), "evicted", evicted)
 	return nil
 }
 
@@ -202,7 +243,7 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *ec2.Client,
 	asgClient *autoscaling.Client, controlNodeID, secretsPrefix, region, asgName string) error {
 
-	log.Printf("Starting orphan GCS node sweep")
+	logger.Info("starting orphan GCS node sweep")
 
 	// Collect all live ASG instances: active (InService) + warm pool (stopped/pending).
 	var allInstanceIDs []string
@@ -241,13 +282,19 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 				}
 				nodeID := gcsNodeIDTag(inst.Tags)
 				if nodeID == "" {
-					log.Printf("Instance %s (%s) has no %s tag — skipping orphan sweep to avoid deleting live nodes. Rebuild warm pool after boot script update to enable sweep.",
-						aws.ToString(inst.InstanceId), inst.State.Name, gcsNodeIDTagKey)
+					logger.Warn("instance has no gcs-node-id tag, skipping orphan sweep to avoid deleting live nodes",
+						"instance", aws.ToString(inst.InstanceId),
+						"state", string(inst.State.Name),
+						"tag", gcsNodeIDTagKey,
+					)
 					return nil
 				}
 				activeNodeIDs[nodeID] = struct{}{}
-				log.Printf("Live instance %s ↔ GCS node %s (%s)",
-					aws.ToString(inst.InstanceId), nodeID, inst.State.Name)
+				logger.Info("live instance mapped to GCS node",
+					"instance", aws.ToString(inst.InstanceId),
+					"node", nodeID,
+					"state", string(inst.State.Name),
+				)
 			}
 		}
 	}
@@ -264,7 +311,7 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 		return fmt.Errorf("failed to parse node list JSON (output: %.200s): %w", nodeListJSON, err)
 	}
 	allNodes := results[0].Data
-	log.Printf("GCS endpoint has %d nodes total", len(allNodes))
+	logger.Info("GCS node list retrieved", "total_nodes", len(allNodes))
 
 	// Delete inactive GCS nodes that have no live EC2 instance.
 	var deleted, skipped int
@@ -274,20 +321,24 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 			continue // active nodes are always kept (control node + serving DTNs)
 		}
 		if _, ok := activeNodeIDs[node.ID]; ok {
-			log.Printf("Inactive node %s has a live EC2 instance — skipping", node.ID)
+			logger.Info("inactive node has a live EC2 instance, skipping", "node", node.ID)
 			skipped++
 			continue
 		}
-		log.Printf("Deleting orphaned inactive GCS node %s", node.ID)
+		logger.Info("deleting orphaned inactive GCS node", "node", node.ID)
 		if err := deleteGCSNode(ctx, ssmClient, controlNodeID, secretsPrefix, region, node.ID); err != nil {
-			log.Printf("WARNING: failed to delete orphan node %s: %v", node.ID, err)
+			logger.Warn("failed to delete orphan node", "node", node.ID, "error", err.Error())
 		} else {
 			deleted++
 		}
 	}
 
-	log.Printf("Orphan sweep complete: total=%d active_ec2=%d skipped=%d deleted=%d",
-		len(allNodes), len(activeNodeIDs), skipped, deleted)
+	logger.Info("orphan sweep complete",
+		"total_nodes", len(allNodes),
+		"active_ec2", len(activeNodeIDs),
+		"skipped", skipped,
+		"deleted", deleted,
+	)
 	return nil
 }
 
@@ -300,7 +351,7 @@ func deleteGCSNode(ctx context.Context, ssmClient *ssm.Client,
 	if err != nil {
 		return err
 	}
-	log.Printf("node delete %s: %s", nodeID, strings.TrimSpace(out))
+	logger.Info("node delete completed", "node", nodeID, "output", strings.TrimSpace(out))
 	return nil
 }
 
@@ -396,6 +447,7 @@ func warmPoolEntryTime(tags []ec2types.Tag, launchTime time.Time) time.Time {
 }
 
 func main() {
-	log.Printf("Elastic GCS Cache Eviction Lambda starting")
+	region := os.Getenv("AWS_REGION")
+	logger.Init("elastic-gcs-cache-eviction", region)
 	lambda.Start(handler)
 }

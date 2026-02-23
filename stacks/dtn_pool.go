@@ -714,6 +714,41 @@ fi
 	}))
 
 	// -------------------------------------------------------------------------
+	// Version Check Lambda
+	// Runs every 6h via EventBridge. Queries each running node for its GCS
+	// version, then publishes ElasticGCS/GCSVersionDrift (0=healthy, >0=drift).
+	// Only InService DTNs are checked — stopped warm pool instances can't run SSM.
+	// -------------------------------------------------------------------------
+	versionCheckFn := awslambda.NewFunction(stack, jsii.String("VersionCheckFn"), &awslambda.FunctionProps{
+		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-version-check-%s", region)),
+		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
+		Architecture: awslambda.Architecture_ARM_64(),
+		Handler:      jsii.String("bootstrap"),
+		Code:         awslambda.Code_FromAsset(jsii.String("lambda/version_check"), nil),
+		Timeout:      awscdk.Duration_Minutes(jsii.Number(2)),
+		MemorySize:   jsii.Number(128),
+		Environment: &map[string]*string{
+			"ASG_NAME":              asg.AutoScalingGroupName(),
+			"REGION":                jsii.String(region),
+			"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
+		},
+		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+	})
+	versionCheckFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:    jsii.String("VersionCheckLambdaPerms"),
+		Effect: awsiam.Effect_ALLOW,
+		Actions: jsii.Strings(
+			"ssm:SendCommand",
+			"ssm:GetCommandInvocation",
+			"ssm:GetParameter",
+			"autoscaling:DescribeAutoScalingGroups",
+			"ec2:DescribeInstances",
+			"cloudwatch:PutMetricData",
+		),
+		Resources: jsii.Strings("*"),
+	}))
+
+	// -------------------------------------------------------------------------
 	// EventBridge: ASG Lifecycle Hook Events → Lifecycle Lambda
 	// ASG publishes lifecycle events to EventBridge automatically.
 	// We filter to only our ASG by name (hardcoded to avoid CDK token issues).
@@ -754,6 +789,15 @@ fi
 		Schedule: awsevents.Schedule_Rate(awscdk.Duration_Minutes(jsii.Number(1))),
 	})
 	demandMonitorRule.AddTarget(awseventstargets.NewLambdaFunction(demandMonitorFn, nil))
+
+	// -------------------------------------------------------------------------
+	// EventBridge: Version Check Schedule (every 6 hours)
+	// -------------------------------------------------------------------------
+	versionCheckRule := awsevents.NewRule(stack, jsii.String("VersionCheckRule"), &awsevents.RuleProps{
+		Description: jsii.String(fmt.Sprintf("GCS version drift check every 6h in %s", region)),
+		Schedule:    awsevents.Schedule_Rate(awscdk.Duration_Hours(jsii.Number(6))),
+	})
+	versionCheckRule.AddTarget(awseventstargets.NewLambdaFunction(versionCheckFn, nil))
 
 	// -------------------------------------------------------------------------
 	// CloudWatch Alarms + SNS → Scale-Out / Scale-In Lambdas
@@ -822,6 +866,216 @@ fi
 		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING, // demand monitor down = don't scale in
 	})
 	scaleInAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleInTopic))
+
+	// GCS Version Drift alarm: fires when GCSVersionDrift > 0 (any drift detected).
+	// Uses the scaleOutTopic for operator notification (same SNS infrastructure).
+	versionDriftAlarmName := fmt.Sprintf("elastic-gcs-version-drift-%s", region)
+	versionDriftAlarm := awscloudwatch.NewAlarm(stack, jsii.String("VersionDriftAlarm"), &awscloudwatch.AlarmProps{
+		AlarmName:        jsii.String(versionDriftAlarmName),
+		AlarmDescription: jsii.String("GCS version drift detected — nodes running different GCS versions"),
+		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+			Namespace:  jsii.String("ElasticGCS"),
+			MetricName: jsii.String("GCSVersionDrift"),
+			DimensionsMap: &map[string]*string{
+				"Region": jsii.String(region),
+			},
+			Period:    awscdk.Duration_Hours(jsii.Number(6)),
+			Statistic: jsii.String("Maximum"),
+		}),
+		Threshold:          jsii.Number(0),
+		ComparisonOperator: awscloudwatch.ComparisonOperator_GREATER_THAN_THRESHOLD,
+		EvaluationPeriods:  jsii.Number(1),
+		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING,
+	})
+	versionDriftAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleOutTopic))
+
+	// -------------------------------------------------------------------------
+	// CloudWatch Dashboard — ElasticGCS-{region}
+	//
+	// Three rows × three 8-wide columns = full 24-column CloudWatch layout.
+	// Row 1: Transfer demand (active transfers, DTN scale, alarm status)
+	// Row 2: Scaling activity (scale events, lifecycle latency, Lambda errors)
+	// Row 3: Health (version drift, demand monitor, cache eviction)
+	// -------------------------------------------------------------------------
+	dashboard := awscloudwatch.NewDashboard(stack, jsii.String("Dashboard"), &awscloudwatch.DashboardProps{
+		DashboardName: jsii.String(fmt.Sprintf("ElasticGCS-%s", region)),
+	})
+
+	// Row 1: Transfer demand
+	dashboard.AddWidgets(
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Active Transfers"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Left: &[]awscloudwatch.IMetric{
+				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+					Namespace:  jsii.String("ElasticGCS"),
+					MetricName: jsii.String("ActiveTransfers"),
+					DimensionsMap: &map[string]*string{
+						"Region": jsii.String(region),
+					},
+					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
+					Statistic: jsii.String("Maximum"),
+					Label:     jsii.String("Active Transfers"),
+				}),
+			},
+		}),
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("DTN Scale"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Left: &[]awscloudwatch.IMetric{
+				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+					Namespace:  jsii.String("AWS/AutoScaling"),
+					MetricName: jsii.String("GroupInServiceInstances"),
+					DimensionsMap: &map[string]*string{
+						"AutoScalingGroupName": jsii.String(asgName),
+					},
+					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
+					Statistic: jsii.String("Average"),
+					Label:     jsii.String("In Service"),
+				}),
+				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+					Namespace:  jsii.String("AWS/AutoScaling"),
+					MetricName: jsii.String("WarmPoolMinSize"),
+					DimensionsMap: &map[string]*string{
+						"AutoScalingGroupName": jsii.String(asgName),
+					},
+					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
+					Statistic: jsii.String("Average"),
+					Label:     jsii.String("Warm Pool"),
+				}),
+			},
+		}),
+		awscloudwatch.NewAlarmStatusWidget(&awscloudwatch.AlarmStatusWidgetProps{
+			Title:  jsii.String("Alarm Status"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Alarms: &[]awscloudwatch.IAlarm{scaleOutAlarm, scaleInAlarm, versionDriftAlarm},
+		}),
+	)
+
+	// Row 2: Scaling activity
+	dashboard.AddWidgets(
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Scale Events (24h)"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			View:   awscloudwatch.GraphWidgetView_BAR,
+			Left: &[]awscloudwatch.IMetric{
+				scaleOutFn.MetricInvocations(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("Scale-Out"),
+				}),
+				scaleInFn.MetricInvocations(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("Scale-In"),
+				}),
+			},
+		}),
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Lifecycle Latency P99 (24h)"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Left: &[]awscloudwatch.IMetric{
+				lifecycleFn.MetricDuration(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("p99"),
+					Label:     jsii.String("lifecycle p99"),
+				}),
+			},
+		}),
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Lambda Errors (24h)"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			View:   awscloudwatch.GraphWidgetView_BAR,
+			Left: &[]awscloudwatch.IMetric{
+				lifecycleFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("lifecycle"),
+				}),
+				scaleOutFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("scaleout"),
+				}),
+				scaleInFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("scalein"),
+				}),
+				cacheEvictionFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("cache-eviction"),
+				}),
+				demandMonitorFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("demand-monitor"),
+				}),
+				versionCheckFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("version-check"),
+				}),
+			},
+		}),
+	)
+
+	// Row 3: Health
+	dashboard.AddWidgets(
+		awscloudwatch.NewSingleValueWidget(&awscloudwatch.SingleValueWidgetProps{
+			Title:  jsii.String("GCS Version Drift"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Metrics: &[]awscloudwatch.IMetric{
+				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+					Namespace:  jsii.String("ElasticGCS"),
+					MetricName: jsii.String("GCSVersionDrift"),
+					DimensionsMap: &map[string]*string{
+						"Region": jsii.String(region),
+					},
+					Period:    awscdk.Duration_Hours(jsii.Number(6)),
+					Statistic: jsii.String("Maximum"),
+					Label:     jsii.String("Drift Count"),
+				}),
+			},
+		}),
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Demand Monitor (1h)"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Left: &[]awscloudwatch.IMetric{
+				demandMonitorFn.MetricInvocations(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Minutes(jsii.Number(5)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("invocations"),
+				}),
+				demandMonitorFn.MetricErrors(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Minutes(jsii.Number(5)),
+					Statistic: jsii.String("Sum"),
+					Label:     jsii.String("errors"),
+				}),
+			},
+		}),
+		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
+			Title:  jsii.String("Cache Eviction Duration (24h)"),
+			Width:  jsii.Number(8),
+			Height: jsii.Number(6),
+			Left: &[]awscloudwatch.IMetric{
+				cacheEvictionFn.MetricDuration(&awscloudwatch.MetricOptions{
+					Period:    awscdk.Duration_Hours(jsii.Number(1)),
+					Statistic: jsii.String("Maximum"),
+					Label:     jsii.String("duration"),
+				}),
+			},
+		}),
+	)
 
 	// -------------------------------------------------------------------------
 	// Stack Outputs

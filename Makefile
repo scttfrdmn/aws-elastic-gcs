@@ -11,6 +11,7 @@ build-lambdas:
 	GOOS=linux GOARCH=arm64 go build -o lambda/scalein/bootstrap ./lambda/scalein/
 	GOOS=linux GOARCH=arm64 go build -o lambda/cache_eviction/bootstrap ./lambda/cache_eviction/
 	GOOS=linux GOARCH=arm64 go build -o lambda/demand_monitor/bootstrap ./lambda/demand_monitor/
+	GOOS=linux GOARCH=arm64 go build -o lambda/version_check/bootstrap ./lambda/version_check/
 
 build-ctl:
 	@echo "Building CLI tool..."

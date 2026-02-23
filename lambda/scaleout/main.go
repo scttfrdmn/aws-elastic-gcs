@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 
@@ -12,6 +11,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+
+	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
 
 // ScaleOutEvent is the payload for manual or alarm-triggered scale-out.
@@ -73,8 +74,12 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	}
 
 	event := parseEvent(rawEvent)
-	log.Printf("Scale-out triggered: source=%s reason=%s region=%s asg=%s",
-		event.Source, event.Reason, region, asgName)
+	logger.Info("scale-out triggered",
+		"source", event.Source,
+		"reason", event.Reason,
+		"region", region,
+		"asg", asgName,
+	)
 
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -106,11 +111,18 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	}
 
 	if newDesired <= currentDesired {
-		log.Printf("Already at desired capacity %d (max %d) — no action", currentDesired, maxDTNs)
+		logger.Info("already at desired capacity, no action",
+			"desired", currentDesired,
+			"max", maxDTNs,
+		)
 		return nil
 	}
 
-	log.Printf("Setting ASG desired capacity: %d → %d (max %d)", currentDesired, newDesired, maxDTNs)
+	logger.Info("setting ASG desired capacity",
+		"from", currentDesired,
+		"to", newDesired,
+		"max", maxDTNs,
+	)
 	_, err = asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
 		AutoScalingGroupName: aws.String(asgName),
 		DesiredCapacity:      aws.Int32(int32(newDesired)),
@@ -120,11 +132,12 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		return fmt.Errorf("SetDesiredCapacity failed: %w", err)
 	}
 
-	log.Printf("Scale-out complete: ASG=%s desired=%d", asgName, newDesired)
+	logger.Info("scale-out complete", "asg", asgName, "desired", newDesired)
 	return nil
 }
 
 func main() {
-	log.Printf("Elastic GCS Scale-Out Lambda starting")
+	region := os.Getenv("AWS_REGION")
+	logger.Init("elastic-gcs-scaleout", region)
 	lambda.Start(handler)
 }

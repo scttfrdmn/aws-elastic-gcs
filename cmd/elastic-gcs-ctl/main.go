@@ -1,153 +1,1159 @@
+// elastic-gcs-ctl is an operator CLI for managing Elastic GCS deployments.
+// It provides a one-stop view of system state and commands for common operations,
+// designed for live GlobusWorld demos and day-to-day operations.
 package main
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
+	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
+	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
 )
 
-// elastic-gcs-ctl is a CLI tool for managing Elastic GCS deployments.
-//
-// Commands:
-//   status      Show status of all nodes across regions
-//   scale-out   Manually trigger scale-out in a region
-//   scale-in    Manually trigger scale-in in a region
-//   benchmark   Run scale-out timing benchmark
-//   transfer    Submit a test transfer via Globus SDK
-//   open-data   List configured Open Data buckets and collections
-//
-// Usage:
-//   elastic-gcs-ctl status --region us-east-1
-//   elastic-gcs-ctl scale-out --region us-east-1 --count 1
-//   elastic-gcs-ctl benchmark --region us-east-1 --tier warm
-//   elastic-gcs-ctl transfer --source 1000genomes --dest <endpoint-id>:/path
-//   elastic-gcs-ctl open-data --region us-east-1
-//
-// This tool uses:
-//   - AWS SDK for EC2, ASG, CloudWatch, SSM operations
-//   - github.com/scttfrdmn/globus-go-sdk/v3 for Globus Transfer API operations
+const toolVersion = "v0.4.0"
+
+// Well-known collection and endpoint IDs for test transfers.
+const (
+	collection1000Genomes = "bb3e8265-a9f6-4179-a367-f6cfaf4a29af"
+	tutorialEndpoint2     = "ddb59aef-6d04-11e5-ba46-22000b92c6ec"
+	testTransferFile      = "/1000genomes/release/20130502/20140625_related_individuals.txt"
+	testTransferDest      = "/~/elastic-gcs-test.txt"
+)
+
+var (
+	regionFlag  string
+	profileFlag string
+	rootCmd     = &cobra.Command{
+		Use:   "elastic-gcs-ctl",
+		Short: "Elastic GCS operator CLI",
+		Long:  "elastic-gcs-ctl — manage Elastic Globus Connect Server deployments on AWS",
+	}
+)
+
+func init() {
+	defaultRegion := os.Getenv("AWS_REGION")
+	if defaultRegion == "" {
+		defaultRegion = "us-east-1"
+	}
+	defaultProfile := os.Getenv("AWS_PROFILE")
+	if defaultProfile == "" {
+		defaultProfile = "aws"
+	}
+
+	rootCmd.PersistentFlags().StringVar(&regionFlag, "region", defaultRegion, "AWS region")
+	rootCmd.PersistentFlags().StringVar(&profileFlag, "profile", defaultProfile, "AWS profile")
+
+	rootCmd.AddCommand(statusCmd())
+	rootCmd.AddCommand(scaleCmd())
+	rootCmd.AddCommand(nodesCmd())
+	rootCmd.AddCommand(logsCmd())
+	rootCmd.AddCommand(metricsCmd())
+	rootCmd.AddCommand(refreshCmd())
+	rootCmd.AddCommand(transferCmd())
+	rootCmd.AddCommand(buildAMICmd())
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print version",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("elastic-gcs-ctl %s\n", toolVersion)
+		},
+	})
+}
+
+// loadAWSConfig creates an AWS SDK config with the --region and --profile flags.
+func loadAWSConfig(ctx context.Context) (aws.Config, error) {
+	opts := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(regionFlag),
+	}
+	if profileFlag != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(profileFlag))
+	}
+	return awsconfig.LoadDefaultConfig(ctx, opts...)
+}
+
+// getSSMParam fetches a single SSM parameter value.
+func getSSMParam(ctx context.Context, ssmClient *ssm.Client, name string) (string, error) {
+	out, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(name)})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(out.Parameter.Value), nil
+}
+
+func secretsPrefix() string { return fmt.Sprintf("elastic-gcs/%s", regionFlag) }
+func asgName() string        { return fmt.Sprintf("elastic-gcs-dtn-%s", regionFlag) }
+func controlNodeIDParamPath() string {
+	return fmt.Sprintf("/elastic-gcs/%s/control-node-id", regionFlag)
+}
+func endpointIDParamPath() string {
+	return fmt.Sprintf("/elastic-gcs/%s/endpoint-id", regionFlag)
+}
+
+// runGCSCLIOnControlNode sends an SSM command to the control node that sets
+// up GCS CLI auth from Secrets Manager and runs the given GCS command.
+func runGCSCLIOnControlNode(ctx context.Context, ssmClient *ssm.Client, controlNodeID, gcsCmd string) (string, error) {
+	pfx := secretsPrefix()
+	region := regionFlag
+	script := fmt.Sprintf(`
+export GCS_CLI_CLIENT_ID=$(aws secretsmanager get-secret-value \
+    --secret-id %s/globus-client-id \
+    --query SecretString --output text --region %s 2>/dev/null)
+export GCS_CLI_CLIENT_SECRET=$(aws secretsmanager get-secret-value \
+    --secret-id %s/globus-client-secret \
+    --query SecretString --output text --region %s 2>/dev/null)
+export GCS_CLI_ENDPOINT_ID=$(aws ssm get-parameter \
+    --name /elastic-gcs/%s/endpoint-id \
+    --query Parameter.Value --output text --region %s 2>/dev/null)
+%s`, pfx, region, pfx, region, region, region, gcsCmd)
+
+	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:  []string{controlNodeID},
+		DocumentName: aws.String("AWS-RunShellScript"),
+		Parameters: map[string][]string{
+			"commands":         {script},
+			"executionTimeout": {"60"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("SSM SendCommand: %w", err)
+	}
+
+	commandID := aws.ToString(cmdOut.Command.CommandId)
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId:  aws.String(commandID),
+			InstanceId: aws.String(controlNodeID),
+		})
+		if err != nil {
+			continue
+		}
+		switch inv.Status {
+		case ssmtypes.CommandInvocationStatusSuccess:
+			return aws.ToString(inv.StandardOutputContent), nil
+		case ssmtypes.CommandInvocationStatusFailed:
+			return aws.ToString(inv.StandardOutputContent),
+				fmt.Errorf("command failed: %s", aws.ToString(inv.StandardErrorContent))
+		case ssmtypes.CommandInvocationStatusTimedOut,
+			ssmtypes.CommandInvocationStatusCancelled,
+			ssmtypes.CommandInvocationStatusCancelling:
+			return "", fmt.Errorf("SSM command in terminal state: %s", inv.Status)
+		}
+	}
+	return "", fmt.Errorf("timed out waiting for SSM command")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// status
+// ─────────────────────────────────────────────────────────────────────────────
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show system status (control node, DTN pool, GCS nodes, metrics, alarms)",
+		RunE:  runStatus,
+	}
+}
+
+type gcsNodeResult struct {
+	Data []gcsNode `json:"data"`
+}
+type gcsNode struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	IPAddress string `json:"ip_address"`
+}
+
+func runStatus(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	ssmClient := ssm.NewFromConfig(cfg)
+	ec2Client := ec2.NewFromConfig(cfg)
+	asgClient := autoscaling.NewFromConfig(cfg)
+	cwClient := cloudwatch.NewFromConfig(cfg)
+
+	// Control node + endpoint IDs from SSM
+	controlNodeID, err := getSSMParam(ctx, ssmClient, controlNodeIDParamPath())
+	if err != nil {
+		return fmt.Errorf("cannot get control node ID: %w", err)
+	}
+	endpointID, _ := getSSMParam(ctx, ssmClient, endpointIDParamPath())
+
+	// Describe control node
+	var controlIP, controlState string
+	controlInfo, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{controlNodeID},
+	})
+	if err == nil && len(controlInfo.Reservations) > 0 && len(controlInfo.Reservations[0].Instances) > 0 {
+		inst := controlInfo.Reservations[0].Instances[0]
+		controlIP = aws.ToString(inst.PublicIpAddress)
+		controlState = string(inst.State.Name)
+	}
+
+	// ASG desired + in-service count
+	var desired, inService int
+	groups, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
+		AutoScalingGroupNames: []string{asgName()},
+	})
+	if err == nil && len(groups.AutoScalingGroups) > 0 {
+		desired = int(aws.ToInt32(groups.AutoScalingGroups[0].DesiredCapacity))
+		for _, inst := range groups.AutoScalingGroups[0].Instances {
+			if string(inst.LifecycleState) == "InService" {
+				inService++
+			}
+		}
+	}
+
+	// Warm pool instances with slot + node ID tags
+	type dtnInfo struct {
+		instanceID, slot, state, nodeID string
+	}
+	var dtnNodes []dtnInfo
+	wp, err := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
+		AutoScalingGroupName: aws.String(asgName()),
+	})
+	if err == nil && len(wp.Instances) > 0 {
+		var warmIDs []string
+		stateByID := make(map[string]string)
+		for _, inst := range wp.Instances {
+			id := aws.ToString(inst.InstanceId)
+			warmIDs = append(warmIDs, id)
+			stateByID[id] = string(inst.LifecycleState)
+		}
+		ec2Out, _ := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+			InstanceIds: warmIDs,
+		})
+		tagsByID := make(map[string][]ec2types.Tag)
+		for _, r := range ec2Out.Reservations {
+			for _, i := range r.Instances {
+				tagsByID[aws.ToString(i.InstanceId)] = i.Tags
+			}
+		}
+		for _, id := range warmIDs {
+			info := dtnInfo{instanceID: id, state: stateByID[id]}
+			for _, tag := range tagsByID[id] {
+				switch aws.ToString(tag.Key) {
+				case "elastic-gcs:slot":
+					info.slot = aws.ToString(tag.Value)
+				case "elastic-gcs:gcs-node-id":
+					v := aws.ToString(tag.Value)
+					if len(v) > 8 {
+						v = v[:8]
+					}
+					info.nodeID = v
+				}
+			}
+			dtnNodes = append(dtnNodes, info)
+		}
+	}
+
+	// GCS node list from control node via SSM
+	var gcsNodes []gcsNode
+	nodeJSON, ssmErr := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
+		"globus-connect-server node list -F json 2>/dev/null")
+	if ssmErr == nil {
+		var results []gcsNodeResult
+		if json.Unmarshal([]byte(nodeJSON), &results) == nil && len(results) > 0 {
+			gcsNodes = results[0].Data
+		}
+	}
+
+	// Active transfers (last 5 min)
+	var activeTransfers float64
+	stats, _ := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("ElasticGCS"),
+		MetricName: aws.String("ActiveTransfers"),
+		StartTime:  aws.Time(time.Now().Add(-5 * time.Minute)),
+		EndTime:    aws.Time(time.Now()),
+		Period:     aws.Int32(300),
+		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
+		Dimensions: []cwtypes.Dimension{
+			{Name: aws.String("Region"), Value: aws.String(regionFlag)},
+		},
+	})
+	if len(stats.Datapoints) > 0 {
+		activeTransfers = aws.ToFloat64(stats.Datapoints[0].Maximum)
+	}
+
+	// Alarm states
+	alarmNames := []string{
+		fmt.Sprintf("elastic-gcs-scaleout-%s", regionFlag),
+		fmt.Sprintf("elastic-gcs-scalein-%s", regionFlag),
+		fmt.Sprintf("elastic-gcs-version-drift-%s", regionFlag),
+	}
+	alarmStates := make(map[string]string)
+	alarmsOut, _ := cwClient.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{
+		AlarmNames: alarmNames,
+	})
+	for _, a := range alarmsOut.MetricAlarms {
+		alarmStates[aws.ToString(a.AlarmName)] = string(a.StateValue)
+	}
+
+	// ── Render ────────────────────────────────────────────────────────────────
+	bold := color.New(color.Bold)
+	green := color.New(color.FgGreen)
+	red := color.New(color.FgRed)
+	yellow := color.New(color.FgYellow)
+	dim := color.New(color.Faint)
+
+	bold.Printf("\nElastic GCS — %s\n", regionFlag)
+	fmt.Println(strings.Repeat("━", 60))
+
+	// Control node
+	sym, sc := "●", green
+	if controlState != "running" {
+		sym, sc = "○", red
+	}
+	fmt.Printf("Control Node   %-24s", controlNodeID)
+	sc.Printf("%s %-12s", sym, controlState)
+	fmt.Printf("  %s\n", controlIP)
+
+	// Endpoint
+	fmt.Printf("Endpoint       %s\n", endpointID)
+
+	fmt.Println()
+
+	// DTN pool
+	bold.Printf("DTN Pool       ")
+	fmt.Printf("desired=%-3d  in-service=%-3d  warm=%d\n", desired, inService, len(dtnNodes))
+	for _, d := range dtnNodes {
+		fmt.Printf("  %-24s  slot=%-3s  %-22s  node=%s\n",
+			d.instanceID, d.slot, d.state, d.nodeID)
+	}
+
+	fmt.Println()
+
+	// GCS nodes
+	bold.Printf("GCS Nodes\n")
+	for _, n := range gcsNodes {
+		sym, nc := "○", dim
+		if n.Status == "active" {
+			sym, nc = "●", green
+		}
+		shortID := n.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		label := ""
+		if n.IPAddress == controlIP {
+			label = "(control)"
+		}
+		nc.Printf("  %s  ", sym)
+		fmt.Printf("%-10s  %-18s  %-8s  %s\n", shortID, n.IPAddress, n.Status, label)
+	}
+
+	fmt.Println()
+	fmt.Printf("Active Transfers (5 min):  %.0f\n", activeTransfers)
+
+	// Alarms line
+	fmt.Printf("Alarms:")
+	for _, name := range alarmNames {
+		parts := strings.Split(name, "-")
+		short := parts[2] // scaleout / scalein / version
+		if short == "version" && len(parts) > 3 {
+			short = "version-drift"
+		}
+		state := alarmStates[name]
+		switch state {
+		case "OK":
+			fmt.Printf("  %s ", short)
+			green.Printf("○ OK")
+		case "ALARM":
+			fmt.Printf("  %s ", short)
+			red.Printf("● ALARM")
+		default:
+			fmt.Printf("  %s ", short)
+			yellow.Printf("? %s", state)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// scale
+// ─────────────────────────────────────────────────────────────────────────────
+
+func scaleCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "scale",
+		Short: "Scale DTN pool up or down",
+	}
+
+	var toN int
+	var watch bool
+
+	upCmd := &cobra.Command{
+		Use:   "up",
+		Short: "Increase DTN desired capacity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScale(context.Background(), toN, true, watch)
+		},
+	}
+	upCmd.Flags().IntVar(&toN, "to", 0, "Target desired capacity (default: current+1)")
+	upCmd.Flags().BoolVar(&watch, "watch", false, "Poll until stable")
+
+	downCmd := &cobra.Command{
+		Use:   "down",
+		Short: "Decrease DTN desired capacity",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScale(context.Background(), toN, false, watch)
+		},
+	}
+	downCmd.Flags().IntVar(&toN, "to", 0, "Target desired capacity (default: current-1)")
+	downCmd.Flags().BoolVar(&watch, "watch", false, "Poll until stable")
+
+	cmd.AddCommand(upCmd, downCmd)
+	return cmd
+}
+
+func runScale(ctx context.Context, toN int, up bool, watch bool) error {
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	asgClient := autoscaling.NewFromConfig(cfg)
+
+	groups, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
+		AutoScalingGroupNames: []string{asgName()},
+	})
+	if err != nil || len(groups.AutoScalingGroups) == 0 {
+		return fmt.Errorf("cannot describe ASG: %w", err)
+	}
+	asg := groups.AutoScalingGroups[0]
+	current := int(aws.ToInt32(asg.DesiredCapacity))
+	maxCap := int(aws.ToInt32(asg.MaxSize))
+
+	newDesired := current
+	switch {
+	case toN > 0:
+		newDesired = toN
+	case up:
+		newDesired = current + 1
+	default:
+		newDesired = current - 1
+	}
+	if newDesired < 0 {
+		newDesired = 0
+	}
+	if newDesired > maxCap {
+		newDesired = maxCap
+	}
+
+	if newDesired == current {
+		fmt.Printf("Already at desired=%d, no change.\n", current)
+		return nil
+	}
+
+	dir := "↑"
+	if newDesired < current {
+		dir = "↓"
+	}
+	fmt.Printf("Scaling %s  desired: %d → %d\n", dir, current, newDesired)
+
+	_, err = asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
+		AutoScalingGroupName: aws.String(asgName()),
+		DesiredCapacity:      aws.Int32(int32(newDesired)),
+		HonorCooldown:        aws.Bool(false),
+	})
+	if err != nil {
+		return fmt.Errorf("SetDesiredCapacity: %w", err)
+	}
+
+	if !watch {
+		fmt.Println("Scale request submitted. Run `status` to monitor progress.")
+		return nil
+	}
+
+	fmt.Printf("Watching...")
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		g, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
+			AutoScalingGroupNames: []string{asgName()},
+		})
+		if err != nil || len(g.AutoScalingGroups) == 0 {
+			continue
+		}
+		var inSvc int
+		for _, inst := range g.AutoScalingGroups[0].Instances {
+			if string(inst.LifecycleState) == "InService" {
+				inSvc++
+			}
+		}
+		fmt.Printf("\r  InService=%d  desired=%d   ", inSvc, newDesired)
+		if inSvc == newDesired {
+			fmt.Println()
+			color.Green("  Done.\n")
+			return nil
+		}
+	}
+	fmt.Println()
+	return fmt.Errorf("timed out waiting for scale to complete")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// nodes
+// ─────────────────────────────────────────────────────────────────────────────
+
+func nodesCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "nodes", Short: "GCS node operations"}
+	cmd.AddCommand(nodesListCmd(), nodesDeleteCmd(), nodesVersionCheckCmd())
+	return cmd
+}
+
+func nodesListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List all GCS nodes on the endpoint",
+		RunE:  runNodesList,
+	}
+}
+
+func runNodesList(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	ssmClient := ssm.NewFromConfig(cfg)
+
+	controlNodeID, err := getSSMParam(ctx, ssmClient, controlNodeIDParamPath())
+	if err != nil {
+		return fmt.Errorf("cannot get control node ID: %w", err)
+	}
+
+	nodeJSON, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
+		"globus-connect-server node list -F json 2>/dev/null")
+	if err != nil {
+		return fmt.Errorf("node list failed: %w", err)
+	}
+
+	var results []gcsNodeResult
+	if err := json.Unmarshal([]byte(nodeJSON), &results); err != nil || len(results) == 0 {
+		return fmt.Errorf("failed to parse node list (output: %.300s)", nodeJSON)
+	}
+
+	nodes := results[0].Data
+	fmt.Printf("%-36s  %-18s  %-10s\n", "NODE ID", "IP ADDRESS", "STATUS")
+	fmt.Println(strings.Repeat("─", 68))
+	for _, n := range nodes {
+		if n.Status == "active" {
+			color.Green("%-36s  %-18s  %s\n", n.ID, n.IPAddress, n.Status)
+		} else {
+			color.New(color.Faint).Printf("%-36s  %-18s  %s\n", n.ID, n.IPAddress, n.Status)
+		}
+	}
+	fmt.Printf("\n%d nodes total\n", len(nodes))
+	return nil
+}
+
+func nodesDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "delete <node-id>",
+		Short: "Delete a GCS node registration from the endpoint",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runNodesDelete,
+	}
+}
+
+func runNodesDelete(cmd *cobra.Command, args []string) error {
+	nodeID := args[0]
+	fmt.Printf("Are you sure you want to delete GCS node %s? [y/N] ", nodeID)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	if strings.ToLower(strings.TrimSpace(scanner.Text())) != "y" {
+		fmt.Println("Aborted.")
+		return nil
+	}
+
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	ssmClient := ssm.NewFromConfig(cfg)
+	controlNodeID, err := getSSMParam(ctx, ssmClient, controlNodeIDParamPath())
+	if err != nil {
+		return fmt.Errorf("cannot get control node ID: %w", err)
+	}
+
+	out, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
+		fmt.Sprintf("globus-connect-server node delete %s 2>&1", nodeID))
+	if err != nil {
+		return fmt.Errorf("node delete failed: %w", err)
+	}
+	fmt.Printf("node delete %s:\n%s\n", nodeID, strings.TrimSpace(out))
+	return nil
+}
+
+func nodesVersionCheckCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version-check",
+		Short: "Invoke the version drift check Lambda and display results",
+		RunE:  runNodesVersionCheck,
+	}
+}
+
+func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	lambdaClient := lambda.NewFromConfig(cfg)
+
+	fnName := fmt.Sprintf("elastic-gcs-version-check-%s", regionFlag)
+	fmt.Printf("Invoking %s (synchronous)...\n", fnName)
+
+	result, err := lambdaClient.Invoke(ctx, &lambda.InvokeInput{
+		FunctionName:   aws.String(fnName),
+		InvocationType: lambdatypes.InvocationTypeRequestResponse,
+	})
+	if err != nil {
+		return fmt.Errorf("Lambda invoke failed: %w", err)
+	}
+
+	if result.FunctionError != nil {
+		color.Red("Function error: %s\n", aws.ToString(result.FunctionError))
+		if len(result.Payload) > 0 {
+			fmt.Printf("Payload: %s\n", string(result.Payload))
+		}
+	} else {
+		color.Green("Version check completed (HTTP %d)\n", result.StatusCode)
+		fmt.Println("Check ElasticGCS/GCSVersionDrift metric for results,")
+		fmt.Printf("or run: aws cloudwatch get-metric-statistics --namespace ElasticGCS \\\n")
+		fmt.Printf("  --metric-name GCSVersionDrift --dimensions Name=Region,Value=%s \\\n", regionFlag)
+		fmt.Printf("  --start-time $(date -u -v-1H +%%FT%%TZ) --end-time $(date -u +%%FT%%TZ) \\\n")
+		fmt.Printf("  --period 21600 --statistics Maximum\n")
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// logs
+// ─────────────────────────────────────────────────────────────────────────────
+
+var lambdaFunctionBases = map[string]string{
+	"lifecycle":      "elastic-gcs-lifecycle",
+	"scaleout":       "elastic-gcs-scaleout",
+	"scalein":        "elastic-gcs-scalein",
+	"demand-monitor": "elastic-gcs-demand-monitor",
+	"cache-eviction": "elastic-gcs-cache-eviction",
+	"version-check":  "elastic-gcs-version-check",
+}
+
+func sortedLambdaNames() []string {
+	names := make([]string, 0, len(lambdaFunctionBases))
+	for k := range lambdaFunctionBases {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func logsCmd() *cobra.Command {
+	var since string
+	var tailFlag bool
+	var jsonFlag bool
+
+	cmd := &cobra.Command{
+		Use:   "logs <lambda>",
+		Short: "View Lambda CloudWatch logs",
+		Long: fmt.Sprintf("Stream CloudWatch Logs for a Lambda.\nAvailable: %s",
+			strings.Join(sortedLambdaNames(), ", ")),
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runLogs(args[0], since, tailFlag, jsonFlag)
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", "1h", "Show logs since duration (e.g. 30m, 1h, 24h)")
+	cmd.Flags().BoolVar(&tailFlag, "tail", false, "Continuously poll for new log events (every 2s)")
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "Emit raw JSON lines (pipe-friendly for jq)")
+	return cmd
+}
+
+func parseDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return time.Hour, nil
+	}
+	unit := s[len(s)-1]
+	val, err := strconv.ParseFloat(s[:len(s)-1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q", s)
+	}
+	switch unit {
+	case 'm':
+		return time.Duration(val * float64(time.Minute)), nil
+	case 'h':
+		return time.Duration(val * float64(time.Hour)), nil
+	case 'd':
+		return time.Duration(val * float64(24 * time.Hour)), nil
+	default:
+		return 0, fmt.Errorf("unknown duration unit %q (use m, h, d)", string(unit))
+	}
+}
+
+func runLogs(lambdaName, since string, tail, asJSON bool) error {
+	base, ok := lambdaFunctionBases[lambdaName]
+	if !ok {
+		return fmt.Errorf("unknown lambda %q — available: %s",
+			lambdaName, strings.Join(sortedLambdaNames(), ", "))
+	}
+	logGroup := fmt.Sprintf("/aws/lambda/%s-%s", base, regionFlag)
+
+	dur, err := parseDuration(since)
+	if err != nil {
+		return err
+	}
+	startTime := time.Now().Add(-dur)
+	startMs := startTime.UnixMilli()
+
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	cwlogsClient := cloudwatchlogs.NewFromConfig(cfg)
+
+	fmt.Printf("Logs: %s  (since %s)\n\n", logGroup, startTime.Format("15:04:05"))
+
+	var nextToken *string
+	for {
+		input := &cloudwatchlogs.FilterLogEventsInput{
+			LogGroupName: aws.String(logGroup),
+			StartTime:    aws.Int64(startMs),
+		}
+		if nextToken != nil {
+			input.NextToken = nextToken
+		}
+
+		out, err := cwlogsClient.FilterLogEvents(ctx, input)
+		if err != nil {
+			return fmt.Errorf("FilterLogEvents: %w", err)
+		}
+
+		for _, event := range out.Events {
+			msg := strings.TrimRight(aws.ToString(event.Message), "\n")
+			if asJSON {
+				fmt.Println(msg)
+			} else {
+				prettyPrintLogLine(msg)
+			}
+		}
+
+		if out.NextToken != nil {
+			nextToken = out.NextToken
+		} else if !tail {
+			break
+		} else {
+			if len(out.Events) > 0 {
+				startMs = aws.ToInt64(out.Events[len(out.Events)-1].Timestamp) + 1
+			}
+			nextToken = nil
+			time.Sleep(2 * time.Second)
+		}
+	}
+	return nil
+}
+
+func prettyPrintLogLine(line string) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "{") {
+		fmt.Println(line)
+		return
+	}
+	var entry map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &entry); err != nil {
+		fmt.Println(line)
+		return
+	}
+
+	level := strings.ToUpper(fmt.Sprint(entry["level"]))
+	ts := fmt.Sprint(entry["time"])
+	msg := fmt.Sprint(entry["msg"])
+
+	var pairs []string
+	skipKeys := map[string]bool{"level": true, "time": true, "msg": true}
+	for k, v := range entry {
+		if !skipKeys[k] {
+			pairs = append(pairs, fmt.Sprintf("%s=%v", k, v))
+		}
+	}
+	sort.Strings(pairs)
+
+	formatted := fmt.Sprintf("[%s] %s %s %s", level, ts, msg, strings.Join(pairs, " "))
+	switch level {
+	case "ERROR":
+		color.Red("%s\n", formatted)
+	case "WARN", "WARNING":
+		color.Yellow("%s\n", formatted)
+	default:
+		fmt.Println(formatted)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// metrics
+// ─────────────────────────────────────────────────────────────────────────────
+
+func metricsCmd() *cobra.Command {
+	var since string
+	cmd := &cobra.Command{
+		Use:   "metrics",
+		Short: "Show recent CloudWatch metrics with ASCII sparklines",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runMetrics(since)
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", "1h", "Time window (e.g. 30m, 1h, 24h)")
+	return cmd
+}
+
+func runMetrics(since string) error {
+	dur, err := parseDuration(since)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	cwClient := cloudwatch.NewFromConfig(cfg)
+
+	period := int32(60)
+	if dur > 3*time.Hour {
+		period = 300
+	}
+
+	out, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+		Namespace:  aws.String("ElasticGCS"),
+		MetricName: aws.String("ActiveTransfers"),
+		StartTime:  aws.Time(time.Now().Add(-dur)),
+		EndTime:    aws.Time(time.Now()),
+		Period:     aws.Int32(period),
+		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
+		Dimensions: []cwtypes.Dimension{
+			{Name: aws.String("Region"), Value: aws.String(regionFlag)},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("GetMetricStatistics: %w", err)
+	}
+
+	points := out.Datapoints
+	sort.Slice(points, func(i, j int) bool {
+		return aws.ToTime(points[i].Timestamp).Before(aws.ToTime(points[j].Timestamp))
+	})
+
+	fmt.Printf("\nActive Transfers — last %s  [%s]\n", since, regionFlag)
+	if len(points) == 0 {
+		fmt.Println("  (no data)")
+	} else {
+		values := make([]float64, len(points))
+		maxVal := 0.0
+		for i, p := range points {
+			v := aws.ToFloat64(p.Maximum)
+			values[i] = v
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+		fmt.Printf("  %s  (latest: %.0f)\n", sparkline(values, maxVal), values[len(values)-1])
+	}
+
+	fmt.Printf("\nLambda invocations — last %s\n", since)
+	for _, name := range sortedLambdaNames() {
+		base := lambdaFunctionBases[name]
+		fnName := fmt.Sprintf("%s-%s", base, regionFlag)
+		invOut, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String("AWS/Lambda"),
+			MetricName: aws.String("Invocations"),
+			StartTime:  aws.Time(time.Now().Add(-dur)),
+			EndTime:    aws.Time(time.Now()),
+			Period:     aws.Int32(int32(dur.Seconds())),
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
+			Dimensions: []cwtypes.Dimension{
+				{Name: aws.String("FunctionName"), Value: aws.String(fnName)},
+			},
+		})
+		total := 0.0
+		if err == nil && len(invOut.Datapoints) > 0 {
+			total = aws.ToFloat64(invOut.Datapoints[0].Sum)
+		}
+		fmt.Printf("  %-22s  %.0f invocations\n", name, total)
+	}
+	return nil
+}
+
+func sparkline(values []float64, maxVal float64) string {
+	blocks := []rune("▁▂▃▄▅▆▇█")
+	if maxVal == 0 {
+		maxVal = 1
+	}
+	result := make([]rune, len(values))
+	for i, v := range values {
+		idx := int(math.Round(v / maxVal * float64(len(blocks)-1)))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(blocks) {
+			idx = len(blocks) - 1
+		}
+		result[i] = blocks[idx]
+	}
+	return string(result)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// refresh
+// ─────────────────────────────────────────────────────────────────────────────
+
+func refreshCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "refresh",
+		Short: "Start a rolling instance refresh (AMI update)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRefresh(force)
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "Replace all instances regardless of launch template match (SkipMatching=false)")
+	return cmd
+}
+
+func runRefresh(force bool) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+	asgClient := autoscaling.NewFromConfig(cfg)
+
+	skipMatching := !force
+	fmt.Printf("Starting instance refresh on %s (skip-matching=%v)...\n", asgName(), skipMatching)
+
+	refreshOut, err := asgClient.StartInstanceRefresh(ctx, &autoscaling.StartInstanceRefreshInput{
+		AutoScalingGroupName: aws.String(asgName()),
+		Preferences: &autoscalingtypes.RefreshPreferences{
+			SkipMatching: aws.Bool(skipMatching),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("StartInstanceRefresh: %w", err)
+	}
+
+	refreshID := aws.ToString(refreshOut.InstanceRefreshId)
+	fmt.Printf("Refresh ID: %s\n\n", refreshID)
+	fmt.Println("Polling (Ctrl-C to stop — refresh continues in background)...")
+
+	for {
+		time.Sleep(10 * time.Second)
+		out, err := asgClient.DescribeInstanceRefreshes(ctx, &autoscaling.DescribeInstanceRefreshesInput{
+			AutoScalingGroupName: aws.String(asgName()),
+			InstanceRefreshIds:   []string{refreshID},
+		})
+		if err != nil {
+			fmt.Printf("Warning: %v\n", err)
+			continue
+		}
+		if len(out.InstanceRefreshes) == 0 {
+			break
+		}
+		r := out.InstanceRefreshes[0]
+		pct := aws.ToInt32(r.PercentageComplete)
+		status := string(r.Status)
+		fmt.Printf("\r  Status=%-20s  Progress=%d%%   ", status, pct)
+		switch status {
+		case "Successful":
+			fmt.Println()
+			color.Green("Refresh complete.\n")
+			return nil
+		case "Failed", "Cancelled":
+			fmt.Println()
+			return fmt.Errorf("refresh %s: %s", status, aws.ToString(r.StatusReason))
+		}
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// transfer
+// ─────────────────────────────────────────────────────────────────────────────
+
+func transferCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "transfer", Short: "Globus transfer operations"}
+	cmd.AddCommand(transferTestCmd())
+	return cmd
+}
+
+func transferTestCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "test",
+		Short: "Submit a test transfer (1000genomes → Globus Tutorial Endpoint 2)",
+		RunE:  runTransferTest,
+	}
+}
+
+// staticBearerToken satisfies the globus-go-sdk auth.Authorizer interface.
+type staticBearerToken struct{ token string }
+
+func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string, error) {
+	return "Bearer " + a.token, nil
+}
+
+func runTransferTest(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	cfg, err := loadAWSConfig(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Fetch Globus credentials from Secrets Manager
+	smClient := secretsmanager.NewFromConfig(cfg)
+	pfx := secretsPrefix()
+
+	clientIDOut, err := smClient.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(fmt.Sprintf("%s/globus-client-id", pfx)),
+	})
+	if err != nil {
+		return fmt.Errorf("GetSecretValue globus-client-id: %w", err)
+	}
+	clientSecretOut, err := smClient.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: aws.String(fmt.Sprintf("%s/globus-client-secret", pfx)),
+	})
+	if err != nil {
+		return fmt.Errorf("GetSecretValue globus-client-secret: %w", err)
+	}
+
+	fmt.Println("Authenticating with Globus (client credentials flow)...")
+	authClient, err := sdkauth.NewClient(
+		sdkauth.WithClientID(aws.ToString(clientIDOut.SecretString)),
+		sdkauth.WithClientSecret(aws.ToString(clientSecretOut.SecretString)),
+	)
+	if err != nil {
+		return fmt.Errorf("NewClient: %w", err)
+	}
+	token, err := authClient.GetClientCredentialsToken(ctx,
+		"urn:globus:auth:scope:transfer.api.globus.org:all")
+	if err != nil {
+		return fmt.Errorf("GetClientCredentialsToken: %w", err)
+	}
+
+	transferClient, err := transfer.NewClient(
+		transfer.WithAuthorizer(&staticBearerToken{token: token.AccessToken}))
+	if err != nil {
+		return fmt.Errorf("transfer.NewClient: %w", err)
+	}
+
+	fmt.Printf("Submitting test transfer:\n")
+	fmt.Printf("  Source:  collection %s\n          %s\n", collection1000Genomes, testTransferFile)
+	fmt.Printf("  Dest:    endpoint   %s\n          %s\n\n", tutorialEndpoint2, testTransferDest)
+
+	startTime := time.Now()
+	label := fmt.Sprintf("elastic-gcs-ctl test %s", startTime.Format("20060102-150405"))
+
+	// Submit transfer using the globus-go-sdk v3 transfer API.
+	// TransferTaskCreate and TransferItem follow the Globus Transfer REST API v2 schema.
+	task, err := transferClient.CreateTransferTask(ctx, &transfer.TransferTaskRequest{
+		SourceEndpointID:      collection1000Genomes,
+		DestinationEndpointID: tutorialEndpoint2,
+		Label:                 label,
+		Items: []transfer.TransferItem{
+			{
+				SourcePath:      testTransferFile,
+				DestinationPath: testTransferDest,
+				Recursive:       false,
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("CreateTransferTask: %w", err)
+	}
+
+	taskID := task.TaskID
+	fmt.Printf("Task ID: %s\n\nPolling...\n", taskID)
+
+	for {
+		time.Sleep(3 * time.Second)
+		status, err := transferClient.GetTask(ctx, taskID)
+		if err != nil {
+			fmt.Printf("Warning: GetTask: %v\n", err)
+			continue
+		}
+		elapsed := time.Since(startTime).Round(time.Second)
+		fmt.Printf("\r  Status=%-12s  elapsed=%s  bytes=%d   ",
+			status.Status, elapsed, status.BytesTransferred)
+		switch status.Status {
+		case "SUCCEEDED":
+			fmt.Println()
+			color.Green("Transfer SUCCEEDED in %s (%d bytes)\n", elapsed, status.BytesTransferred)
+			return nil
+		case "FAILED":
+			fmt.Println()
+			return fmt.Errorf("transfer FAILED: %v", status.FatalErrorDetails)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// build-ami
+// ─────────────────────────────────────────────────────────────────────────────
+
+func buildAMICmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "build-ami",
+		Short: "Build a new DTN AMI (runs scripts/build_ami.sh)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("Building DTN AMI for region %s...\n", regionFlag)
+			c := exec.Command("bash", "scripts/build_ami.sh", regionFlag)
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			c.Env = append(os.Environ(),
+				"AWS_REGION="+regionFlag,
+				"AWS_PROFILE="+profileFlag,
+			)
+			return c.Run()
+		},
+	}
+}
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
-
-	switch os.Args[1] {
-	case "status":
-		cmdStatus()
-	case "scale-out":
-		cmdScaleOut()
-	case "scale-in":
-		cmdScaleIn()
-	case "benchmark":
-		cmdBenchmark()
-	case "transfer":
-		cmdTransfer()
-	case "open-data":
-		cmdOpenData()
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
-	}
-}
-
-func printUsage() {
-	fmt.Println(`elastic-gcs-ctl — Elastic Globus Connect Server Management Tool
-
-Usage:
-  elastic-gcs-ctl <command> [flags]
-
-Commands:
-  status       Show status of all nodes across regions
-  scale-out    Manually trigger scale-out in a region
-  scale-in     Manually trigger scale-in in a region
-  benchmark    Run scale-out timing benchmark (for GlobusWorld data)
-  transfer     Submit a test transfer via Globus SDK
-  open-data    List configured Open Data buckets and collections
-
-Flags:
-  --region     AWS region (default: us-east-1)
-  --count      Number of DTNs to scale to (for scale-out)
-  --tier       Cache tier to benchmark: hot, warm, cold (for benchmark)
-
-Examples:
-  elastic-gcs-ctl status --region us-east-1
-  elastic-gcs-ctl scale-out --region us-east-1 --count 2
-  elastic-gcs-ctl benchmark --region us-east-1 --tier warm`)
-}
-
-func cmdStatus() {
-	// TODO: Implement
-	// 1. Query SSM for endpoint ID
-	// 2. Use SSM Run Command to get node list from control node
-	// 3. Query ASG for warm pool status
-	// 4. Query CloudWatch for recent metrics
-	// 5. Display unified status view
-	fmt.Println("TODO: Implement status command")
-	fmt.Println("")
-	fmt.Println("Will show:")
-	fmt.Println("  Endpoint ID, subscription status")
-	fmt.Println("  Control node: IP, instance ID, GCS version")
-	fmt.Println("  DTN nodes: slot, state (hot/warm/cold), IP, node ID, status")
-	fmt.Println("  Open Data collections: name, bucket, gateway ID")
-	fmt.Println("  Recent metrics: transfers, throughput, scale events")
-}
-
-func cmdScaleOut() {
-	// TODO: Implement
-	// 1. Invoke scale-out Lambda directly OR modify ASG desired capacity
-	// 2. Wait for DTN to become active
-	// 3. Report timing
-	fmt.Println("TODO: Implement scale-out command")
-}
-
-func cmdScaleIn() {
-	// TODO: Implement
-	// 1. Decrease ASG desired capacity
-	// 2. Lifecycle hook handles node disable
-	// 3. Report result
-	fmt.Println("TODO: Implement scale-in command")
-}
-
-func cmdBenchmark() {
-	// TODO: Implement — this is critical for GlobusWorld presentation
-	//
-	// Benchmark measures wall-clock time for each scale-out phase:
-	//   1. Trigger → instance running (ASG + EC2)
-	//   2. Instance running → GCS services healthy (boot + systemd)
-	//   3. GCS healthy → node enabled (node enable command)
-	//   4. Node enabled → DNS propagated (dig polling)
-	//   5. DNS propagated → first transfer byte (Globus Transfer API)
-	//
-	// For each tier:
-	//   - Cold: terminate a warm instance first, then scale out from AMI
-	//   - Warm: ensure instance is stopped, then scale out
-	//   - Hot: measure with DTN already running
-	//
-	// Outputs:
-	//   - Per-phase timing in milliseconds
-	//   - Total end-to-end latency
-	//   - Publishable data for GlobusWorld slides
-	//
-	// Uses globus-go-sdk for transfer API calls
-	fmt.Println("TODO: Implement benchmark command")
-}
-
-func cmdTransfer() {
-	// TODO: Implement
-	// Use github.com/scttfrdmn/globus-go-sdk/v3 to:
-	//   1. Authenticate with Globus
-	//   2. Submit a transfer from an Open Data collection to a destination
-	//   3. Monitor transfer progress
-	//   4. Report throughput and timing
-	fmt.Println("TODO: Implement transfer command")
-}
-
-func cmdOpenData() {
-	// TODO: Implement
-	// 1. Read config/open_data_buckets.yaml
-	// 2. Query GCS endpoint for configured storage gateways and collections
-	// 3. Display table of available Open Data sources
-	fmt.Println("TODO: Implement open-data command")
 }

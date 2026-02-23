@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-02-23
+
+### Added
+- **#13 Structured logging** (`internal/logger`): all Lambda functions now emit JSON log
+  lines via `log/slog`. Fields `component`, `region`, and event-specific key-value pairs
+  are attached to every line. CloudWatch Logs Insights can filter and aggregate by field.
+- **#14 GCS version drift detection** (`lambda/version_check`): new Lambda runs every 6
+  hours via EventBridge. Runs `globus-connect-server --version` on the control node and
+  all InService DTNs via SSM RunCommand, then publishes `ElasticGCS/GCSVersionDrift`
+  (0 = all nodes agree, >0 = drift). CloudWatch alarm fires when drift > 0; Makefile
+  `build-lambdas` target updated.
+- **#12 CloudWatch dashboard** (`ElasticGCS-{region}`): three-row, 3-column layout:
+  Row 1: Active Transfers line, DTN scale (InService + warm pool), alarm status widget.
+  Row 2: Scale events bar chart, lifecycle P99 latency, all-Lambda error counts.
+  Row 3: GCS Version Drift single-value, demand monitor invocations/errors, cache eviction duration.
+- **`elastic-gcs-ctl` CLI** (full implementation, previously stubs):
+  `status`, `scale up/down [--to N] [--watch]`, `nodes list/delete/version-check`,
+  `logs <lambda> [--since] [--tail] [--json]`, `metrics [--since]`, `refresh [--force]`,
+  `transfer test`, `build-ami`, `version`. Uses Cobra + fatih/color.
+
+### Dependencies
+- Added: `github.com/spf13/cobra`, `github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs`,
+  `github.com/aws/aws-sdk-go-v2/service/lambda`,
+  `github.com/aws/aws-sdk-go-v2/service/autoscaling/types` (indirect, already present)
+- `github.com/fatih/color` promoted from indirect to direct dependency
+
 ## [0.3.1] - 2026-02-23
 
 ### Fixed

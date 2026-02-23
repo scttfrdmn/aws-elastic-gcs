@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -17,6 +16,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+
+	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
 
 // LifecycleEvent is the detail payload from EventBridge ASG lifecycle hook events.
@@ -53,10 +54,11 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 		return fmt.Errorf("failed to parse lifecycle event: %w", err)
 	}
 
-	log.Printf("Lifecycle event: transition=%s instance=%s hook=%s",
-		lifecycle.LifecycleTransition,
-		lifecycle.EC2InstanceID,
-		lifecycle.LifecycleHookName,
+	logger.Info("lifecycle event received",
+		"transition", lifecycle.LifecycleTransition,
+		"instance", lifecycle.EC2InstanceID,
+		"hook", lifecycle.LifecycleHookName,
+		"destination", lifecycle.Destination,
 	)
 
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -74,10 +76,12 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 		return handleScaleIn(ctx, ssmClient, asgClient, ec2Client, lifecycle, region)
 	case "autoscaling:EC2_INSTANCE_LAUNCHING":
 		// Boot script handles its own completion. Lambda is a no-op here.
-		log.Printf("Scale-out LAUNCHING: boot script handles lifecycle, no Lambda action needed")
+		logger.Info("scale-out LAUNCHING: boot script handles lifecycle, no Lambda action needed")
 		return nil
 	default:
-		log.Printf("Unhandled lifecycle transition: %s — completing with CONTINUE", lifecycle.LifecycleTransition)
+		logger.Warn("unhandled lifecycle transition, completing with CONTINUE",
+			"transition", lifecycle.LifecycleTransition,
+		)
 		return completeLifecycle(ctx, asgClient, lifecycle, "CONTINUE")
 	}
 }
@@ -89,7 +93,7 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 // Preventing a node from stopping while still registered in GCS DNS avoids
 // the "endpoint unreliable" state documented in the GCS docs.
 func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autoscaling.Client, ec2Client *ec2.Client, event LifecycleEvent, region string) error {
-	log.Printf("Scale-in: disabling GCS node on %s", event.EC2InstanceID)
+	logger.Info("scale-in: disabling GCS node", "instance", event.EC2InstanceID)
 
 	// Send node disable command via SSM Run Command.
 	// Use || true so exit code is always 0 — node may already be disabled
@@ -106,13 +110,19 @@ func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autosc
 	if err != nil {
 		// SSM may fail if agent isn't running (e.g. already stopping).
 		// The systemd ExecStop will run dtn_shutdown.sh when the instance stops.
-		log.Printf("WARNING: SSM SendCommand failed: %v — relying on systemd ExecStop for node disable", err)
+		logger.Warn("SSM SendCommand failed, relying on systemd ExecStop for node disable",
+			"instance", event.EC2InstanceID,
+			"error", err.Error(),
+		)
 		finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
 		return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 	}
 
 	commandID := aws.ToString(cmdOut.Command.CommandId)
-	log.Printf("SSM command sent: %s — polling for completion", commandID)
+	logger.Info("SSM node-disable command sent, polling for completion",
+		"command_id", commandID,
+		"instance", event.EC2InstanceID,
+	)
 
 	// Poll for SSM command completion (up to 90 seconds).
 	// Lambda timeout is 6 minutes; lifecycle hook heartbeat is 5 minutes.
@@ -125,11 +135,11 @@ func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autosc
 			InstanceId: aws.String(event.EC2InstanceID),
 		})
 		if err != nil {
-			log.Printf("GetCommandInvocation error: %v — retrying", err)
+			logger.Warn("GetCommandInvocation error, retrying", "error", err.Error())
 			continue
 		}
 
-		log.Printf("SSM command status: %s", string(inv.Status))
+		logger.Info("SSM command status", "status", string(inv.Status), "command_id", commandID)
 
 		switch inv.Status {
 		case ssmtypes.CommandInvocationStatusSuccess,
@@ -139,21 +149,25 @@ func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autosc
 			if len(output) > 200 {
 				output = output[:200] + "..."
 			}
-			log.Printf("Node disable output: %s", output)
+			logger.Info("node disable output", "output", output, "instance", event.EC2InstanceID)
 			finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
 			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 
 		case ssmtypes.CommandInvocationStatusTimedOut,
 			ssmtypes.CommandInvocationStatusCancelled,
 			ssmtypes.CommandInvocationStatusCancelling:
-			log.Printf("SSM command in terminal error state: %s — proceeding with CONTINUE", inv.Status)
+			logger.Warn("SSM command in terminal error state, proceeding with CONTINUE",
+				"status", string(inv.Status),
+			)
 			finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
 			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 		}
 		// InProgress / Pending — keep polling
 	}
 
-	log.Printf("Timed out waiting for SSM node disable — proceeding with CONTINUE")
+	logger.Warn("timed out waiting for SSM node disable, proceeding with CONTINUE",
+		"instance", event.EC2InstanceID,
+	)
 	finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
 	return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 }
@@ -166,7 +180,10 @@ func finalizeScaleIn(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 	if destination == "EC2" {
 		releaseSlotLock(ctx, ec2Client, ssmClient, instanceID, region)
 	} else {
-		log.Printf("Instance %s going to warm pool (destination=%q) — keeping slot lock", instanceID, destination)
+		logger.Info("instance going to warm pool, keeping slot lock",
+			"instance", instanceID,
+			"destination", destination,
+		)
 	}
 }
 
@@ -185,9 +202,15 @@ func tagWarmPoolEntry(ctx context.Context, ec2Client *ec2.Client, instanceID str
 		},
 	})
 	if err != nil {
-		log.Printf("WARNING: failed to tag instance %s with warm-pool-entry-time: %v", instanceID, err)
+		logger.Warn("failed to tag instance with warm-pool-entry-time",
+			"instance", instanceID,
+			"error", err.Error(),
+		)
 	} else {
-		log.Printf("Tagged instance %s warm-pool-entry-time=%s", instanceID, entryTime)
+		logger.Info("tagged warm-pool-entry-time",
+			"instance", instanceID,
+			"entry_time", entryTime,
+		)
 	}
 }
 
@@ -201,7 +224,10 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		InstanceIds: []string{instanceID},
 	})
 	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		log.Printf("WARNING: could not describe instance %s to find slot tag: %v", instanceID, err)
+		logger.Warn("could not describe instance to find slot tag",
+			"instance", instanceID,
+			"error", fmt.Sprintf("%v", err),
+		)
 		return
 	}
 	inst := out.Reservations[0].Instances[0]
@@ -213,7 +239,9 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		}
 	}
 	if slot == "" {
-		log.Printf("Instance %s has no elastic-gcs:slot tag — slot lock not released", instanceID)
+		logger.Info("instance has no elastic-gcs:slot tag, slot lock not released",
+			"instance", instanceID,
+		)
 		return
 	}
 	paramName := fmt.Sprintf("/elastic-gcs/%s/slot-lock/%s", region, slot)
@@ -226,12 +254,18 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		Name: aws.String(paramName),
 	})
 	if err != nil {
-		log.Printf("Slot lock %s not found (already released or never set) — nothing to do", paramName)
+		logger.Info("slot lock not found, nothing to release",
+			"param", paramName,
+		)
 		return
 	}
 	lockOwner := aws.ToString(lockOut.Parameter.Value)
 	if lockOwner != instanceID {
-		log.Printf("Slot lock %s is owned by %s, not %s — NOT releasing", paramName, lockOwner, instanceID)
+		logger.Warn("slot lock owned by another instance, NOT releasing",
+			"param", paramName,
+			"owner", lockOwner,
+			"instance", instanceID,
+		)
 		return
 	}
 
@@ -239,16 +273,25 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		Name: aws.String(paramName),
 	})
 	if err != nil {
-		log.Printf("WARNING: failed to release slot lock %s: %v", paramName, err)
+		logger.Warn("failed to release slot lock",
+			"param", paramName,
+			"error", err.Error(),
+		)
 	} else {
-		log.Printf("Released slot lock %s for terminated instance %s", paramName, instanceID)
+		logger.Info("released slot lock for terminated instance",
+			"param", paramName,
+			"instance", instanceID,
+		)
 	}
 }
 
 // completeLifecycle signals the ASG lifecycle hook with the given result (CONTINUE or ABANDON).
 func completeLifecycle(ctx context.Context, asgClient *autoscaling.Client, event LifecycleEvent, result string) error {
-	log.Printf("Completing lifecycle action: hook=%s instance=%s result=%s",
-		event.LifecycleHookName, event.EC2InstanceID, result)
+	logger.Info("completing lifecycle action",
+		"hook", event.LifecycleHookName,
+		"instance", event.EC2InstanceID,
+		"result", result,
+	)
 
 	_, err := asgClient.CompleteLifecycleAction(ctx, &autoscaling.CompleteLifecycleActionInput{
 		LifecycleHookName:     aws.String(event.LifecycleHookName),
@@ -260,13 +303,15 @@ func completeLifecycle(ctx context.Context, asgClient *autoscaling.Client, event
 	if err != nil {
 		// If the action was already completed (by boot script or DefaultResult timeout),
 		// this returns an error. Log it but don't fail the Lambda.
-		log.Printf("CompleteLifecycleAction warning (may already be complete): %v", err)
+		logger.Warn("CompleteLifecycleAction warning (may already be complete)",
+			"error", err.Error(),
+		)
 	}
 	return nil
 }
 
 func main() {
 	region := os.Getenv("AWS_REGION")
-	log.Printf("Elastic GCS Lifecycle Lambda starting in %s", region)
+	logger.Init("elastic-gcs-lifecycle", region)
 	lambda.Start(handler)
 }

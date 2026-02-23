@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -16,6 +15,8 @@ import (
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
+
+	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
 
 // staticBearerToken implements the auth.Authorizer interface expected by the
@@ -115,8 +116,11 @@ func handler(ctx context.Context, _ interface{}) error {
 			activeCount++
 		}
 	}
-	log.Printf("Active transfers on endpoint %s: %d (total ACTIVE tasks seen: %d)",
-		endpointID, activeCount, len(taskList.Data))
+	logger.Info("active transfers counted",
+		"endpoint", endpointID,
+		"active_transfers", activeCount,
+		"total_active_tasks", len(taskList.Data),
+	)
 
 	// Publish metric
 	cwClient := cloudwatch.NewFromConfig(cfg)
@@ -141,6 +145,7 @@ func handler(ctx context.Context, _ interface{}) error {
 }
 
 func main() {
-	log.Printf("Elastic GCS Demand Monitor Lambda starting")
+	region := os.Getenv("AWS_REGION")
+	logger.Init("elastic-gcs-demand-monitor", region)
 	lambda.Start(handler)
 }
