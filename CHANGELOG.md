@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-02-23
+
+### Added
+- `docs/architecture.md`: three-tier caching model, component overview, scaling trigger
+  flow, design decisions, observed timings, cost model (#18)
+- `docs/operator-guide.md`: full deploy-through-destroy lifecycle runbook including
+  first deploy, day-1 validation, day-2 operations (scaling, logging, GCS version
+  upgrade, warm pool eviction, stale node cleanup), teardown procedure, and
+  troubleshooting (#18, #19)
+- `docs/configuration.md`: CDK context parameters, Secrets Manager keys, SSM parameters,
+  Lambda environment variables, S3 bucket configuration reference (#18)
+- `README.md`: rewritten for any Globus subscriber (not Open Data-specific); adds cost
+  comparison table, architecture summary, `elastic-gcs-ctl` command reference, project
+  structure, documentation links (#18)
+
+### Fixed
+- `elastic-gcs-ctl nodes delete`: resolve 8-char node ID prefix to full UUID before
+  issuing `globus-connect-server node delete` (GCS CLI requires full UUID)
+- `elastic-gcs-ctl transfer test`: replaced 170-line OAuth/PKCE/SDK flow with
+  `exec.Command("globus", "transfer", ...)` — delegates to the operator's installed
+  and authenticated `globus` CLI
+
 ## [0.4.0] - 2026-02-23
 
 ### Added
@@ -209,7 +231,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...v0.2.2
