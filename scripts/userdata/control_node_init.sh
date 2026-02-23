@@ -18,7 +18,6 @@ set -euo pipefail
 #   - AWS_REGION: Current AWS region
 #   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
 #   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
-#   - OPEN_DATA_BUCKETS_JSON: JSON array of bucket configs
 #   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
 # =============================================================================
 
@@ -213,60 +212,9 @@ if [ -n "$GLOBUS_SUBSCRIPTION_ID" ]; then
     echo ">>>   globus gcs endpoint set-subscription-id $ENDPOINT_ID $GLOBUS_SUBSCRIPTION_ID"
 fi
 
-# --- 6. Configure S3 storage gateways for Open Data buckets ---
-echo ">>> Configuring S3 storage gateways..."
-
-# OPEN_DATA_BUCKETS_JSON is a JSON array like:
-# [{"name":"1000 Genomes","bucket":"1000genomes","requester_pays":false}]
-
-# Idempotency: fetch existing storage gateways once; skip buckets already configured.
-EXISTING_GWS=$(globus-connect-server storage-gateway list -F json 2>/dev/null | jq -r '.[].display_name' || true)
-
-echo "$OPEN_DATA_BUCKETS_JSON" | jq -c '.[]' | while read -r bucket_config; do
-    BUCKET_NAME=$(echo "$bucket_config" | jq -r '.name')
-    BUCKET_S3=$(echo "$bucket_config" | jq -r '.bucket')
-    REQUESTER_PAYS=$(echo "$bucket_config" | jq -r '.requester_pays')
-
-    # Skip if a storage gateway with this display_name already exists.
-    if echo "$EXISTING_GWS" | grep -qF "$BUCKET_NAME"; then
-        echo ">>> Storage gateway already exists for: $BUCKET_NAME — skipping."
-        continue
-    fi
-
-    echo ">>> Creating storage gateway for: $BUCKET_NAME ($BUCKET_S3)"
-
-    # Public buckets use --s3-unauthenticated (no user S3 credentials needed).
-    # Requester-pays buckets require the user to supply S3 credentials.
-    if [ "$REQUESTER_PAYS" = "true" ]; then
-        AUTH_FLAG="--s3-user-credential"
-    else
-        AUTH_FLAG="--s3-unauthenticated"
-    fi
-
-    GW_ID=$(globus-connect-server storage-gateway create s3 \
-        "$BUCKET_NAME" \
-        --domain globusid.org \
-        --s3-endpoint "https://s3.${AWS_REGION}.amazonaws.com" \
-        --bucket "$BUCKET_S3" \
-        $AUTH_FLAG \
-        2>&1 | grep -oP 'Storage Gateway ID: \K[a-f0-9-]+' || true)
-
-    if [ -n "$GW_ID" ]; then
-        echo ">>> Storage gateway created: $GW_ID"
-
-        # Create a mapped collection
-        globus-connect-server collection create \
-            "$GW_ID" / \
-            "Open Data: $BUCKET_NAME" \
-            --allow-guest-collections
-
-        echo ">>> Collection created for: $BUCKET_NAME"
-    else
-        echo "WARNING: Failed to create storage gateway for $BUCKET_NAME"
-    fi
-done
-
-# --- 7. Pre-create DTN node identities ---
+# --- 6. Pre-create DTN node identities ---
+# (Storage gateway and collection setup is a post-deploy step.
+#  Run: elastic-gcs-ctl collections setup --config config/open_data_buckets.yaml)
 # TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible slot needs an identity.
 # Idempotency: if a slot secret already exists AND its node_id is registered on this
 # endpoint, reuse it rather than creating an orphaned node on every control node replacement.
@@ -319,7 +267,7 @@ aws secretsmanager create-secret \
     --secret-string "file://${DEPLOY_KEY_PATH}" \
     --region "$AWS_REGION"
 
-# --- 8. Store endpoint metadata in SSM ---
+# --- 7. Store endpoint metadata in SSM ---
 echo ">>> Storing endpoint metadata in SSM Parameter Store..."
 
 ENDPOINT_ID=$(globus-connect-server endpoint show -F json | jq -r '.id')
@@ -340,7 +288,7 @@ aws ssm put-parameter \
     --overwrite \
     --region "$AWS_REGION"
 
-# --- 9. Verify ---
+# --- 8. Verify ---
 echo ">>> Running self-diagnostics..."
 globus-connect-server self-diagnostic
 globus-connect-server node list

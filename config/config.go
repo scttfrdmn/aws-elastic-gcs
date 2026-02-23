@@ -26,12 +26,37 @@ type RegionsConfig struct {
 
 // OpenDataBucket defines a single Open Data bucket
 type OpenDataBucket struct {
-	Name          string `yaml:"name"           json:"name"`
-	Bucket        string `yaml:"bucket"         json:"bucket"`
-	Region        string `yaml:"region"         json:"region"`
-	Description   string `yaml:"description"    json:"description"`
-	RequesterPays bool   `yaml:"requester_pays" json:"requester_pays"`
-	ReadOnly      bool   `yaml:"read_only"      json:"read_only"`
+	Name          string `yaml:"name"            json:"name"`
+	Bucket        string `yaml:"bucket"          json:"bucket"`
+	Region        string `yaml:"region"          json:"region"`
+	Description   string `yaml:"description"     json:"description"`
+	RequesterPays bool   `yaml:"requester_pays"  json:"requester_pays"`
+	ReadOnly      bool   `yaml:"read_only"       json:"read_only"`
+	// CollectionName is the display name for the mapped collection.
+	// Defaults to "Open Data: {Name}" if empty.
+	CollectionName string `yaml:"collection_name" json:"collection_name,omitempty"`
+	// Domain restricts which Globus identity provider is accepted by the storage gateway.
+	// Defaults to "globusid.org" if empty.
+	Domain string `yaml:"domain" json:"domain,omitempty"`
+}
+
+// GatewayName returns the display name to use for the storage gateway.
+func (b OpenDataBucket) GatewayName() string { return b.Name }
+
+// ColName returns the display name to use for the mapped collection.
+func (b OpenDataBucket) ColName() string {
+	if b.CollectionName != "" {
+		return b.CollectionName
+	}
+	return "Open Data: " + b.Name
+}
+
+// GWDomain returns the identity domain for the storage gateway.
+func (b OpenDataBucket) GWDomain() string {
+	if b.Domain != "" {
+		return b.Domain
+	}
+	return "globusid.org"
 }
 
 // OpenDataBucketsConfig is the top-level Open Data configuration
