@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-02-26
+
+### Added
+- `scripts/configure_tls.sh`: standalone script to apply organization-approved TLS cipher
+  policy to any GCS node (control or DTN). Enforces cipher restrictions via two layers:
+  (1) RHEL 9 system crypto-policy module `ELASTIC-GCS.pmod` — constrains OpenSSL at the
+  OS level so approved ciphers are enforced even when GCS regenerates its Apache VirtualHost
+  `SSLCipherSuite` settings; (2) `/etc/grid-security/gsi.conf` for GridFTP data channels
+  (ports 50000–51000). Reloads httpd and GridFTP if running.
+- `scripts/build_ami.sh`: runs `configure_tls.sh` via SSM after GCS install so the policy
+  is baked into every DTN AMI.
+- `scripts/userdata/control_node_init.sh`: section 1a applies the same crypto-policy and
+  `gsi.conf` settings immediately after GCS installation, before endpoint setup.
+
+### Security
+- Removed from DEFAULT TLS policy: `CHACHA20-POLY1305`, `DHE-RSA-*` (all FFDHE groups).
+- Approved cipher set (IANA names):
+  `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`,
+  `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384`,
+  `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`,
+  `TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384`.
+- Control node updated live via SSM (`DEFAULT:ELASTIC-GCS` active).
+- Warm pool DTN instances require AMI rebuild + warm pool refresh to receive the policy.
+
 ## [0.4.1] - 2026-02-23
 
 ### Added

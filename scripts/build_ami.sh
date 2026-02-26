@@ -218,6 +218,36 @@ if echo "$GCS_VER" | grep -q "GCS_NOT_FOUND"; then
 fi
 echo ">>> GCS verified: $GCS_VER"
 
+# --- Configure TLS cipher policy ---
+echo ">>> Applying TLS cipher policy..."
+TLS_SCRIPT=$(cat "$(dirname "$0")/configure_tls.sh" | base64 | tr -d '\n')
+TLS_CMD=$(aws ssm send-command \
+    --instance-ids "$BUILDER_ID" \
+    --document-name AWS-RunShellScript \
+    --timeout-seconds 120 \
+    --parameters "commands=[\"python3 -c \\\"import base64; open('/tmp/configure-tls.sh','wb').write(base64.b64decode('${TLS_SCRIPT}'))\\\"\", \"bash /tmp/configure-tls.sh\"]" \
+    --query 'Command.CommandId' --output text \
+    --region "$REGION" --profile "$AWS_PROFILE")
+
+for i in $(seq 1 12); do
+    sleep 10
+    STATUS=$(aws ssm get-command-invocation \
+        --command-id "$TLS_CMD" \
+        --instance-id "$BUILDER_ID" \
+        --query 'Status' --output text \
+        --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null || echo "Pending")
+    if [ "$STATUS" = "Success" ] || [ "$STATUS" = "Failed" ]; then
+        echo ">>> TLS config status: $STATUS"
+        break
+    fi
+    echo "    ($i/12) Status: $STATUS — waiting..."
+done
+aws ssm get-command-invocation \
+    --command-id "$TLS_CMD" \
+    --instance-id "$BUILDER_ID" \
+    --query 'StandardOutputContent' --output text \
+    --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null | tail -10 || true
+
 # --- Stop the instance before imaging (ensures filesystem consistency) ---
 echo ">>> Stopping builder instance for AMI creation..."
 aws ec2 stop-instances \
