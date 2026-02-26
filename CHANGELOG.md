@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SSLCipherSuite` settings; (2) `/etc/grid-security/gsi.conf` for GridFTP data channels
   (ports 50000–51000). Reloads httpd and GridFTP if running.
 - `scripts/build_ami.sh`: runs `configure_tls.sh` via SSM after GCS install so the policy
-  is baked into every DTN AMI.
+  is baked into every DTN AMI (`ami-0890f89156e2fd66f`, `elastic-gcs-dtn-20260226-124654`).
 - `scripts/userdata/control_node_init.sh`: section 1a applies the same crypto-policy and
   `gsi.conf` settings immediately after GCS installation, before endpoint setup.
 
@@ -28,8 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256`, `TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384`,
   `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`,
   `TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384`.
-- Control node updated live via SSM (`DEFAULT:ELASTIC-GCS` active).
-- Warm pool DTN instances require AMI rebuild + warm pool refresh to receive the policy.
+- All nodes updated: control node live via SSM, warm pool DTNs via AMI rebuild + refresh.
+- DTN AMI rebuilt (`ami-0890f89156e2fd66f`); warm pool refresh completed successfully.
+
+### Fixed
+- Initial `ELASTIC-GCS.pmod` included `key_exchange = ECDHE ECDHE-PSK` (from RHEL's
+  `ECDHE-ONLY.pmod`), which causes `auth.globus.org` to close the TLS handshake with
+  `close_notify`, breaking `globus-connect-server node setup`. Removed the directive;
+  `group = -FFDHE-*` alone is sufficient to eliminate DHE without affecting Globus
+  connectivity. Bisected via per-directive policy isolation testing on a live instance.
 
 ## [0.4.1] - 2026-02-23
 
