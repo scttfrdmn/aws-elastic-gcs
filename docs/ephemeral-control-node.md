@@ -119,31 +119,24 @@ Control node ready (41s, 41s)
   Scale-out triggered (desired=1)
 ```
 
-### 2. Lambda Function URL (Globus Flows, curl, scripts)
+### 2. Lambda Function URL (curl, scripts, proxy)
 
-Every deployment outputs a `WakerFunctionUrl`. Calls require a Bearer token
-stored in Secrets Manager at `elastic-gcs/{region}/waker-token`.
+Every deployment outputs a `WakerFunctionUrl`. The URL uses `AuthType=AWS_IAM` —
+the Lambda service enforces SigV4 authentication before the function code runs.
+Only AWS principals with `lambda:InvokeFunctionUrl` permission on the waker function
+are admitted. There is no separate bearer token.
 
-Retrieve the token:
+Wake via curl (using `awscurl` or AWS CLI v2 with `--sigv4`):
 ```bash
-aws secretsmanager get-secret-value \
-  --secret-id elastic-gcs/us-east-1/waker-token \
-  --query SecretString --output text
-```
-
-Wake via curl:
-```bash
-TOKEN=$(aws secretsmanager get-secret-value \
-  --secret-id elastic-gcs/us-east-1/waker-token \
-  --query SecretString --output text)
-
 WAKER_URL=$(aws cloudformation describe-stacks \
   --stack-name ElasticGCS-DTNPool-us-east-1 \
   --query "Stacks[0].Outputs[?OutputKey=='WakerFunctionUrl'].OutputValue" \
   --output text)
 
-curl -s -X POST "$WAKER_URL" \
-  -H "Authorization: Bearer $TOKEN" \
+# awscurl handles SigV4 signing automatically
+awscurl -X POST "$WAKER_URL" \
+  --region us-east-1 \
+  --service lambda \
   -H "Content-Type: application/json" \
   -d '{"scale_out": true}'
 ```
@@ -159,6 +152,13 @@ Response (blocks until control node is healthy, ~40s):
 ```
 
 Set your HTTP client timeout to at least 90 seconds.
+
+**Note on Globus Flows:** The Globus Flows HTTP action
+(`https://actions.automate.globus.org/http/run`) cannot sign requests with AWS
+SigV4. To use the Function URL from a Flow, deploy a small IAM-authenticated
+proxy (e.g., an API Gateway + Lambda stub, or an AWS App Runner service) that
+signs the downstream call. Alternatively, use the direct Lambda Invoke approach
+shown in the Globus Flow section below.
 
 ### 3. Scheduled wake (cron)
 
@@ -193,9 +193,28 @@ The cleanest production pattern is a Globus Flow that wakes the endpoint
 before submitting a transfer. Users submit the Flow rather than a direct
 transfer; the wake step is transparent to them.
 
-### Sample Flow Definition
+### Authentication constraint
 
-Save as `flows/wake-and-transfer.json`:
+The waker Lambda Function URL uses `AuthType=AWS_IAM`. The Globus Flows
+HTTP action (`https://actions.automate.globus.org/http/run`) sends plain
+HTTPS requests — it cannot sign requests with AWS SigV4. Two options:
+
+**Option A — IAM-authenticated proxy (recommended for production)**
+Deploy a lightweight proxy in front of the waker Lambda (e.g., an API
+Gateway with an IAM role, or a public Lambda that verifies a Globus token
+and then invokes the waker via the Lambda Invoke API). The Flow calls the
+proxy; the proxy signs the downstream call with its IAM role credentials.
+
+**Option B — Direct Lambda Invoke from a Globus Compute endpoint**
+Submit a Globus Compute function that calls `boto3.client('lambda').invoke()`
+from within AWS. The Compute endpoint's instance role has
+`lambda:InvokeFunction` permission. This avoids building a proxy but
+requires a Globus Compute endpoint in the same account.
+
+### Sample Flow Definition (using a proxy)
+
+Save as `flows/wake-and-transfer.json`. Replace `PROXY_URL` with the
+URL of your IAM proxy endpoint:
 
 ```json
 {
@@ -203,14 +222,13 @@ Save as `flows/wake-and-transfer.json`:
   "StartAt": "WakeEndpoint",
   "States": {
     "WakeEndpoint": {
-      "Comment": "Start the control node. Blocks until GCS Manager is healthy (~40s).",
+      "Comment": "Call the IAM proxy, which wakes the control node (~40s).",
       "Type": "Action",
       "ActionUrl": "https://actions.automate.globus.org/http/run",
       "Parameters": {
-        "url.$": "$.waker_url",
+        "url.$": "$.proxy_url",
         "method": "POST",
         "headers": {
-          "Authorization.$": "States.Format('Bearer {}', $.waker_token)",
           "Content-Type": "application/json"
         },
         "body": {
@@ -249,8 +267,7 @@ Save as `flows/wake-and-transfer.json`:
 
 ```json
 {
-  "waker_url": "https://<id>.lambda-url.us-east-1.on.aws/",
-  "waker_token": "<value from elastic-gcs/us-east-1/waker-token>",
+  "proxy_url": "https://<your-proxy>.execute-api.us-east-1.amazonaws.com/wake",
   "source_endpoint": "<source-collection-uuid>",
   "dest_endpoint": "<dest-collection-uuid>",
   "transfer_items": [
@@ -276,13 +293,11 @@ Once registered, the Flow appears in the Globus web app under Flows.
 Users can submit it from the web UI or the Globus CLI without knowing
 anything about the wake mechanism.
 
-### Security note on the waker token in Flows
+### Access control
 
-The waker token is passed as a Flow input parameter. For production use:
-- Restrict who can run the Flow via Globus Groups membership on the Flow ACL
-- Consider short-lived tokens rotated via Secrets Manager rotation
-- A future Globus Flows version may support run-time secrets natively,
-  eliminating the need to pass the token in plaintext input
+Restrict who can run the Flow via Globus Groups membership on the Flow ACL.
+The proxy endpoint should enforce its own authz (e.g., validate a Globus
+Groups membership or an API key known only to the Flow definition).
 
 ---
 

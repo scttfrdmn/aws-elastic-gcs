@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -40,12 +39,12 @@ var (
 	asgNameEnv         = os.Getenv("ASG_NAME")
 	region             = os.Getenv("AWS_REGION")
 	controlNodeIDParam = os.Getenv("CONTROL_NODE_ID_PARAM")
-	wakerTokenSecret   = os.Getenv("WAKER_TOKEN_SECRET") // empty = auth disabled
 )
 
-// handler dispatches between Lambda Function URL (HTTP) and direct invocation.
-// HTTP requests require a Bearer token. Direct Lambda invocations (IAM-signed
-// from the CLI) skip the token check — IAM auth is sufficient.
+// handler dispatches between Lambda Function URL (HTTP) and direct Lambda invocation.
+// Authentication is enforced at the Lambda service level via AWS_IAM — callers must
+// present SigV4-signed requests regardless of whether they use the Function URL or
+// the Lambda Invoke API. No application-level token check is needed.
 func handler(ctx context.Context, rawEvent json.RawMessage) (interface{}, error) {
 	start := time.Now()
 
@@ -55,18 +54,6 @@ func handler(ctx context.Context, rawEvent json.RawMessage) (interface{}, error)
 	var httpReq events.LambdaFunctionURLRequest
 	isHTTP := json.Unmarshal(rawEvent, &httpReq) == nil &&
 		httpReq.RequestContext.HTTP.Method != ""
-
-	if isHTTP {
-		// Bearer token check for Function URL callers (Globus Flows, curl, etc.)
-		if err := checkBearerToken(ctx, httpReq.Headers["authorization"]); err != nil {
-			logger.Warn("waker unauthorized", "error", err.Error())
-			return events.LambdaFunctionURLResponse{
-				StatusCode: 401,
-				Body:       `{"error":"unauthorized"}`,
-				Headers:    map[string]string{"Content-Type": "application/json"},
-			}, nil
-		}
-	}
 
 	var req WakeRequest
 	if isHTTP {
@@ -98,28 +85,6 @@ func handler(ctx context.Context, rawEvent json.RawMessage) (interface{}, error)
 		}, nil
 	}
 	return resp, nil
-}
-
-// checkBearerToken validates the Authorization header against the secret stored
-// in Secrets Manager. If WAKER_TOKEN_SECRET env var is empty, auth is skipped.
-func checkBearerToken(ctx context.Context, authHeader string) error {
-	if wakerTokenSecret == "" {
-		return nil
-	}
-	cfg, err := config.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	out, err := secretsmanager.NewFromConfig(cfg).GetSecretValue(ctx,
-		&secretsmanager.GetSecretValueInput{SecretId: aws.String(wakerTokenSecret)})
-	if err != nil {
-		return fmt.Errorf("retrieve token: %w", err)
-	}
-	expected := "Bearer " + aws.ToString(out.SecretString)
-	if authHeader != expected {
-		return fmt.Errorf("invalid bearer token")
-	}
-	return nil
 }
 
 func wake(ctx context.Context, req WakeRequest, start time.Time) (*WakeResponse, error) {
