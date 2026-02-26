@@ -67,16 +67,16 @@ if command -v update-crypto-policies &>/dev/null; then
 # Managed by elastic-gcs configure_tls.sh — do not edit manually
 #
 # Syntax: RHEL 9 crypto-policy module format (.pmod)
-#   property = value        set / restrict to these values
 #   property = -value       remove this value from the DEFAULT policy list
 #   property = -prefix-*    remove all values matching the prefix wildcard
-
-# Restrict key exchange to ECDHE only (removes DHE/FFDHE key exchange).
-# Approved list specifies only ECDHE-* cipher suites; ECDHE-PSK is retained
-# for TLS 1.3 session resumption (0-RTT).
-key_exchange = ECDHE ECDHE-PSK
+#
+# NOTE: `key_exchange = ECDHE ECDHE-PSK` is intentionally omitted.
+# Testing confirmed it breaks TLS connectivity to auth.globus.org (server
+# responds with close_notify). Removing FFDHE groups via `group = -FFDHE-*`
+# is sufficient to eliminate DHE key exchange without affecting ECDHE.
 
 # Remove all finite-field DH groups — disables DHE-RSA-* cipher suites.
+# ECDHE groups (X25519, P-256, P-384 etc.) are unaffected.
 group = -FFDHE-*
 
 # Remove CHACHA20-POLY1305 (not in approved list).

@@ -142,7 +142,8 @@ case "$OS_ID" in
         mkdir -p /etc/crypto-policies/policies/modules
         cat > /etc/crypto-policies/policies/modules/ELASTIC-GCS.pmod <<'PMOD'
 # Elastic GCS approved cipher policy — do not edit manually
-key_exchange = ECDHE ECDHE-PSK
+# key_exchange = ECDHE ECDHE-PSK is omitted: breaks auth.globus.org (close_notify)
+# group = -FFDHE-* achieves DHE removal without affecting Globus connectivity
 group = -FFDHE-*
 cipher = -CHACHA20-POLY1305
 # To restrict to TLS 1.2 only, uncomment: protocol = TLS1.2
