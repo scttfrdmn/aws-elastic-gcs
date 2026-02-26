@@ -39,7 +39,7 @@ const toolVersion = "v0.4.0"
 
 // Well-known collection and endpoint IDs for test transfers.
 const (
-	collection1000Genomes = "bb3e8265-a9f6-4179-a367-f6cfaf4a29af"
+	collection1000Genomes = "28daf55e-07a4-4a65-9f54-292b0b4b8739"
 	tutorialEndpoint2     = "31ce9ba0-176d-45a5-add3-f37d233ba47d"
 	testTransferFile      = "/1000genomes/release/20130502/20140625_related_individuals.txt"
 	testTransferDest      = "/~/elastic-gcs-test.txt"
