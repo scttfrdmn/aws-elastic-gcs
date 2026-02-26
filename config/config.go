@@ -17,6 +17,18 @@ type RegionConfig struct {
 	// Spot instance settings for DTNs
 	UseSpot      bool   `yaml:"use_spot"`
 	SpotMaxPrice string `yaml:"spot_max_price"` // empty = up to on-demand price
+
+	// Ephemeral control node: automatically stop when idle.
+	// 0 = disabled (control node runs continuously, the safe default).
+	// When non-zero the idle_shutdown Lambda runs every 15 minutes and stops
+	// the control node after IdleShutdownMinutes of inactivity.
+	// See docs/ephemeral-control-node.md for availability implications before
+	// enabling this — the endpoint becomes unreachable while stopped.
+	IdleShutdownMinutes int `yaml:"idle_shutdown_minutes"`
+	// MinUptimeMinutes prevents stop/start thrash: the control node must have
+	// been running for at least this long before idle shutdown is eligible.
+	// Default 30 minutes when IdleShutdownMinutes > 0.
+	MinUptimeMinutes int `yaml:"min_uptime_minutes"`
 }
 
 // RegionsConfig is the top-level regions configuration

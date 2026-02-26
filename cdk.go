@@ -86,11 +86,13 @@ func main() {
 				Env:         env,
 				Description: jsii.String(fmt.Sprintf("Elastic GCS DTN Pool - %s", region.Name)),
 			},
-			RegionConfig:       region,
-			ControlStack:       controlStack,
-			OpenDataBuckets:    regionBuckets,
-			CacheEvictionHours: cacheHours,
-			MaxDTNs:            maxDTNs,
+			RegionConfig:        region,
+			ControlStack:        controlStack,
+			OpenDataBuckets:     regionBuckets,
+			CacheEvictionHours:  cacheHours,
+			MaxDTNs:             maxDTNs,
+			IdleShutdownMinutes: region.IdleShutdownMinutes,
+			MinUptimeMinutes:    region.MinUptimeMinutes,
 		})
 	}
 
