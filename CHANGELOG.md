@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-02-27
+
+### Added
+- **GlobusWorld demo runbook** (#23): `docs/demo-runbook.md` with 7-step live demo
+  script (≤8 min), timing summary table, contingency paths for common failure modes
+  (cold pool, expired auth, DTN activation failure, CloudWatch gaps), post-demo
+  cleanup, and benchmark numbers placeholder for slide deck.
+
+### Changed
+- **README overhaul** (#23):
+  - Added three-tier cold/warm/hot ASCII architecture diagram.
+  - Expanded cost model from a 4-row comparison table to a full 4-scenario idle-cost
+    breakdown referencing `docs/ephemeral-control-node.md`.
+  - Updated CLI reference table with `wake`, `collections list/setup`, and `deprovision`.
+  - Added `docs/ephemeral-control-node.md` and `docs/demo-runbook.md` to the docs index.
+
 ## [0.9.0] - 2026-02-27
 
 ### Added

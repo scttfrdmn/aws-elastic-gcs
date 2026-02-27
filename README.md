@@ -8,10 +8,21 @@ Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-s
 
 | | Always-on (2 DTNs) | Elastic GCS |
 |-|-------------------|-------------|
-| Idle cost | ~$400/mo | ~$56/mo |
-| Scale-out (warm) | — | ~60 s |
-| Scale-out (cold) | — | ~2–3 min |
+| Idle cost | ~$400/mo | ~$4–56/mo |
+| Scale-out (warm) | — | ~60s |
+| Scale-out (cold) | — | ~3–5 min |
 | Max throughput | fixed | scales with demand |
+
+### Cost tiers
+
+| Scenario | Monthly idle cost |
+|----------|-------------------|
+| Control node on 24/7, warm pool intact | ~$58 |
+| Control node idles off after 1h, warm pool intact | ~$12 |
+| Fully idle, warm pool intact (control node stopped) | ~$3.50 |
+| Fully idle, warm pool evicted after 72h | ~$1.40 |
+
+See [docs/ephemeral-control-node.md](docs/ephemeral-control-node.md) for the full cost breakdown and idle-shutdown configuration.
 
 ## How It Works
 
@@ -20,11 +31,21 @@ GCS nodes are pre-registered with unique identities stored in AWS Secrets Manage
 When transfers finish, a lifecycle hook runs `node disable` before the instance stops back to the warm pool.
 
 ```
-Idle:   [Control Node] + 2× [Stopped DTN] (EBS only)
-                                │
-         transfer demand detected (CloudWatch alarm)
-                                │
-Active: [Control Node] + [DTN 1 ● active] + [Stopped DTN]
+COLD (terminated)          WARM (stopped)              HOT (running)
+  No EC2 cost               EBS-only cost               Full compute cost
+  3–5 min scale-out         ~60s scale-out              0s (already serving)
+       │                         │                            │
+       │  Launch from AMI        │  Resume instance           │  Already active
+       │  + node setup           │  + node enable             │
+       ▼                         ▼                            ▼
+   ┌─────────┐              ┌─────────┐              ┌─────────┐
+   │  COLD   │──stop+hold──►│  WARM   │──transfer───►│   HOT   │
+   └─────────┘              └─────────┘              └─────────┘
+                                 ▲          cool-down     │
+                                 │          (15–30 min)   │
+                                 └────────────────────────┘
+                            cache eviction
+                            (72h timeout) ──► TERMINATE
 ```
 
 See [docs/architecture.md](docs/architecture.md) for full details.
@@ -99,16 +120,20 @@ Commands:
 | Command | Description |
 |---------|-------------|
 | `status` | System overview: control node, DTN pool, GCS nodes, metrics, alarms |
+| `wake [--scale-out]` | Start the control node (and optionally scale out a DTN) |
 | `scale up [--to N] [--watch]` | Scale out the DTN pool |
 | `scale down [--to N] [--watch]` | Scale in the DTN pool |
 | `nodes list` | List all GCS nodes with status |
 | `nodes delete <id>` | Delete a GCS node registration (accepts 8-char prefix) |
 | `nodes version-check` | Invoke version drift Lambda, show per-instance versions |
+| `collections list` | List storage gateways and mapped collections |
+| `collections setup --config config/open_data_buckets.yaml` | Idempotently create gateways and collections |
 | `logs <lambda> [--since 1h] [--tail] [--json]` | Stream or fetch Lambda logs |
 | `metrics [--since 1h]` | ActiveTransfers sparkline + Lambda invocation counts |
 | `refresh [--force]` | Trigger ASG instance refresh (rolling DTN AMI update) |
 | `transfer test` | Submit a test transfer via the `globus` CLI |
 | `build-ami` | Build a new DTN AMI (wraps `scripts/build_ami.sh`) |
+| `deprovision [--confirm]` | Dry-run or execute full teardown (Globus nodes, CFN stacks, secrets) |
 | `version` | Print tool version |
 
 ## Project Structure
@@ -139,6 +164,8 @@ elastic-gcs/
 - [Architecture](docs/architecture.md) — three-tier model, components, design decisions, cost model
 - [Operator Guide](docs/operator-guide.md) — full deploy-through-destroy lifecycle and day-2 operations
 - [Configuration Reference](docs/configuration.md) — CDK context, Secrets Manager, SSM parameters
+- [Ephemeral Control Node](docs/ephemeral-control-node.md) — idle-shutdown, wake mechanisms, Globus Flow integration, cost model
+- [GlobusWorld Demo Runbook](docs/demo-runbook.md) — live demo script with timing notes and contingency paths
 
 ## Related Projects
 
