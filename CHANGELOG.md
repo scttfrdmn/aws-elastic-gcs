@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-26
+
+### Added
+- **`elastic-gcs-ctl deprovision [--confirm]`** (#20): complete ordered teardown of all
+  Elastic GCS resources in a region. Without `--confirm` performs a dry run: inventories
+  every resource and prints what would be deleted, then exits cleanly. With `--confirm`
+  executes a 10-step teardown in order:
+  1. Scale ASG to zero, force-delete warm pool, drain all instances (10 min timeout)
+  2. Delete GCS nodes via GCS Manager API (falls back to SSM RunCommand if API unavailable)
+  3. Delete mapped collections via GCS Manager API (with SSM fallback)
+  4. Delete storage gateways via GCS Manager API (with SSM fallback)
+  5. Delete CloudFormation stacks (DTNPool first, then Control); poll to completion (15 min each)
+  6. Delete Secrets Manager secrets with `ForceDeleteWithoutRecovery`
+  7. Delete SSM parameters (batch, 10 at a time)
+  8. Delete CloudWatch log groups
+  9. Deregister DTN AMI and delete its EBS snapshots
+  10. Delete the Globus endpoint registration via GCS Manager API
+  Steps 2–4 and 10 use the GCS Manager API directly (via `github.com/scttfrdmn/globus-gcs-go`)
+  and do not require the control node to be running. SSM RunCommand is used as a fallback for
+  steps 2–4 if the GCS API client cannot be initialised (e.g. missing client credentials).
+- Added `github.com/scttfrdmn/globus-gcs-go v0.1.0` dependency for direct GCS Manager API access.
+- Added `github.com/aws/aws-sdk-go-v2/service/cloudformation` dependency.
+- `secretsmanager` SDK promoted to direct import in the CLI.
+
+### Changed
+- `toolVersion` bumped to `v0.6.0`.
+
 ## [0.5.1] - 2026-02-26
 
 ### Security
