@@ -50,8 +50,9 @@ test-integration:
 	  go test ./test/integration/ -v -tags=integration -timeout 30m $(TEST_RUN)
 
 benchmark:
-	@echo "Running scale-out benchmark in $(REGION)..."
-	./bin/elastic-gcs-ctl benchmark --region $(REGION) --tier $(TIER)
+	@echo "Running scale-out benchmark in $(REGION), tier=$(TIER)..."
+	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_TIER=$(TIER) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
+	  go test ./test/benchmark/ -v -tags=benchmark -timeout 45m
 
 # === AMI ===
 
@@ -69,6 +70,7 @@ clean:
 	rm -f lambda/*/bootstrap
 	rm -f bin/*
 
-# === Default region ===
+# === Defaults ===
 REGION ?= us-east-1
 TIER ?= warm
+ITERATIONS ?=

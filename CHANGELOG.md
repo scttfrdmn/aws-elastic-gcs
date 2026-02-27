@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-02-27
+
+### Added
+- **Benchmarks** (#22): new `test/benchmark/` package (`//go:build benchmark`) with
+  per-phase timing for warm, hot, and cold scale-out paths and a cost model validator:
+  - `TestBenchmarkWarmPath` — N iterations (default 5) of warm-path: T0 (SetDesiredCapacity) →
+    T1 (EC2 running) → T2 (SSM online) → T3 (GCS node active) → T4 (transfer SUCCEEDED).
+    Records per-phase timing; asserts P95 SLOs (EC2 resume < 90s, node enable < 60s).
+  - `TestBenchmarkHotPath` — N iterations (default 3) of transfer with DTN already
+    InService; measures submit→first-bytes and first-bytes→SUCCEEDED phases.
+  - `TestBenchmarkColdPath` — N iterations (default 3) of cold launch from AMI; opt-in
+    via `ELASTIC_GCS_TEST_COLD_PATH=true` (terminates warm pool, destructive).
+  - `TestCostModel` — samples 7 days of CloudWatch `ActiveTransfers` and `QueuedTransfers`
+    metrics, extrapolates monthly DTN cost, and compares elastic vs always-on static cost.
+  - JSON results written to `test/benchmark/results/YYYY-MM-DD-HHmm-REGION-TIER.json`
+    for slide deck use.
+- Updated `make benchmark` target to invoke `go test ./test/benchmark/ -tags=benchmark`
+  with `REGION`, `TIER` (default: warm), and `ITERATIONS` variables forwarded.
+
 ## [0.8.0] - 2026-02-26
 
 ### Added
