@@ -116,10 +116,10 @@ func measureWarmScaleOut(ctx context.Context, t *testing.T, e *testEnv) []scaleP
 	t5 := waitForFirstBytes(ctx, t, e, taskID, 3*time.Minute)
 
 	// Phase 5: first bytes → SUCCEEDED
-	task := e.waitForTransferSucceeded(ctx, t, taskID, 5*time.Minute)
+	info := e.waitForTransferSucceeded(ctx, t, taskID, 5*time.Minute)
 	t6 := time.Now()
 
-	t.Logf("  transfer %s: %d bytes", taskID, task.BytesTransferred)
+	t.Logf("  transfer %s: %d bytes", taskID, info.BytesTransferred)
 
 	return []scalePhase{
 		{"desired=1 → InService", t1.Sub(t0)},
@@ -144,25 +144,19 @@ func waitForActiveGCSNodeTimed(ctx context.Context, t *testing.T, e *testEnv, ti
 	return time.Now() // unreachable
 }
 
-// waitForFirstBytes polls until task.BytesTransferred > 0, returns the time it happened.
+// waitForFirstBytes polls until BytesTransferred > 0 (or task succeeds), returns the time.
+// Uses the `globus` CLI since the task was submitted under the endpoint owner's identity.
 func waitForFirstBytes(ctx context.Context, t *testing.T, e *testEnv, taskID string, timeout time.Duration) time.Time {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		task, err := e.transferClient.GetTask(ctx, taskID)
-		if err != nil {
-			continue
-		}
-		if task.BytesTransferred > 0 {
+		info := e.getTaskInfo(ctx, t, taskID)
+		if info.BytesTransferred > 0 || info.Status == "SUCCEEDED" {
 			return time.Now()
 		}
-		// If task is already complete (small file), treat that as first bytes too.
-		if task.Status == "SUCCEEDED" {
-			return time.Now()
-		}
-		if task.Status == "FAILED" || task.Status == "CANCELLED" {
-			t.Fatalf("transfer %s: status=%s", taskID, task.Status)
+		if info.Status == "FAILED" || info.Status == "CANCELLED" {
+			t.Fatalf("transfer %s: status=%s", taskID, info.Status)
 		}
 	}
 	t.Fatalf("no bytes transferred for task %s within %s", taskID, timeout)

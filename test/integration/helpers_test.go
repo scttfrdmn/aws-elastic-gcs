@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -32,15 +33,25 @@ const (
 
 // testEnv holds shared AWS and Globus clients for integration tests.
 type testEnv struct {
-	region          string
-	asgName         string
-	secretsPrefix   string
+	region           string
+	asgName          string
+	secretsPrefix    string
 	controlNodeParam string
+	endpointIDParam  string
+
+	// GCS CLI credentials (same as Globus client creds) used when running
+	// globus-connect-server commands on the control node via SSM. These are
+	// passed as GCS_CLI_CLIENT_ID/SECRET/ENDPOINT_ID env vars.
+	gcsCLIClientID     string
+	gcsCLIClientSecret string
+	gcsEndpointID      string
 
 	cfg       aws.Config
 	asgClient *autoscaling.Client
 	ssmClient *ssm.Client
 
+	// transferClient uses client credentials for task monitoring (GetTask).
+	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
 	transferClient *transfer.Client
 }
 
@@ -52,7 +63,8 @@ func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string
 }
 
 // newTestEnv initialises shared clients from environment variables.
-// Required env vars: ELASTIC_GCS_REGION, GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
+// Required env vars: GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
+// Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_ASG_NAME.
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
@@ -66,6 +78,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", fmt.Sprintf("elastic-gcs-dtn-%s", region))
 	secretsPrefix := getEnvOrDefault("ELASTIC_GCS_SECRETS_PREFIX", fmt.Sprintf("elastic-gcs/%s", region))
 	controlNodeParam := fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)
+	endpointIDParam := fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)
 
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion(region))
@@ -73,6 +86,20 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("AWS config: %v", err)
 	}
 
+	// Resolve the Globus endpoint ID from SSM for use in GCS CLI auth.
+	ssmClient := ssm.NewFromConfig(cfg)
+	gcsEndpointID := os.Getenv("ELASTIC_GCS_ENDPOINT_ID")
+	if gcsEndpointID == "" {
+		epParam, err := ssmClient.GetParameter(context.Background(),
+			&ssm.GetParameterInput{Name: aws.String(endpointIDParam)})
+		if err != nil {
+			t.Fatalf("GetParameter %s: %v", endpointIDParam, err)
+		}
+		gcsEndpointID = aws.ToString(epParam.Parameter.Value)
+	}
+
+	// Build a transfer client using client credentials for task monitoring.
+	// Transfer submission goes through the `globus` CLI (user-authenticated).
 	authClient, err := sdkauth.NewClient(
 		sdkauth.WithClientID(clientID),
 		sdkauth.WithClientSecret(clientSecret),
@@ -91,14 +118,18 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	return &testEnv{
-		region:           region,
-		asgName:          asgName,
-		secretsPrefix:    secretsPrefix,
-		controlNodeParam: controlNodeParam,
-		cfg:              cfg,
-		asgClient:        autoscaling.NewFromConfig(cfg),
-		ssmClient:        ssm.NewFromConfig(cfg),
-		transferClient:   tc,
+		region:             region,
+		asgName:            asgName,
+		secretsPrefix:      secretsPrefix,
+		controlNodeParam:   controlNodeParam,
+		endpointIDParam:    endpointIDParam,
+		gcsCLIClientID:     clientID,
+		gcsCLIClientSecret: clientSecret,
+		gcsEndpointID:      gcsEndpointID,
+		cfg:                cfg,
+		asgClient:          autoscaling.NewFromConfig(cfg),
+		ssmClient:          ssmClient,
+		transferClient:     tc,
 	}
 }
 
@@ -278,22 +309,42 @@ func (e *testEnv) runSSMCommand(ctx context.Context, t *testing.T, instanceID, c
 // gcsNodeStatus holds the fields we care about from `node list -F json`.
 type gcsNodeStatus struct {
 	ID          string   `json:"id"`
-	Status      string   `json:"status"` // "active", or maintenance message
+	Status      string   `json:"status"` // "active", or inactive/maintenance message
 	IPAddresses []string `json:"ip_addresses"`
 }
 
+// gcsNodeListResult is the outer result#1.x.x wrapper returned by the GCS CLI.
+type gcsNodeListResult struct {
+	Code string          `json:"code"`
+	Data []gcsNodeStatus `json:"data"`
+}
+
 // listGCSNodes runs `globus-connect-server node list -F json` on the control node
-// and returns the parsed node list.
+// and returns the parsed node list. The GCS CLI requires client credentials
+// (GCS_CLI_CLIENT_ID/SECRET/ENDPOINT_ID), which are injected as env vars.
+//
+// Output format is a JSON array of result#1.x.x wrapper objects; nodes are at [0].data.
 func (e *testEnv) listGCSNodes(ctx context.Context, t *testing.T) []gcsNodeStatus {
 	t.Helper()
 	controlID := e.controlNodeID(ctx, t)
-	raw := e.runSSMCommand(ctx, t, controlID,
-		"sudo globus-connect-server node list -F json 2>/dev/null || echo '[]'")
-	var nodes []gcsNodeStatus
-	if err := json.Unmarshal([]byte(raw), &nodes); err != nil {
-		t.Fatalf("parse node list JSON: %v\nraw: %s", err, raw)
+
+	// Build the SSM command with GCS CLI auth env vars.
+	cmd := fmt.Sprintf(
+		"export GCS_CLI_CLIENT_ID=%s; export GCS_CLI_CLIENT_SECRET=%s; export GCS_CLI_ENDPOINT_ID=%s; "+
+			"sudo -E globus-connect-server node list -F json 2>&1",
+		e.gcsCLIClientID, e.gcsCLIClientSecret, e.gcsEndpointID,
+	)
+	raw := e.runSSMCommand(ctx, t, controlID, cmd)
+
+	// Parse the result#1.x.x wrapper array: [ { "code": "success", "data": [...] } ]
+	var results []gcsNodeListResult
+	if err := json.Unmarshal([]byte(raw), &results); err != nil {
+		t.Fatalf("parse node list JSON: %v\nraw output: %s", err, raw)
 	}
-	return nodes
+	if len(results) == 0 || results[0].Code != "success" {
+		t.Fatalf("node list returned unexpected result: %s", raw)
+	}
+	return results[0].Data
 }
 
 // hasActiveGCSNode returns true if any node in the list has status "active".
@@ -306,38 +357,92 @@ func hasActiveGCSNode(nodes []gcsNodeStatus) bool {
 	return false
 }
 
-// submitTestTransfer submits a small file transfer from the 1000 Genomes collection
-// to Globus Tutorial Endpoint 2 and returns the task ID.
+// submitTestTransfer submits a file transfer via the `globus` CLI (authenticated
+// as the endpoint owner) and returns the Globus task ID.
+//
+// We use the CLI instead of the SDK client credentials flow because the automation
+// client doesn't have user-level transfer permission on the mapped collection.
+// The `globus` CLI is authenticated as scofri@globusid.org which owns the endpoint.
 func (e *testEnv) submitTestTransfer(ctx context.Context, t *testing.T) string {
 	t.Helper()
 	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
-	dstEndpoint := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
+	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
 
-	resp, err := e.transferClient.SubmitTransfer(ctx,
-		srcCollection, testSourceFile,
-		dstEndpoint, testDestFile,
-		fmt.Sprintf("elastic-gcs integration test %s", time.Now().Format("20060102-150405")),
-		nil,
-	)
+	// Resolve the globus CLI path — it may be in ~/.local/bin which isn't always
+	// in PATH when tests are invoked via `make`.
+	globusBin, err := exec.LookPath("globus")
 	if err != nil {
-		t.Fatalf("SubmitTransfer: %v", err)
+		// Fallback to the known install location.
+		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
 	}
-	t.Logf("submitted transfer task %s", resp.TaskID)
-	return resp.TaskID
+
+	// Use -F json so we can parse task_id reliably.
+	out, err := exec.CommandContext(ctx,
+		globusBin, "transfer",
+		"-F", "json",
+		"--label", fmt.Sprintf("elastic-gcs-inttest-%s", time.Now().Format("20060102-150405")),
+		srcCollection+":"+testSourceFile,
+		dstEndpointID+":"+testDestFile,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("globus transfer failed (exit %v):\n%s", err, out)
+	}
+
+	var result struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse globus transfer output: %v\nraw: %s", err, out)
+	}
+	if result.TaskID == "" {
+		t.Fatalf("globus transfer returned empty task_id:\n%s", out)
+	}
+	t.Logf("submitted transfer task %s", result.TaskID)
+	return result.TaskID
+}
+
+// globusTaskInfo holds the fields we need from `globus task show -F json`.
+type globusTaskInfo struct {
+	TaskID           string `json:"task_id"`
+	Status           string `json:"status"` // ACTIVE, INACTIVE, SUCCEEDED, FAILED, CANCELLED
+	BytesTransferred int64  `json:"bytes_transferred"`
+}
+
+// getTaskInfo fetches current task status via the `globus` CLI.
+// The task was submitted by the endpoint owner's session, so the SDK client
+// credentials can't see it; we use the CLI which shares the same session.
+func (e *testEnv) getTaskInfo(ctx context.Context, t *testing.T, taskID string) *globusTaskInfo {
+	t.Helper()
+	globusBin, _ := exec.LookPath("globus")
+	if globusBin == "" {
+		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
+	}
+	out, err := exec.CommandContext(ctx, globusBin, "task", "show", "-F", "json", taskID).CombinedOutput()
+	if err != nil {
+		t.Fatalf("globus task show %s: %v\n%s", taskID, err, out)
+	}
+	var info globusTaskInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		t.Fatalf("parse task show output: %v\nraw: %s", err, out)
+	}
+	return &info
 }
 
 // waitForTransferSucceeded polls until the task reaches SUCCEEDED (or fails/cancels).
-// Returns the completed task.
-func (e *testEnv) waitForTransferSucceeded(ctx context.Context, t *testing.T, taskID string, timeout time.Duration) *transfer.Task {
+// Uses the `globus` CLI since the task was submitted under the endpoint owner's identity.
+func (e *testEnv) waitForTransferSucceeded(ctx context.Context, t *testing.T, taskID string, timeout time.Duration) *globusTaskInfo {
 	t.Helper()
-	ctx2, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	task, err := e.transferClient.WaitForTaskCompletion(ctx2, taskID, 10*time.Second)
-	if err != nil {
-		t.Fatalf("WaitForTaskCompletion %s: %v", taskID, err)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Second)
+		info := e.getTaskInfo(ctx, t, taskID)
+		switch info.Status {
+		case "SUCCEEDED":
+			return info
+		case "FAILED", "CANCELLED":
+			t.Fatalf("transfer %s: terminal status %s", taskID, info.Status)
+		}
 	}
-	if task.Status != "SUCCEEDED" {
-		t.Fatalf("transfer %s: expected SUCCEEDED, got %s", taskID, task.Status)
-	}
-	return task
+	t.Fatalf("transfer %s: timed out after %s (last polled via globus task show)", taskID, timeout)
+	return nil
 }
