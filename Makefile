@@ -46,7 +46,8 @@ test:
 	go test ./... -v
 
 test-integration:
-	go test ./test/integration/ -v -tags=integration -timeout 30m
+	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
+	  go test ./test/integration/ -v -tags=integration -timeout 30m $(TEST_RUN)
 
 benchmark:
 	@echo "Running scale-out benchmark in $(REGION)..."

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-02-26
+
+### Added
+- **Integration tests** (#21): replaced stub `lifecycle_test.go` with four real test files
+  under `test/integration/` tagged `//go:build integration`:
+  - `helpers_test.go` — shared `testEnv`, AWS/Globus client init, SSM command runner,
+    ASG polling helpers (`waitForASGInService`, `waitForWarmPool`, `inServiceIDs`),
+    GCS node list via SSM RunCommand + JSON parse, transfer submit/wait helpers.
+  - `node_lifecycle_test.go` (`TestNodeLifecycle`) — full warm-pool cycle: assert
+    Warmed:Stopped → scale-out → InService → GCS node active → transfer SUCCEEDED →
+    scale-in → Warmed:Stopped → GCS node inactive. Uses `t.Cleanup` to restore ASG
+    desired=0 on failure.
+  - `transfer_test.go` (`TestTransferEndToEnd`) — self-contained transfer test;
+    scales out a DTN if none are InService, submits 15KB file from 1000 Genomes
+    collection to Globus Tutorial Endpoint 2, asserts SUCCEEDED within 5 min.
+  - `scaling_test.go` (`TestScaleOutLatency`) — warm-path scale-out timing with
+    per-phase breakdown: desired=1→InService, InService→GCS active, GCS ready→submit,
+    submit→first bytes, first bytes→SUCCEEDED. Supports `ELASTIC_GCS_ITERATIONS`
+    for multi-run mean/max stats. Asserts InService < 120s, GCS active < 90s.
+- `make test-integration REGION=<r>` now forwards `REGION` as `ELASTIC_GCS_REGION`
+  and accepts `ITERATIONS=<n>` and `TEST_RUN=-run <TestName>` variables.
+
 ## [0.7.0] - 2026-02-26
 
 ### Added
