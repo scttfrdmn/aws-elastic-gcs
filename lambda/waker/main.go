@@ -128,11 +128,38 @@ func wake(ctx context.Context, req WakeRequest, start time.Time) (*WakeResponse,
 		if err := waitForGCSManager(ctx, ssmClient, instanceID); err != nil {
 			return nil, fmt.Errorf("GCS Manager health check: %w", err)
 		}
+
+		// Even when the control node is already running, check if DTNs need to
+		// be scaled out. This handles the case where a user submits a transfer
+		// while the control node is up but desired=0 (no DTNs active).
+		scaleOutTriggered := false
+		if req.ScaleOut {
+			asgDesc, asgErr := asgClient.DescribeAutoScalingGroups(ctx,
+				&autoscaling.DescribeAutoScalingGroupsInput{
+					AutoScalingGroupNames: []string{asgNameEnv},
+				})
+			if asgErr == nil && len(asgDesc.AutoScalingGroups) > 0 &&
+				aws.ToInt32(asgDesc.AutoScalingGroups[0].DesiredCapacity) == 0 {
+				_, serr := asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
+					AutoScalingGroupName: aws.String(asgNameEnv),
+					DesiredCapacity:      aws.Int32(1),
+					HonorCooldown:        aws.Bool(false),
+				})
+				if serr != nil {
+					logger.Warn("scale-out trigger failed", "error", serr.Error())
+				} else {
+					scaleOutTriggered = true
+					logger.Info("scale-out triggered (control node already running)", "desired", 1)
+				}
+			}
+		}
+
 		elapsed := int(time.Since(start).Seconds())
 		return &WakeResponse{
 			Status:            "ready",
 			ElapsedSeconds:    elapsed,
 			WarmPoolPopulated: warmPopulated,
+			ScaleOutTriggered: scaleOutTriggered,
 			Message:           "control node was already running",
 		}, nil
 	}

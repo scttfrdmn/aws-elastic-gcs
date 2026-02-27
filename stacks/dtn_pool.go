@@ -699,10 +699,11 @@ fi
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(1)),
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
-			"REGION":            jsii.String(region),
-			"SECRETS_PREFIX":    jsii.String(secretsPrefix),
-			"ENDPOINT_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)),
-			"METRIC_NAMESPACE":  jsii.String("ElasticGCS"),
+			"REGION":              jsii.String(region),
+			"SECRETS_PREFIX":      jsii.String(secretsPrefix),
+			"ENDPOINT_ID_PARAM":   jsii.String(fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)),
+			"METRIC_NAMESPACE":    jsii.String("ElasticGCS"),
+			"WAKER_FUNCTION_NAME": jsii.String(fmt.Sprintf("elastic-gcs-waker-%s", region)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -713,6 +714,7 @@ fi
 			"ssm:GetParameter",
 			"secretsmanager:GetSecretValue",
 			"cloudwatch:PutMetricData",
+			"lambda:InvokeFunction",
 		),
 		Resources: jsii.Strings("*"),
 	}))
@@ -1101,7 +1103,7 @@ fi
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
 		Code:         awslambda.Code_FromAsset(jsii.String("lambda/waker"), nil),
-		Timeout:      awscdk.Duration_Minutes(jsii.Number(5)),
+		Timeout:      awscdk.Duration_Minutes(jsii.Number(6)),
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),

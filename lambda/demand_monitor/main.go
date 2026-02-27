@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -10,6 +11,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
@@ -32,20 +34,31 @@ func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string
 	return "Bearer " + a.token, nil
 }
 
-// handler polls the Globus Transfer API for active tasks on the configured
-// endpoint and publishes the count as a CloudWatch metric.
+// wakeRequest matches the WakeRequest struct in the waker Lambda.
+type wakeRequest struct {
+	ScaleOut bool `json:"scale_out"`
+}
+
+// handler polls the Globus Transfer API for active and inactive (queued) tasks
+// on the configured endpoint, publishes CloudWatch metrics, and invokes the
+// waker Lambda when queued transfers are detected (meaning the endpoint is
+// offline and needs to be started).
 //
 // Triggered by: EventBridge schedule (every 1 minute)
 //
-// Metric published: ElasticGCS/ActiveTransfers{Region=<region>}
-// This metric drives:
-//   - Scale-out alarm: ActiveTransfers > 0 → trigger scale-out Lambda
-//   - Scale-in alarm: ActiveTransfers == 0 for 15 min → trigger scale-in Lambda
+// Metrics published:
+//   - ElasticGCS/ActiveTransfers{Region=<region>}  — drives scale-in alarm (== 0 for 15 min)
+//   - ElasticGCS/QueuedTransfers{Region=<region>}  — drives waker invocation
+//
+// Auto-wake logic:
+//
+//	INACTIVE tasks exist → endpoint offline → invoke waker with scale_out=true
 func handler(ctx context.Context, _ interface{}) error {
 	region := os.Getenv("REGION")
 	secretsPrefix := os.Getenv("SECRETS_PREFIX")
 	endpointIDParam := os.Getenv("ENDPOINT_ID_PARAM")
 	metricNamespace := os.Getenv("METRIC_NAMESPACE")
+	wakerFunctionName := os.Getenv("WAKER_FUNCTION_NAME")
 	if metricNamespace == "" {
 		metricNamespace = "ElasticGCS"
 	}
@@ -102,27 +115,29 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("failed to create Globus transfer client: %w", err)
 	}
 
-	// List active transfer tasks; filter to those involving our endpoint
-	taskList, err := transferClient.ListTasks(ctx, &transfer.ListTasksOptions{
-		FilterStatus: "ACTIVE",
-	})
+	// Count ACTIVE tasks for our endpoint
+	activeCount, err := countTasksByStatus(ctx, transferClient, endpointID, "ACTIVE")
 	if err != nil {
-		return fmt.Errorf("ListTasks failed: %w", err)
+		return fmt.Errorf("ListTasks ACTIVE failed: %w", err)
 	}
 
-	var activeCount int
-	for _, task := range taskList.Data {
-		if task.SourceEndpointID == endpointID || task.DestinationEndpointID == endpointID {
-			activeCount++
-		}
+	// Count INACTIVE tasks for our endpoint.
+	// Globus marks tasks INACTIVE when the endpoint is offline or unreachable.
+	// A non-zero count means transfers are queued and the system needs to wake up.
+	queuedCount, err := countTasksByStatus(ctx, transferClient, endpointID, "INACTIVE")
+	if err != nil {
+		// Non-fatal: log and continue so we still publish the active metric.
+		logger.Warn("ListTasks INACTIVE failed", "error", err.Error())
+		queuedCount = 0
 	}
-	logger.Info("active transfers counted",
+
+	logger.Info("transfer task counts",
 		"endpoint", endpointID,
 		"active_transfers", activeCount,
-		"total_active_tasks", len(taskList.Data),
+		"queued_transfers", queuedCount,
 	)
 
-	// Publish metric
+	// Publish both metrics
 	cwClient := cloudwatch.NewFromConfig(cfg)
 	_, err = cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
 		Namespace: aws.String(metricNamespace),
@@ -135,13 +150,59 @@ func handler(ctx context.Context, _ interface{}) error {
 					{Name: aws.String("Region"), Value: aws.String(region)},
 				},
 			},
+			{
+				MetricName: aws.String("QueuedTransfers"),
+				Value:      aws.Float64(float64(queuedCount)),
+				Unit:       cwtypes.StandardUnitCount,
+				Dimensions: []cwtypes.Dimension{
+					{Name: aws.String("Region"), Value: aws.String(region)},
+				},
+			},
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("PutMetricData failed: %w", err)
 	}
 
+	// If queued transfers are detected and we have a waker configured, invoke it
+	// to start the control node and scale out DTNs. This is fire-and-forget:
+	// the waker runs asynchronously and handles idempotency (won't double-start
+	// an already-running node). We log but don't fail on invoke errors.
+	if queuedCount > 0 && wakerFunctionName != "" {
+		logger.Info("queued transfers detected, invoking waker", "queued", queuedCount, "waker", wakerFunctionName)
+		payload, _ := json.Marshal(wakeRequest{ScaleOut: true})
+		lambdaClient := awslambda.NewFromConfig(cfg)
+		_, invokeErr := lambdaClient.Invoke(ctx, &awslambda.InvokeInput{
+			FunctionName:   aws.String(wakerFunctionName),
+			InvocationType: "Event", // async — don't wait for response
+			Payload:        payload,
+		})
+		if invokeErr != nil {
+			logger.Warn("waker invocation failed", "error", invokeErr.Error())
+		} else {
+			logger.Info("waker invoked successfully")
+		}
+	}
+
 	return nil
+}
+
+// countTasksByStatus queries the Globus Transfer API for tasks in the given
+// status that involve our endpoint (as source or destination).
+func countTasksByStatus(ctx context.Context, client *transfer.Client, endpointID, status string) (int, error) {
+	taskList, err := client.ListTasks(ctx, &transfer.ListTasksOptions{
+		FilterStatus: status,
+	})
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, task := range taskList.Data {
+		if task.SourceEndpointID == endpointID || task.DestinationEndpointID == endpointID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func main() {

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-26
+
+### Added
+- **Auto-wake on queued transfers**: `demand_monitor` Lambda now detects INACTIVE Globus
+  Transfer tasks (tasks queued while the endpoint is offline) and automatically invokes
+  the Waker Lambda with `scale_out=true`. This closes the auto-wake gap: the system now
+  wakes itself when a user submits a transfer against a stopped endpoint, without any
+  operator intervention.
+- **`QueuedTransfers` CloudWatch metric**: `demand_monitor` now publishes both
+  `ActiveTransfers` and `QueuedTransfers` metrics to `ElasticGCS/{Region}`.
+- **Waker ScaleOut fix (already-running path)**: When the control node is already running,
+  the Waker Lambda now checks ASG `DesiredCapacity` and triggers scale-out if
+  `scale_out=true` is requested and no DTNs are active. Previously this path returned
+  early without checking whether DTNs needed to be started.
+- `WAKER_FUNCTION_NAME` environment variable injected into `demand_monitor` Lambda.
+- `lambda:InvokeFunction` IAM permission added to `demand_monitor` Lambda role.
+- Waker Lambda timeout increased from 5 to 6 minutes (accounts for 3 min SSM agent
+  wait + 2 min GCS Manager wait + headroom).
+
 ## [0.6.0] - 2026-02-26
 
 ### Added
