@@ -48,10 +48,11 @@ type testEnv struct {
 	gcsCLIClientSecret string
 	gcsEndpointID      string
 
-	cfg       aws.Config
-	asgClient *autoscaling.Client
-	ssmClient *ssm.Client
-	cwClient  *cloudwatch.Client
+	cfg            aws.Config
+	asgClient      *autoscaling.Client
+	ssmClient      *ssm.Client
+	cwClient       *cloudwatch.Client
+	scaleOutAlarm  string // CloudWatch alarm name driving scale-out
 
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
@@ -129,10 +130,11 @@ func newTestEnv(t *testing.T) *testEnv {
 		gcsCLIClientID:     clientID,
 		gcsCLIClientSecret: clientSecret,
 		gcsEndpointID:      gcsEndpointID,
-		cfg:            cfg,
-		asgClient:      autoscaling.NewFromConfig(cfg),
-		ssmClient:      ssmClient,
-		cwClient:       cloudwatch.NewFromConfig(cfg),
+		cfg:           cfg,
+		asgClient:     autoscaling.NewFromConfig(cfg),
+		ssmClient:     ssmClient,
+		cwClient:      cloudwatch.NewFromConfig(cfg),
+		scaleOutAlarm: fmt.Sprintf("elastic-gcs-scaleout-%s", region),
 		transferClient: tc,
 	}
 }
@@ -553,6 +555,22 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	duration, interval time.Duration) []string {
 	t.Helper()
+
+	// Force the scale-out alarm to OK state before starting. CloudWatch alarms
+	// only fire actions on state transitions (OK→ALARM). If the alarm is already
+	// in ALARM from a previous test run, publishing ActiveTransfers=1 won't
+	// trigger the scaleout Lambda again. SetAlarmState resets it so the next
+	// PutMetricData datapoint causes a clean OK→ALARM transition.
+	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+		AlarmName:   aws.String(e.scaleOutAlarm),
+		StateValue:  cwtypes.StateValueOk,
+		StateReason: aws.String("reset by integration test before keepAliveSubmit"),
+	}); err != nil {
+		t.Logf("keepAliveSubmit: SetAlarmState warning: %v", err)
+	} else {
+		t.Logf("keepAliveSubmit: scale-out alarm reset to OK")
+	}
+
 	start := time.Now()
 	var taskIDs []string
 	counter := 0
