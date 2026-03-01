@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-03-01T02:30:28Z",
+  "region": "us-east-1",
+  "tier": "hot",
+  "iterations": 3,
+  "stats": [
+    {
+      "label": "submitted → first bytes",
+      "min_ms": 5109,
+      "mean_ms": 5453,
+      "p95_ms": 5759,
+      "max_ms": 5759
+    },
+    {
+      "label": "first bytes → SUCCEEDED",
+      "min_ms": 10795,
+      "mean_ms": 10825,
+      "p95_ms": 10883,
+      "max_ms": 10883
+    }
+  ],
+  "raw_iterations": [
+    {
+      "iteration": 1,
+      "phases": [
+        {
+          "label": "submitted → first bytes",
+          "elapsed_ms": 5759
+        },
+        {
+          "label": "first bytes → SUCCEEDED",
+          "elapsed_ms": 10795
+        }
+      ],
+      "total_ms": 16555
+    },
+    {
+      "iteration": 2,
+      "phases": [
+        {
+          "label": "submitted → first bytes",
+          "elapsed_ms": 5109
+        },
+        {
+          "label": "first bytes → SUCCEEDED",
+          "elapsed_ms": 10883
+        }
+      ],
+      "total_ms": 15993
+    },
+    {
+      "iteration": 3,
+      "phases": [
+        {
+          "label": "submitted → first bytes",
+          "elapsed_ms": 5491
+        },
+        {
+          "label": "first bytes → SUCCEEDED",
+          "elapsed_ms": 10798
+        }
+      ],
+      "total_ms": 16289
+    }
+  ]
+}

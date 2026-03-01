@@ -353,7 +353,7 @@ func TestCostModel(t *testing.T) {
 
 	// Count 1-hour buckets with active transfers (proxy for DTN running time).
 	out, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("elastic-gcs"),
+		Namespace:  aws.String("ElasticGCS"),
 		MetricName: aws.String("ActiveTransfers"),
 		StartTime:  aws.Time(startTime),
 		EndTime:    aws.Time(endTime),
@@ -376,7 +376,7 @@ func TestCostModel(t *testing.T) {
 
 	// Also check QueuedTransfers.
 	outQ, errQ := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("elastic-gcs"),
+		Namespace:  aws.String("ElasticGCS"),
 		MetricName: aws.String("QueuedTransfers"),
 		StartTime:  aws.Time(startTime),
 		EndTime:    aws.Time(endTime),

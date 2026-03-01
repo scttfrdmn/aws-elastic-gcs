@@ -267,17 +267,24 @@ Leave the control node running (it will auto-shutdown after 30 min if idle shutd
 
 ## Benchmark numbers (for slides)
 
-From `make benchmark REGION=us-east-1 TIER=warm` (5 iterations, 2026-02-26):
+From `make benchmark REGION=us-east-1 TIER=warm` (5 iterations, 2026-02-28):
 
-| Phase | Mean | P95 |
-|-------|------|-----|
-| EC2 resume (T0→T1) | ~38s | ~51s |
-| SSM online (T1→T2) | ~5s | ~8s |
-| node enable + DNS (T2→T3) | ~14s | ~17s |
-| first transfer (T3→T4) | ~13s | ~20s |
-| **Total** | **~70s** | **~90s** |
+| Phase | Min | Mean | P95 | Max |
+|-------|-----|------|-----|-----|
+| EC2 resume (T0→T1) | 7s | 11s | 13s | 13s |
+| SSM online (T1→T2) | 12s | 12s | 13s | 13s |
+| node enable + DNS (T2→T3) | 11s | 21s | 23s | 23s |
+| first transfer (T3→T4) | 13s | 20s | 45s | 45s |
+| **Total** | **50s** | **64s** | **90s** | **90s** |
 
-Cold path (launch from AMI): ~3m 30s mean.
-Hot path (DTN already InService): ~13s mean.
+Hot path (DTN already InService), 3 iterations:
 
-Update these numbers from `test/benchmark/results/` after running benchmarks closer to the conference.
+| Phase | Min | Mean | P95 | Max |
+|-------|-----|------|-----|-----|
+| submitted → first bytes | 5s | 5s | 6s | 6s |
+| first bytes → SUCCEEDED | 11s | 11s | 11s | 11s |
+| **Total** | **16s** | **16s** | **17s** | **17s** |
+
+Cold path (launch from AMI): not yet measured (requires `ELASTIC_GCS_TEST_COLD_PATH=true`; estimated ~3–5 min from prior manual tests).
+
+Raw JSON in `test/benchmark/results/`. Re-run closer to the conference to refresh numbers.

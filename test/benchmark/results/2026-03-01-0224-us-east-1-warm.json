@@ -1,0 +1,148 @@
+{
+  "timestamp": "2026-03-01T02:24:02Z",
+  "region": "us-east-1",
+  "tier": "warm",
+  "iterations": 5,
+  "stats": [
+    {
+      "label": "EC2 resume (T0→T1)",
+      "min_ms": 6766,
+      "mean_ms": 11229,
+      "p95_ms": 13274,
+      "max_ms": 13274
+    },
+    {
+      "label": "SSM online (T1→T2)",
+      "min_ms": 12342,
+      "mean_ms": 12397,
+      "p95_ms": 12577,
+      "max_ms": 12577
+    },
+    {
+      "label": "node enable + DNS (T2→T3)",
+      "min_ms": 11418,
+      "mean_ms": 20550,
+      "p95_ms": 22853,
+      "max_ms": 22853
+    },
+    {
+      "label": "first transfer (T3→T4)",
+      "min_ms": 12747,
+      "mean_ms": 19542,
+      "p95_ms": 45232,
+      "max_ms": 45232
+    }
+  ],
+  "raw_iterations": [
+    {
+      "iteration": 1,
+      "phases": [
+        {
+          "label": "EC2 resume (T0→T1)",
+          "elapsed_ms": 13274
+        },
+        {
+          "label": "SSM online (T1→T2)",
+          "elapsed_ms": 12364
+        },
+        {
+          "label": "node enable + DNS (T2→T3)",
+          "elapsed_ms": 22834
+        },
+        {
+          "label": "first transfer (T3→T4)",
+          "elapsed_ms": 13549
+        }
+      ],
+      "total_ms": 62023
+    },
+    {
+      "iteration": 2,
+      "phases": [
+        {
+          "label": "EC2 resume (T0→T1)",
+          "elapsed_ms": 9928
+        },
+        {
+          "label": "SSM online (T1→T2)",
+          "elapsed_ms": 12342
+        },
+        {
+          "label": "node enable + DNS (T2→T3)",
+          "elapsed_ms": 22849
+        },
+        {
+          "label": "first transfer (T3→T4)",
+          "elapsed_ms": 45232
+        }
+      ],
+      "total_ms": 90352
+    },
+    {
+      "iteration": 3,
+      "phases": [
+        {
+          "label": "EC2 resume (T0→T1)",
+          "elapsed_ms": 6766
+        },
+        {
+          "label": "SSM online (T1→T2)",
+          "elapsed_ms": 12577
+        },
+        {
+          "label": "node enable + DNS (T2→T3)",
+          "elapsed_ms": 22853
+        },
+        {
+          "label": "first transfer (T3→T4)",
+          "elapsed_ms": 13265
+        }
+      ],
+      "total_ms": 55463
+    },
+    {
+      "iteration": 4,
+      "phases": [
+        {
+          "label": "EC2 resume (T0→T1)",
+          "elapsed_ms": 13034
+        },
+        {
+          "label": "SSM online (T1→T2)",
+          "elapsed_ms": 12354
+        },
+        {
+          "label": "node enable + DNS (T2→T3)",
+          "elapsed_ms": 22800
+        },
+        {
+          "label": "first transfer (T3→T4)",
+          "elapsed_ms": 12747
+        }
+      ],
+      "total_ms": 60937
+    },
+    {
+      "iteration": 5,
+      "phases": [
+        {
+          "label": "EC2 resume (T0→T1)",
+          "elapsed_ms": 13143
+        },
+        {
+          "label": "SSM online (T1→T2)",
+          "elapsed_ms": 12348
+        },
+        {
+          "label": "node enable + DNS (T2→T3)",
+          "elapsed_ms": 11418
+        },
+        {
+          "label": "first transfer (T3→T4)",
+          "elapsed_ms": 12920
+        }
+      ],
+      "total_ms": 49832
+    }
+  ]
+}
