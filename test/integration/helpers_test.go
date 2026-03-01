@@ -428,6 +428,91 @@ func (e *testEnv) getTaskInfo(ctx context.Context, t *testing.T, taskID string) 
 	return &info
 }
 
+// submitTestTransferWithDest submits a transfer with a custom destination path.
+// Use this when submitting multiple transfers rapidly to avoid collisions.
+// destPath example: "/~/elastic-gcs-autoscale-1234567890-0.txt"
+func (e *testEnv) submitTestTransferWithDest(ctx context.Context, t *testing.T, destPath string) string {
+	t.Helper()
+	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
+	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
+
+	globusBin, err := exec.LookPath("globus")
+	if err != nil {
+		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
+	}
+
+	out, err := exec.CommandContext(ctx,
+		globusBin, "transfer",
+		"-F", "json",
+		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
+		srcCollection+":"+testSourceFile,
+		dstEndpointID+":"+destPath,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("globus transfer failed (exit %v):\n%s", err, out)
+	}
+
+	var result struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse globus transfer output: %v\nraw: %s", err, out)
+	}
+	if result.TaskID == "" {
+		t.Fatalf("globus transfer returned empty task_id:\n%s", out)
+	}
+	t.Logf("submitted transfer task %s (dest: %s)", result.TaskID, destPath)
+	return result.TaskID
+}
+
+// waitForASGDesiredChange polls DescribeAutoScalingGroups until DesiredCapacity
+// differs from fromDesired. Returns the new desired capacity.
+// Used to detect that the scaleout Lambda fired without any manual ASG call.
+func (e *testEnv) waitForASGDesiredChange(ctx context.Context, t *testing.T,
+	fromDesired int32, timeout time.Duration) int32 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
+			&autoscaling.DescribeAutoScalingGroupsInput{
+				AutoScalingGroupNames: []string{e.asgName},
+			})
+		if err != nil || len(out.AutoScalingGroups) == 0 {
+			continue
+		}
+		desired := aws.ToInt32(out.AutoScalingGroups[0].DesiredCapacity)
+		if desired != fromDesired {
+			return desired
+		}
+	}
+	t.Fatalf("timed out waiting for ASG %s desired to change from %d after %s",
+		e.asgName, fromDesired, timeout)
+	return fromDesired // unreachable
+}
+
+// keepAliveSubmit submits transfers on a timer and returns all task IDs.
+// It submits one transfer immediately, then every interval until duration elapses.
+// Each transfer uses a unique destination path to avoid collisions.
+func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
+	duration, interval time.Duration) []string {
+	t.Helper()
+	start := time.Now()
+	var taskIDs []string
+	counter := 0
+	for {
+		destPath := fmt.Sprintf("/~/elastic-gcs-autoscale-%d-%d.txt", start.Unix(), counter)
+		taskID := e.submitTestTransferWithDest(ctx, t, destPath)
+		taskIDs = append(taskIDs, taskID)
+		counter++
+		time.Sleep(interval)
+		if time.Since(start) >= duration {
+			break
+		}
+	}
+	return taskIDs
+}
+
 // waitForTransferSucceeded polls until the task reaches SUCCEEDED (or fails/cancels).
 // Uses the `globus` CLI since the task was submitted under the endpoint owner's identity.
 func (e *testEnv) waitForTransferSucceeded(ctx context.Context, t *testing.T, taskID string, timeout time.Duration) *globusTaskInfo {

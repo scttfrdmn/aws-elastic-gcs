@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -16,23 +19,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
-	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
 
 	"github.com/scttfrdmn/elastic-gcs/internal/logger"
 )
-
-// staticBearerToken implements the auth.Authorizer interface expected by the
-// Globus transfer client. The interface requires a variadic context signature:
-//
-//	GetAuthorizationHeader(ctx ...context.Context) (string, error)
-//
-// The SDK's authorizers.StaticTokenAuthorizer uses a non-variadic signature so
-// it cannot be used directly here.
-type staticBearerToken struct{ token string }
-
-func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string, error) {
-	return "Bearer " + a.token, nil
-}
 
 // wakeRequest matches the WakeRequest struct in the waker Lambda.
 type wakeRequest struct {
@@ -109,25 +98,24 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("GetClientCredentialsToken failed: %w", err)
 	}
 
-	// Create transfer client with the bearer token
-	transferClient, err := transfer.NewClient(transfer.WithAuthorizer(&staticBearerToken{token: token.AccessToken}))
+	// Count ACTIVE tasks for our endpoint using the endpoint manager task list.
+	// The endpoint manager API (GET /endpoint_manager/task_list) returns tasks
+	// submitted by ALL users, not just the caller. This requires Activity Monitor
+	// or higher role on the endpoint (the automation client has Admin).
+	// The regular ListTasks API only returns the caller's own tasks and would
+	// always return 0 for tasks submitted by researchers via the globus CLI.
+	activeCount, err := countEndpointManagerTasks(ctx, token.AccessToken, endpointID, "ACTIVE")
 	if err != nil {
-		return fmt.Errorf("failed to create Globus transfer client: %w", err)
-	}
-
-	// Count ACTIVE tasks for our endpoint
-	activeCount, err := countTasksByStatus(ctx, transferClient, endpointID, "ACTIVE")
-	if err != nil {
-		return fmt.Errorf("ListTasks ACTIVE failed: %w", err)
+		return fmt.Errorf("endpoint_manager/task_list ACTIVE failed: %w", err)
 	}
 
 	// Count INACTIVE tasks for our endpoint.
 	// Globus marks tasks INACTIVE when the endpoint is offline or unreachable.
 	// A non-zero count means transfers are queued and the system needs to wake up.
-	queuedCount, err := countTasksByStatus(ctx, transferClient, endpointID, "INACTIVE")
+	queuedCount, err := countEndpointManagerTasks(ctx, token.AccessToken, endpointID, "INACTIVE")
 	if err != nil {
 		// Non-fatal: log and continue so we still publish the active metric.
-		logger.Warn("ListTasks INACTIVE failed", "error", err.Error())
+		logger.Warn("endpoint_manager/task_list INACTIVE failed", "error", err.Error())
 		queuedCount = 0
 	}
 
@@ -187,22 +175,50 @@ func handler(ctx context.Context, _ interface{}) error {
 	return nil
 }
 
-// countTasksByStatus queries the Globus Transfer API for tasks in the given
-// status that involve our endpoint (as source or destination).
-func countTasksByStatus(ctx context.Context, client *transfer.Client, endpointID, status string) (int, error) {
-	taskList, err := client.ListTasks(ctx, &transfer.ListTasksOptions{
-		FilterStatus: status,
-	})
+// endpointManagerTaskList is the response shape for
+// GET /v0.10/endpoint_manager/task_list
+type endpointManagerTaskList struct {
+	DATA []struct {
+		TaskID string `json:"task_id"`
+	} `json:"DATA"`
+}
+
+// countEndpointManagerTasks queries the Globus Transfer endpoint manager task
+// list API for tasks in the given status on the given endpoint. Unlike the
+// regular /task_list endpoint, this returns tasks submitted by ALL users on the
+// endpoint, which is required for monitoring researcher transfers. Requires the
+// caller to have Activity Monitor (or higher) role on the endpoint.
+func countEndpointManagerTasks(ctx context.Context, bearerToken, endpointID, status string) (int, error) {
+	q := url.Values{}
+	q.Set("filter_status", status)
+	q.Set("filter_endpoint", endpointID)
+	reqURL := "https://transfer.api.globus.org/v0.10/endpoint_manager/task_list?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("build request: %w", err)
 	}
-	count := 0
-	for _, task := range taskList.Data {
-		if task.SourceEndpointID == endpointID || task.DestinationEndpointID == endpointID {
-			count++
-		}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("HTTP GET endpoint_manager/task_list: %w", err)
 	}
-	return count, nil
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("endpoint_manager/task_list returned HTTP %d: %s", resp.StatusCode, body)
+	}
+
+	var result endpointManagerTaskList
+	if err := json.Unmarshal(body, &result); err != nil {
+		return 0, fmt.Errorf("parse endpoint_manager/task_list response: %w", err)
+	}
+	return len(result.DATA), nil
 }
 
 func main() {

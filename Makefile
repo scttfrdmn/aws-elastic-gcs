@@ -45,9 +45,11 @@ destroy:
 test:
 	go test ./... -v
 
+# Use ELASTIC_GCS_TEST_FULL_CYCLE=true for 2-round auto-scale test (~12min)
 test-integration:
 	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
-	  go test ./test/integration/ -v -tags=integration -timeout 30m $(TEST_RUN)
+	  go test ./test/integration/ -v -tags=integration -timeout 45m \
+	  $(if $(TESTS),-run $(TESTS),) $(TEST_RUN)
 
 benchmark:
 	@echo "Running scale-out benchmark in $(REGION), tier=$(TIER)..."
