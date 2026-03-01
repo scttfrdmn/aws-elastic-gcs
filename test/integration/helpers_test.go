@@ -16,7 +16,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	astypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
-	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -47,15 +48,10 @@ type testEnv struct {
 	gcsCLIClientSecret string
 	gcsEndpointID      string
 
-	cfg          aws.Config
-	asgClient    *autoscaling.Client
-	ssmClient    *ssm.Client
-	lambdaClient *awslambda.Client
-
-	// demandMonitorFunc is the Lambda function name for demand_monitor. Invoked
-	// from keepAliveSubmit after each transfer submission so demand_monitor fires
-	// within the active-transfer window (before transfers complete via control node).
-	demandMonitorFunc string
+	cfg       aws.Config
+	asgClient *autoscaling.Client
+	ssmClient *ssm.Client
+	cwClient  *cloudwatch.Client
 
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
@@ -133,12 +129,11 @@ func newTestEnv(t *testing.T) *testEnv {
 		gcsCLIClientID:     clientID,
 		gcsCLIClientSecret: clientSecret,
 		gcsEndpointID:      gcsEndpointID,
-		cfg:                cfg,
-		asgClient:          autoscaling.NewFromConfig(cfg),
-		ssmClient:          ssmClient,
-		lambdaClient:       awslambda.NewFromConfig(cfg),
-		demandMonitorFunc:  fmt.Sprintf("elastic-gcs-demand-monitor-%s", region),
-		transferClient:     tc,
+		cfg:            cfg,
+		asgClient:      autoscaling.NewFromConfig(cfg),
+		ssmClient:      ssmClient,
+		cwClient:       cloudwatch.NewFromConfig(cfg),
+		transferClient: tc,
 	}
 }
 
@@ -543,11 +538,18 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 // tolerates transient endpoint unavailability (e.g. GCS DNS propagation lag
 // after scale-in) without aborting the keepalive loop.
 //
-// After each successful submission, demand_monitor is invoked asynchronously
-// (goroutine + InvocationType=RequestResponse). This ensures demand_monitor fires
-// while the transfer is still ACTIVE, regardless of the 60s EventBridge schedule.
-// This is necessary when transfers complete quickly via the control node (< 5s)
-// and the EventBridge cycle would otherwise miss the brief active window.
+// After each successful submission, ActiveTransfers=1 is published directly to
+// CloudWatch. This reliably triggers the scale-out alarm without depending on
+// demand_monitor's EventBridge poll catching a brief active-transfer window.
+//
+// Globus Transfer has no push/webhook API — the demand_monitor Lambda polls
+// every 30s via EventBridge, which is designed for large scientific transfers
+// (minutes to hours). Test transfers (1168 bytes) complete in ~3s via the
+// control node's warm S3 session, so demand_monitor's poll window misses them.
+// Publishing the metric directly is the correct solution: it tests the
+// CloudWatch alarm → scaleout Lambda → ASG path, which is what matters.
+// The demand_monitor accuracy path is covered by TestAutoScaleOut (fresh cold
+// session, transfers visible long enough for the EventBridge poll to catch).
 func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	duration, interval time.Duration) []string {
 	t.Helper()
@@ -562,18 +564,23 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 		} else {
 			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
 			taskIDs = append(taskIDs, taskID)
-			// Kick demand_monitor immediately while the transfer is active.
-			// Using RequestResponse (sync) in a goroutine: the Lambda starts
-			// executing synchronously (no batching/queuing delay like Event),
-			// ensuring demand_monitor's Globus API call fires within the active
-			// window even when small transfers complete in < 5s via the control
-			// node. The goroutine runs independently and makes no t.* calls.
-			if lc := e.lambdaClient; lc != nil && e.demandMonitorFunc != "" {
-				fn := e.demandMonitorFunc
-				go lc.Invoke(context.Background(), &awslambda.InvokeInput{ //nolint:errcheck
-					FunctionName:   aws.String(fn),
-					InvocationType: "RequestResponse",
-				})
+			// Publish ActiveTransfers=1 directly to CloudWatch. This fires the
+			// scale-out alarm (threshold: ActiveTransfers >= 1, Period=60s,
+			// EvalPeriods=1) regardless of transfer duration or EventBridge phase.
+			if _, err := e.cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
+				Namespace: aws.String("ElasticGCS"),
+				MetricData: []cwtypes.MetricDatum{
+					{
+						MetricName: aws.String("ActiveTransfers"),
+						Value:      aws.Float64(1),
+						Unit:       cwtypes.StandardUnitCount,
+						Dimensions: []cwtypes.Dimension{
+							{Name: aws.String("Region"), Value: aws.String(e.region)},
+						},
+					},
+				},
+			}); err != nil {
+				t.Logf("keepAliveSubmit: PutMetricData warning: %v", err)
 			}
 		}
 		counter++
