@@ -787,12 +787,14 @@ fi
 	cacheEvictionRule.AddTarget(awseventstargets.NewLambdaFunction(cacheEvictionFn, nil))
 
 	// -------------------------------------------------------------------------
-	// EventBridge: Demand Monitor Schedule (every 30 seconds)
+	// EventBridge: Demand Monitor Schedule (every 1 minute)
+	// Note: 1 minute is the AWS minimum for EventBridge rate() expressions.
+	// Sub-minute polling would require Step Functions or SQS-based self-chaining.
 	// -------------------------------------------------------------------------
 	demandMonitorRule := awsevents.NewRule(stack, jsii.String("DemandMonitorRule"), &awsevents.RuleProps{
 		Description: jsii.String(fmt.Sprintf(
-			"Poll Globus Transfer API for active transfers every 30s in %s", region)),
-		Schedule: awsevents.Schedule_Rate(awscdk.Duration_Seconds(jsii.Number(30))),
+			"Poll Globus Transfer API for active transfers every 1 min in %s", region)),
+		Schedule: awsevents.Schedule_Rate(awscdk.Duration_Minutes(jsii.Number(1))),
 	})
 	demandMonitorRule.AddTarget(awseventstargets.NewLambdaFunction(demandMonitorFn, nil))
 
