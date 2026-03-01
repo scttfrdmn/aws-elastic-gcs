@@ -382,10 +382,12 @@ func (e *testEnv) submitTestTransfer(ctx context.Context, t *testing.T) string {
 		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
 	}
 
-	// Use -F json so we can parse task_id reliably.
+	// Use -F json so we can parse task_id reliably. Disable email notifications
+	// to avoid flooding the operator's inbox during test runs.
 	out, err := exec.CommandContext(ctx,
 		globusBin, "transfer",
 		"-F", "json",
+		"--notify", "off",
 		"--label", fmt.Sprintf("elastic-gcs-inttest-%s", time.Now().Format("20060102-150405")),
 		srcCollection+":"+testSourceFile,
 		dstEndpointID+":"+testDestFile,
@@ -450,6 +452,7 @@ func (e *testEnv) submitTestTransferWithDest(ctx context.Context, t *testing.T, 
 	out, err := exec.CommandContext(ctx,
 		globusBin, "transfer",
 		"-F", "json",
+		"--notify", "off",
 		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
 		srcCollection+":"+testSourceFile,
 		dstEndpointID+":"+destPath,
@@ -513,6 +516,7 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 	out, err := exec.CommandContext(ctx,
 		globusBin, "transfer",
 		"-F", "json",
+		"--notify", "off",
 		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
 		srcCollection+":"+testSourceFile,
 		dstEndpointID+":"+destPath,
@@ -533,82 +537,69 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 	return result.TaskID, nil
 }
 
-// keepAliveSubmit submits transfers on a timer and returns all task IDs.
-// It submits one transfer immediately, then every interval until duration elapses.
-// Each transfer uses a unique destination path to avoid collisions.
-// Individual submission failures are logged as warnings and skipped — this
-// tolerates transient endpoint unavailability (e.g. GCS DNS propagation lag
-// after scale-in) without aborting the keepalive loop.
+// triggerScaleOut submits a single demand transfer and immediately forces the
+// scale-out alarm to fire. Returns the submitted task ID.
 //
-// After each successful submission, ActiveTransfers=1 is published directly to
-// CloudWatch. This reliably triggers the scale-out alarm without depending on
-// demand_monitor's EventBridge poll catching a brief active-transfer window.
+// Why SetAlarmState instead of PutMetricData:
+//   - Test transfers (1168 bytes) complete in ~3s; demand_monitor's 60s poll
+//     window almost never catches them as ACTIVE.
+//   - PutMetricData with standard resolution has up to 15-minute appearance lag
+//     in CloudWatch alarm evaluations — unreliable for any reasonable test timeout.
+//   - SetAlarmState(ALARM) is immediate: it triggers SNS→scaleout Lambda→ASG
+//     directly. This is the production chain that matters; correctness of the
+//     full path is confirmed by the step-4 transfer that MUST succeed on the DTN.
 //
-// Globus Transfer has no push/webhook API — the demand_monitor Lambda polls
-// every 30s via EventBridge, which is designed for large scientific transfers
-// (minutes to hours). Test transfers (1168 bytes) complete in ~3s via the
-// control node's warm S3 session, so demand_monitor's poll window misses them.
-// Publishing the metric directly is the correct solution: it tests the
-// CloudWatch alarm → scaleout Lambda → ASG path, which is what matters.
-// The demand_monitor accuracy path is covered by TestAutoScaleOut (fresh cold
-// session, transfers visible long enough for the EventBridge poll to catch).
-func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
-	duration, interval time.Duration) []string {
+// The alarm is first reset to OK so the OK→ALARM transition always fires,
+// regardless of state left by a prior test run.
+func (e *testEnv) triggerScaleOut(ctx context.Context, t *testing.T) []string {
 	t.Helper()
 
-	// Force the scale-out alarm to OK state before starting. CloudWatch alarms
-	// only fire actions on state transitions (OK→ALARM). If the alarm is already
-	// in ALARM from a previous test run, publishing ActiveTransfers=1 won't
-	// trigger the scaleout Lambda again. SetAlarmState resets it so the next
-	// PutMetricData datapoint causes a clean OK→ALARM transition.
+	// Reset alarm to OK to guarantee a state transition when we set it to ALARM.
+	// CloudWatch alarms only fire SNS actions on transitions, not while already
+	// in ALARM.
 	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
 		AlarmName:   aws.String(e.scaleOutAlarm),
 		StateValue:  cwtypes.StateValueOk,
-		StateReason: aws.String("reset by integration test before keepAliveSubmit"),
+		StateReason: aws.String("reset by integration test before triggerScaleOut"),
 	}); err != nil {
-		t.Logf("keepAliveSubmit: SetAlarmState warning: %v", err)
+		t.Logf("triggerScaleOut: SetAlarmState(OK) warning: %v", err)
 	} else {
-		t.Logf("keepAliveSubmit: scale-out alarm reset to OK")
+		t.Logf("triggerScaleOut: scale-out alarm reset to OK")
 	}
 
-	start := time.Now()
-	var taskIDs []string
-	counter := 0
-	for {
-		destPath := fmt.Sprintf("/~/elastic-gcs-autoscale-%d-%d.txt", start.Unix(), counter)
-		taskID, err := e.trySubmitTransferWithDest(ctx, destPath)
-		if err != nil {
-			t.Logf("keepAliveSubmit: submission %d skipped (transient error): %v", counter, err)
-		} else {
-			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
-			taskIDs = append(taskIDs, taskID)
-			// On the first successful submission, force the alarm to ALARM state.
-			// PutMetricData with standard resolution has up to 15-minute lag before
-			// CloudWatch evaluates it — unreliable for an 8-minute test window.
-			// SetAlarmState(ALARM) is immediate: it triggers the SNS→scaleout
-			// Lambda→ASG path directly. This is the production chain we care about;
-			// the confirmation transfer in step 4 proves end-to-end correctness.
-			// Subsequent submissions are still made for test realism but don't
-			// need to re-trigger the alarm.
-			if len(taskIDs) == 1 {
-				if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
-					AlarmName:   aws.String(e.scaleOutAlarm),
-					StateValue:  cwtypes.StateValueAlarm,
-					StateReason: aws.String("integration test: active transfers detected, triggering scale-out"),
-				}); err != nil {
-					t.Logf("keepAliveSubmit: SetAlarmState(ALARM) warning: %v", err)
-				} else {
-					t.Logf("keepAliveSubmit: scale-out alarm set to ALARM (SNS→Lambda→ASG chain triggered)")
-				}
-			}
-		}
-		counter++
-		time.Sleep(interval)
-		if time.Since(start) >= duration {
+	// Submit one demand transfer. Retry briefly on transient errors (e.g. DNS
+	// propagation lag after scale-in).
+	destPath := fmt.Sprintf("/~/elastic-gcs-demand-%d.txt", time.Now().Unix())
+	var taskID string
+	for attempt := 1; attempt <= 3; attempt++ {
+		var err error
+		taskID, err = e.trySubmitTransferWithDest(ctx, destPath)
+		if err == nil {
 			break
 		}
+		t.Logf("triggerScaleOut: submission attempt %d failed: %v", attempt, err)
+		if attempt < 3 {
+			time.Sleep(5 * time.Second)
+		}
 	}
-	return taskIDs
+	if taskID == "" {
+		t.Fatal("triggerScaleOut: all submission attempts failed")
+	}
+	t.Logf("triggerScaleOut: submitted demand transfer %s", taskID)
+
+	// Now fire the alarm. This is immediate — SNS notifies the scaleout Lambda
+	// which increments ASG DesiredCapacity without any manual call.
+	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+		AlarmName:   aws.String(e.scaleOutAlarm),
+		StateValue:  cwtypes.StateValueAlarm,
+		StateReason: aws.String("integration test: active transfer demand detected"),
+	}); err != nil {
+		t.Logf("triggerScaleOut: SetAlarmState(ALARM) warning: %v", err)
+	} else {
+		t.Logf("triggerScaleOut: scale-out alarm set to ALARM (SNS→Lambda→ASG triggered)")
+	}
+
+	return []string{taskID}
 }
 
 // waitForAllTasksTerminal polls until every task in taskIDs has reached a
