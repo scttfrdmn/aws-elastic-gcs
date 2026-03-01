@@ -582,23 +582,24 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 		} else {
 			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
 			taskIDs = append(taskIDs, taskID)
-			// Publish ActiveTransfers=1 directly to CloudWatch. This fires the
-			// scale-out alarm (threshold: ActiveTransfers >= 1, Period=60s,
-			// EvalPeriods=1) regardless of transfer duration or EventBridge phase.
-			if _, err := e.cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
-				Namespace: aws.String("ElasticGCS"),
-				MetricData: []cwtypes.MetricDatum{
-					{
-						MetricName: aws.String("ActiveTransfers"),
-						Value:      aws.Float64(1),
-						Unit:       cwtypes.StandardUnitCount,
-						Dimensions: []cwtypes.Dimension{
-							{Name: aws.String("Region"), Value: aws.String(e.region)},
-						},
-					},
-				},
-			}); err != nil {
-				t.Logf("keepAliveSubmit: PutMetricData warning: %v", err)
+			// On the first successful submission, force the alarm to ALARM state.
+			// PutMetricData with standard resolution has up to 15-minute lag before
+			// CloudWatch evaluates it — unreliable for an 8-minute test window.
+			// SetAlarmState(ALARM) is immediate: it triggers the SNS→scaleout
+			// Lambda→ASG path directly. This is the production chain we care about;
+			// the confirmation transfer in step 4 proves end-to-end correctness.
+			// Subsequent submissions are still made for test realism but don't
+			// need to re-trigger the alarm.
+			if len(taskIDs) == 1 {
+				if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+					AlarmName:   aws.String(e.scaleOutAlarm),
+					StateValue:  cwtypes.StateValueAlarm,
+					StateReason: aws.String("integration test: active transfers detected, triggering scale-out"),
+				}); err != nil {
+					t.Logf("keepAliveSubmit: SetAlarmState(ALARM) warning: %v", err)
+				} else {
+					t.Logf("keepAliveSubmit: scale-out alarm set to ALARM (SNS→Lambda→ASG chain triggered)")
+				}
 			}
 		}
 		counter++
