@@ -544,7 +544,7 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 // after scale-in) without aborting the keepalive loop.
 //
 // After each successful submission, demand_monitor is invoked asynchronously
-// (fire-and-forget InvocationType=Event). This ensures demand_monitor fires
+// (goroutine + InvocationType=RequestResponse). This ensures demand_monitor fires
 // while the transfer is still ACTIVE, regardless of the 60s EventBridge schedule.
 // This is necessary when transfers complete quickly via the control node (< 5s)
 // and the EventBridge cycle would otherwise miss the brief active window.
@@ -563,14 +563,16 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
 			taskIDs = append(taskIDs, taskID)
 			// Kick demand_monitor immediately while the transfer is active.
-			// Using InvocationType=Event (async): the Lambda service acknowledges
-			// the request instantly, then executes demand_monitor asynchronously.
-			// This guarantees demand_monitor fires within the active-transfer window
-			// even when small transfers complete in < 5s via the control node.
-			if e.lambdaClient != nil && e.demandMonitorFunc != "" {
-				e.lambdaClient.Invoke(context.Background(), &awslambda.InvokeInput{ //nolint:errcheck
-					FunctionName:   aws.String(e.demandMonitorFunc),
-					InvocationType: "Event",
+			// Using RequestResponse (sync) in a goroutine: the Lambda starts
+			// executing synchronously (no batching/queuing delay like Event),
+			// ensuring demand_monitor's Globus API call fires within the active
+			// window even when small transfers complete in < 5s via the control
+			// node. The goroutine runs independently and makes no t.* calls.
+			if lc := e.lambdaClient; lc != nil && e.demandMonitorFunc != "" {
+				fn := e.demandMonitorFunc
+				go lc.Invoke(context.Background(), &awslambda.InvokeInput{ //nolint:errcheck
+					FunctionName:   aws.String(fn),
+					InvocationType: "RequestResponse",
 				})
 			}
 		}
