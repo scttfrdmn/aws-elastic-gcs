@@ -16,6 +16,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	astypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
@@ -46,9 +47,15 @@ type testEnv struct {
 	gcsCLIClientSecret string
 	gcsEndpointID      string
 
-	cfg       aws.Config
-	asgClient *autoscaling.Client
-	ssmClient *ssm.Client
+	cfg          aws.Config
+	asgClient    *autoscaling.Client
+	ssmClient    *ssm.Client
+	lambdaClient *awslambda.Client
+
+	// demandMonitorFunc is the Lambda function name for demand_monitor. Invoked
+	// from keepAliveSubmit after each transfer submission so demand_monitor fires
+	// within the active-transfer window (before transfers complete via control node).
+	demandMonitorFunc string
 
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
@@ -129,6 +136,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		cfg:                cfg,
 		asgClient:          autoscaling.NewFromConfig(cfg),
 		ssmClient:          ssmClient,
+		lambdaClient:       awslambda.NewFromConfig(cfg),
+		demandMonitorFunc:  fmt.Sprintf("elastic-gcs-demand-monitor-%s", region),
 		transferClient:     tc,
 	}
 }
@@ -533,6 +542,12 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 // Individual submission failures are logged as warnings and skipped — this
 // tolerates transient endpoint unavailability (e.g. GCS DNS propagation lag
 // after scale-in) without aborting the keepalive loop.
+//
+// After each successful submission, demand_monitor is invoked asynchronously
+// (fire-and-forget InvocationType=Event). This ensures demand_monitor fires
+// while the transfer is still ACTIVE, regardless of the 60s EventBridge schedule.
+// This is necessary when transfers complete quickly via the control node (< 5s)
+// and the EventBridge cycle would otherwise miss the brief active window.
 func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	duration, interval time.Duration) []string {
 	t.Helper()
@@ -547,6 +562,17 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 		} else {
 			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
 			taskIDs = append(taskIDs, taskID)
+			// Kick demand_monitor immediately while the transfer is active.
+			// Using InvocationType=Event (async): the Lambda service acknowledges
+			// the request instantly, then executes demand_monitor asynchronously.
+			// This guarantees demand_monitor fires within the active-transfer window
+			// even when small transfers complete in < 5s via the control node.
+			if e.lambdaClient != nil && e.demandMonitorFunc != "" {
+				e.lambdaClient.Invoke(context.Background(), &awslambda.InvokeInput{ //nolint:errcheck
+					FunctionName:   aws.String(e.demandMonitorFunc),
+					InvocationType: "Event",
+				})
+			}
 		}
 		counter++
 		time.Sleep(interval)
