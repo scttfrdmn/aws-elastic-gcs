@@ -18,6 +18,13 @@ type RegionConfig struct {
 	UseSpot      bool   `yaml:"use_spot"`
 	SpotMaxPrice string `yaml:"spot_max_price"` // empty = up to on-demand price
 
+	// ThroughputScaleOutMBps: threshold (MB/s) at which the throughput alarm fires
+	// to trigger a second (or third, etc.) DTN. The alarm uses the
+	// ElasticGCS/TransferThroughput metric published by demand_monitor, which is
+	// the sum of effective_bytes_per_second across all ACTIVE tasks.
+	// 0 = use the stack default (500 MB/s).
+	ThroughputScaleOutMBps int `yaml:"throughput_scaleout_mbps"`
+
 	// Ephemeral control node: automatically stop when idle.
 	// 0 = disabled (control node runs continuously, the safe default).
 	// When non-zero the idle_shutdown Lambda runs every 15 minutes and stops

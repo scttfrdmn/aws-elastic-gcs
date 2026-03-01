@@ -65,6 +65,13 @@ func main() {
 		if maxDTNs == 0 {
 			maxDTNs = region.WarmPoolSize + 1
 		}
+		// throughputMBps: MB/s above which a second (or third) DTN is triggered.
+		// Override via: cdk deploy -c elastic-gcs:throughputScaleOutMBps=800
+		// Falls back to per-region config, then stack default (500 MB/s).
+		throughputMBps := 0
+		if t := ctxString(app, "elastic-gcs:throughputScaleOutMBps"); t != "" {
+			fmt.Sscanf(t, "%d", &throughputMBps)
+		}
 
 		controlStack := stacks.NewControlNodeStack(app, controlStackName, &stacks.ControlNodeStackProps{
 			StackProps: awscdk.StackProps{
@@ -86,13 +93,14 @@ func main() {
 				Env:         env,
 				Description: jsii.String(fmt.Sprintf("Elastic GCS DTN Pool - %s", region.Name)),
 			},
-			RegionConfig:        region,
-			ControlStack:        controlStack,
-			OpenDataBuckets:     regionBuckets,
-			CacheEvictionHours:  cacheHours,
-			MaxDTNs:             maxDTNs,
-			IdleShutdownMinutes: region.IdleShutdownMinutes,
-			MinUptimeMinutes:    region.MinUptimeMinutes,
+			RegionConfig:                region,
+			ControlStack:                controlStack,
+			OpenDataBuckets:             regionBuckets,
+			CacheEvictionHours:          cacheHours,
+			MaxDTNs:                     maxDTNs,
+			ThroughputScaleOutThreshold: int64(throughputMBps) * 1_000_000,
+			IdleShutdownMinutes:         region.IdleShutdownMinutes,
+			MinUptimeMinutes:            region.MinUptimeMinutes,
 		})
 	}
 

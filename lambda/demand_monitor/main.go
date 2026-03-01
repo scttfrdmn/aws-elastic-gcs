@@ -36,8 +36,10 @@ type wakeRequest struct {
 // Triggered by: EventBridge schedule (every 1 minute)
 //
 // Metrics published:
-//   - ElasticGCS/ActiveTransfers{Region=<region>}  — drives scale-in alarm (== 0 for 15 min)
-//   - ElasticGCS/QueuedTransfers{Region=<region>}  — drives waker invocation
+//   - ElasticGCS/ActiveTransfers{Region=<region>}   — count of ACTIVE tasks; drives scale-in alarm
+//   - ElasticGCS/QueuedTransfers{Region=<region>}   — count of INACTIVE tasks; drives waker
+//   - ElasticGCS/TransferThroughput{Region=<region>} — sum of effective_bytes_per_second across
+//     all ACTIVE tasks (bytes/sec); drives multi-DTN scale-out alarm
 //
 // Auto-wake logic:
 //
@@ -98,13 +100,13 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("GetClientCredentialsToken failed: %w", err)
 	}
 
-	// Count ACTIVE tasks for our endpoint using the endpoint manager task list.
+	// Fetch ACTIVE task stats: count + sum of effective_bytes_per_second.
 	// The endpoint manager API (GET /endpoint_manager/task_list) returns tasks
 	// submitted by ALL users, not just the caller. This requires Activity Monitor
 	// or higher role on the endpoint (the automation client has Admin).
 	// The regular ListTasks API only returns the caller's own tasks and would
 	// always return 0 for tasks submitted by researchers via the globus CLI.
-	activeCount, err := countEndpointManagerTasks(ctx, token.AccessToken, endpointID, "ACTIVE")
+	activeStats, err := fetchEndpointManagerStats(ctx, token.AccessToken, endpointID, "ACTIVE")
 	if err != nil {
 		return fmt.Errorf("endpoint_manager/task_list ACTIVE failed: %w", err)
 	}
@@ -112,39 +114,43 @@ func handler(ctx context.Context, _ interface{}) error {
 	// Count INACTIVE tasks for our endpoint.
 	// Globus marks tasks INACTIVE when the endpoint is offline or unreachable.
 	// A non-zero count means transfers are queued and the system needs to wake up.
-	queuedCount, err := countEndpointManagerTasks(ctx, token.AccessToken, endpointID, "INACTIVE")
+	queuedStats, err := fetchEndpointManagerStats(ctx, token.AccessToken, endpointID, "INACTIVE")
 	if err != nil {
-		// Non-fatal: log and continue so we still publish the active metric.
+		// Non-fatal: log and continue so we still publish the active metrics.
 		logger.Warn("endpoint_manager/task_list INACTIVE failed", "error", err.Error())
-		queuedCount = 0
+		queuedStats = taskStats{}
 	}
 
-	logger.Info("transfer task counts",
+	logger.Info("transfer task stats",
 		"endpoint", endpointID,
-		"active_transfers", activeCount,
-		"queued_transfers", queuedCount,
+		"active_transfers", activeStats.Count,
+		"throughput_bytes_per_sec", activeStats.TotalBytesPerSec,
+		"queued_transfers", queuedStats.Count,
 	)
 
-	// Publish both metrics
+	// Publish all three metrics in a single PutMetricData call.
 	cwClient := cloudwatch.NewFromConfig(cfg)
+	dim := []cwtypes.Dimension{{Name: aws.String("Region"), Value: aws.String(region)}}
 	_, err = cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
 		Namespace: aws.String(metricNamespace),
 		MetricData: []cwtypes.MetricDatum{
 			{
 				MetricName: aws.String("ActiveTransfers"),
-				Value:      aws.Float64(float64(activeCount)),
+				Value:      aws.Float64(float64(activeStats.Count)),
 				Unit:       cwtypes.StandardUnitCount,
-				Dimensions: []cwtypes.Dimension{
-					{Name: aws.String("Region"), Value: aws.String(region)},
-				},
+				Dimensions: dim,
 			},
 			{
 				MetricName: aws.String("QueuedTransfers"),
-				Value:      aws.Float64(float64(queuedCount)),
+				Value:      aws.Float64(float64(queuedStats.Count)),
 				Unit:       cwtypes.StandardUnitCount,
-				Dimensions: []cwtypes.Dimension{
-					{Name: aws.String("Region"), Value: aws.String(region)},
-				},
+				Dimensions: dim,
+			},
+			{
+				MetricName: aws.String("TransferThroughput"),
+				Value:      aws.Float64(float64(activeStats.TotalBytesPerSec)),
+				Unit:       cwtypes.StandardUnitBytesSecond,
+				Dimensions: dim,
 			},
 		},
 	})
@@ -156,8 +162,8 @@ func handler(ctx context.Context, _ interface{}) error {
 	// to start the control node and scale out DTNs. This is fire-and-forget:
 	// the waker runs asynchronously and handles idempotency (won't double-start
 	// an already-running node). We log but don't fail on invoke errors.
-	if queuedCount > 0 && wakerFunctionName != "" {
-		logger.Info("queued transfers detected, invoking waker", "queued", queuedCount, "waker", wakerFunctionName)
+	if queuedStats.Count > 0 && wakerFunctionName != "" {
+		logger.Info("queued transfers detected, invoking waker", "queued", queuedStats.Count, "waker", wakerFunctionName)
 		payload, _ := json.Marshal(wakeRequest{ScaleOut: true})
 		lambdaClient := awslambda.NewFromConfig(cfg)
 		_, invokeErr := lambdaClient.Invoke(ctx, &awslambda.InvokeInput{
@@ -175,20 +181,29 @@ func handler(ctx context.Context, _ interface{}) error {
 	return nil
 }
 
+// taskStats holds aggregate statistics for tasks in a given status.
+type taskStats struct {
+	Count            int
+	TotalBytesPerSec int64 // sum of effective_bytes_per_second across all tasks
+}
+
 // endpointManagerTaskList is the response shape for
 // GET /v0.10/endpoint_manager/task_list
 type endpointManagerTaskList struct {
 	DATA []struct {
-		TaskID string `json:"task_id"`
+		TaskID             string `json:"task_id"`
+		EffectiveBytesPerS int64  `json:"effective_bytes_per_second"`
 	} `json:"DATA"`
 }
 
-// countEndpointManagerTasks queries the Globus Transfer endpoint manager task
-// list API for tasks in the given status on the given endpoint. Unlike the
-// regular /task_list endpoint, this returns tasks submitted by ALL users on the
-// endpoint, which is required for monitoring researcher transfers. Requires the
-// caller to have Activity Monitor (or higher) role on the endpoint.
-func countEndpointManagerTasks(ctx context.Context, bearerToken, endpointID, status string) (int, error) {
+// fetchEndpointManagerStats queries the Globus Transfer endpoint manager task
+// list API for tasks in the given status on the given endpoint. Returns the
+// task count and the sum of effective_bytes_per_second across all tasks.
+//
+// Unlike the regular /task_list endpoint, this returns tasks submitted by ALL
+// users on the endpoint, which is required for monitoring researcher transfers.
+// Requires Activity Monitor (or higher) role on the endpoint.
+func fetchEndpointManagerStats(ctx context.Context, bearerToken, endpointID, status string) (taskStats, error) {
 	q := url.Values{}
 	q.Set("filter_status", status)
 	q.Set("filter_endpoint", endpointID)
@@ -196,29 +211,35 @@ func countEndpointManagerTasks(ctx context.Context, bearerToken, endpointID, sta
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
+		return taskStats{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+bearerToken)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("HTTP GET endpoint_manager/task_list: %w", err)
+		return taskStats{}, fmt.Errorf("HTTP GET endpoint_manager/task_list: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, fmt.Errorf("read response body: %w", err)
+		return taskStats{}, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("endpoint_manager/task_list returned HTTP %d: %s", resp.StatusCode, body)
+		return taskStats{}, fmt.Errorf("endpoint_manager/task_list returned HTTP %d: %s", resp.StatusCode, body)
 	}
 
 	var result endpointManagerTaskList
 	if err := json.Unmarshal(body, &result); err != nil {
-		return 0, fmt.Errorf("parse endpoint_manager/task_list response: %w", err)
+		return taskStats{}, fmt.Errorf("parse endpoint_manager/task_list response: %w", err)
 	}
-	return len(result.DATA), nil
+
+	var stats taskStats
+	stats.Count = len(result.DATA)
+	for _, task := range result.DATA {
+		stats.TotalBytesPerSec += task.EffectiveBytesPerS
+	}
+	return stats, nil
 }
 
 func main() {

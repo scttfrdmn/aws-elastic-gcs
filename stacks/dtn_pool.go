@@ -34,6 +34,13 @@ type DTNPoolStackProps struct {
 	OpenDataBuckets    []config.OpenDataBucket
 	CacheEvictionHours int // default 72h if 0
 	MaxDTNs            int // default WarmPoolSize+1 if 0
+	// ThroughputScaleOutThreshold is the bytes/sec threshold for the multi-DTN
+	// scale-out alarm (ElasticGCS/TransferThroughput). When the sum of
+	// effective_bytes_per_second across all ACTIVE tasks exceeds this for 2
+	// consecutive minutes, the scaleout Lambda fires again to add another DTN.
+	// 0 = use default (500 MB/s = 500_000_000 bytes/sec).
+	ThroughputScaleOutThreshold int64
+
 	// IdleShutdownMinutes > 0 enables the idle_shutdown Lambda and EventBridge rule.
 	// 0 = disabled (control node runs continuously). See docs/ephemeral-control-node.md.
 	IdleShutdownMinutes int
@@ -83,6 +90,18 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	cacheEvictionHours := props.CacheEvictionHours
 	if cacheEvictionHours <= 0 {
 		cacheEvictionHours = 72
+	}
+
+	// ThroughputScaleOutThreshold: bytes/sec above which a second (or third) DTN
+	// is triggered. Falls back to the per-region config, then to the default of
+	// 500 MB/s. For m6i.xlarge (12.5 Gbps NIC), 500 MB/s ≈ 32% utilization —
+	// conservative enough to avoid thrash while ensuring headroom for new tasks.
+	throughputThreshold := props.ThroughputScaleOutThreshold
+	if throughputThreshold <= 0 && props.RegionConfig.ThroughputScaleOutMBps > 0 {
+		throughputThreshold = int64(props.RegionConfig.ThroughputScaleOutMBps) * 1_000_000
+	}
+	if throughputThreshold <= 0 {
+		throughputThreshold = 500_000_000 // 500 MB/s default
 	}
 
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
@@ -810,13 +829,17 @@ fi
 	// -------------------------------------------------------------------------
 	// CloudWatch Alarms + SNS → Scale-Out / Scale-In Lambdas
 	//
-	// Both alarms use the ElasticGCS/ActiveTransfers metric published by the
-	// demand monitor Lambda. This is a precise signal: scale out when there
-	// are active transfers, scale in when there have been none for 15 minutes.
+	// Scale-out uses two alarms in sequence:
+	//   1. ActiveTransfers alarm  — fires when ANY transfer is active (0→1 DTN)
+	//   2. TransferThroughput alarm — fires when endpoint is saturating (1→2 DTN, etc.)
 	//
-	// TreatMissingData=NOT_BREACHING on both alarms: if the demand monitor
-	// Lambda is unavailable (e.g. during a deploy), don't trigger false
-	// scale-out or scale-in events.
+	// Both route to the same scaleout Lambda via the same SNS topic; the Lambda
+	// increments DesiredCapacity by 1 per invocation and caps at MAX_DTNS.
+	//
+	// Scale-in uses ActiveTransfers == 0 for 15 minutes → scalein Lambda.
+	//
+	// TreatMissingData=NOT_BREACHING on all alarms: if demand_monitor is
+	// unavailable (e.g. during a deploy), don't trigger false scale events.
 	// -------------------------------------------------------------------------
 	scaleOutTopic := awssns.NewTopic(stack, jsii.String("ScaleOutTopic"), &awssns.TopicProps{
 		TopicName:   jsii.String(fmt.Sprintf("elastic-gcs-scaleout-%s", region)),
@@ -875,6 +898,33 @@ fi
 	})
 	scaleInAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleInTopic))
 
+	// Throughput scale-out alarm: fires when TransferThroughput (sum of
+	// effective_bytes_per_second across all ACTIVE tasks) exceeds the threshold
+	// for 2 consecutive minutes. This drives 1→2 DTN and beyond. The 2-period
+	// requirement (vs 1 for the first alarm) avoids spinning up a second DTN for
+	// brief throughput spikes during task start/stop transitions.
+	throughputAlarmName := fmt.Sprintf("elastic-gcs-scaleout-throughput-%s", region)
+	throughputAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ThroughputScaleOutAlarm"), &awscloudwatch.AlarmProps{
+		AlarmName: jsii.String(throughputAlarmName),
+		AlarmDescription: jsii.String(fmt.Sprintf(
+			"Trigger additional DTN when transfer throughput exceeds %d MB/s for 2 minutes",
+			throughputThreshold/1_000_000)),
+		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+			Namespace:  jsii.String("ElasticGCS"),
+			MetricName: jsii.String("TransferThroughput"),
+			DimensionsMap: &map[string]*string{
+				"Region": jsii.String(region),
+			},
+			Period:    awscdk.Duration_Minutes(jsii.Number(1)),
+			Statistic: jsii.String("Maximum"),
+		}),
+		Threshold:          jsii.Number(float64(throughputThreshold)),
+		ComparisonOperator: awscloudwatch.ComparisonOperator_GREATER_THAN_THRESHOLD,
+		EvaluationPeriods:  jsii.Number(2),
+		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING,
+	})
+	throughputAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleOutTopic))
+
 	// GCS Version Drift alarm: fires when GCSVersionDrift > 0 (any drift detected).
 	// Uses the scaleOutTopic for operator notification (same SNS infrastructure).
 	versionDriftAlarmName := fmt.Sprintf("elastic-gcs-version-drift-%s", region)
@@ -912,7 +962,7 @@ fi
 	// Row 1: Transfer demand
 	dashboard.AddWidgets(
 		awscloudwatch.NewGraphWidget(&awscloudwatch.GraphWidgetProps{
-			Title:  jsii.String("Active Transfers"),
+			Title:  jsii.String("Active Transfers & Throughput"),
 			Width:  jsii.Number(8),
 			Height: jsii.Number(6),
 			Left: &[]awscloudwatch.IMetric{
@@ -925,6 +975,18 @@ fi
 					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
 					Statistic: jsii.String("Maximum"),
 					Label:     jsii.String("Active Transfers"),
+				}),
+			},
+			Right: &[]awscloudwatch.IMetric{
+				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
+					Namespace:  jsii.String("ElasticGCS"),
+					MetricName: jsii.String("TransferThroughput"),
+					DimensionsMap: &map[string]*string{
+						"Region": jsii.String(region),
+					},
+					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
+					Statistic: jsii.String("Maximum"),
+					Label:     jsii.String("Throughput (bytes/s)"),
 				}),
 			},
 		}),
@@ -959,7 +1021,7 @@ fi
 			Title:  jsii.String("Alarm Status"),
 			Width:  jsii.Number(8),
 			Height: jsii.Number(6),
-			Alarms: &[]awscloudwatch.IAlarm{scaleOutAlarm, scaleInAlarm, versionDriftAlarm},
+			Alarms: &[]awscloudwatch.IAlarm{scaleOutAlarm, throughputAlarm, scaleInAlarm, versionDriftAlarm},
 		}),
 	)
 
