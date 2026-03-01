@@ -491,9 +491,48 @@ func (e *testEnv) waitForASGDesiredChange(ctx context.Context, t *testing.T,
 	return fromDesired // unreachable
 }
 
+// trySubmitTransferWithDest attempts a transfer submission and returns
+// (taskID, nil) on success or ("", err) on failure without calling t.Fatal.
+// Used by keepAliveSubmit to tolerate transient endpoint failures (e.g. during
+// DNS propagation after scale-in when GCS DNS may still point to a stopped DTN).
+func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string) (string, error) {
+	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
+	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
+
+	globusBin, err := exec.LookPath("globus")
+	if err != nil {
+		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
+	}
+
+	out, err := exec.CommandContext(ctx,
+		globusBin, "transfer",
+		"-F", "json",
+		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
+		srcCollection+":"+testSourceFile,
+		dstEndpointID+":"+destPath,
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("globus transfer: %w: %s", err, out)
+	}
+
+	var result struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return "", fmt.Errorf("parse transfer output: %w", err)
+	}
+	if result.TaskID == "" {
+		return "", fmt.Errorf("empty task_id in: %s", out)
+	}
+	return result.TaskID, nil
+}
+
 // keepAliveSubmit submits transfers on a timer and returns all task IDs.
 // It submits one transfer immediately, then every interval until duration elapses.
 // Each transfer uses a unique destination path to avoid collisions.
+// Individual submission failures are logged as warnings and skipped — this
+// tolerates transient endpoint unavailability (e.g. GCS DNS propagation lag
+// after scale-in) without aborting the keepalive loop.
 func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	duration, interval time.Duration) []string {
 	t.Helper()
@@ -502,8 +541,13 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	counter := 0
 	for {
 		destPath := fmt.Sprintf("/~/elastic-gcs-autoscale-%d-%d.txt", start.Unix(), counter)
-		taskID := e.submitTestTransferWithDest(ctx, t, destPath)
-		taskIDs = append(taskIDs, taskID)
+		taskID, err := e.trySubmitTransferWithDest(ctx, destPath)
+		if err != nil {
+			t.Logf("keepAliveSubmit: submission %d skipped (transient error): %v", counter, err)
+		} else {
+			t.Logf("submitted transfer task %s (dest: %s)", taskID, destPath)
+			taskIDs = append(taskIDs, taskID)
+		}
 		counter++
 		time.Sleep(interval)
 		if time.Since(start) >= duration {
