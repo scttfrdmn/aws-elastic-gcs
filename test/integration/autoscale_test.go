@@ -75,6 +75,79 @@ func TestAutoScaleOut(t *testing.T) {
 	t.Log("step 5 complete: warm pool restored")
 }
 
+// TestAutoScaleIn validates the full automatic scale-in path after load ends:
+//
+//	demand_monitor publishes ActiveTransfers=0 → scale-in alarm fires after
+//	15 min → scalein Lambda reduces desired → lifecycle hook disables node →
+//	instance returns to Warmed:Stopped in warm pool.
+//
+// Skipped unless ELASTIC_GCS_TEST_SCALE_IN=true.
+// Expected runtime: ~20 minutes.
+func TestAutoScaleIn(t *testing.T) {
+	if os.Getenv("ELASTIC_GCS_TEST_SCALE_IN") != "true" {
+		t.Skip("skipping: set ELASTIC_GCS_TEST_SCALE_IN=true to run (~20min)")
+	}
+
+	ctx := context.Background()
+	e := newTestEnv(t)
+
+	// Safety net: always restore to desired=0 on exit, even on failure.
+	t.Cleanup(func() {
+		e.scaleASG(context.Background(), t, 0)
+	})
+
+	// Precondition: start from desired=0 with at least one warm instance.
+	t.Log("precondition: scaling to desired=0...")
+	e.scaleASG(ctx, t, 0)
+	t.Log("waiting for warm pool (at least 1 Warmed:Stopped)...")
+	warmIDs := e.waitForWarmPool(ctx, t, 1, 3*time.Minute)
+	t.Logf("warm pool ready: %v", warmIDs)
+
+	// Step 1: submit keepalive transfers to trigger automatic scale-out.
+	t.Log("step 1: submitting keepalive transfers for 75s (interval 10s)...")
+	keepAliveIDs := e.keepAliveSubmit(ctx, t, 75*time.Second, 10*time.Second)
+	t.Logf("step 1 complete: submitted %d tasks", len(keepAliveIDs))
+
+	// Step 2: wait for scaleout Lambda to increase desired (no manual call).
+	t.Log("step 2: waiting for automatic scale-out...")
+	newDesired := e.waitForASGDesiredChange(ctx, t, 0, 4*time.Minute)
+	t.Logf("step 2 complete: ASG desired 0 → %d", newDesired)
+
+	// Step 3: wait for DTN InService.
+	t.Log("step 3: waiting for DTN InService...")
+	ids := e.waitForASGInService(ctx, t, 1, 5*time.Minute)
+	t.Logf("step 3 complete: DTN InService: %v", ids)
+
+	// Step 4: confirmation transfer to verify the DTN is serving.
+	t.Log("step 4: submitting confirmation transfer...")
+	confirmID := e.submitTestTransfer(ctx, t)
+	info := e.waitForTransferSucceeded(ctx, t, confirmID, 2*time.Minute)
+	t.Logf("step 4 complete: transfer %s SUCCEEDED (%d bytes)", confirmID, info.BytesTransferred)
+
+	// Step 5: wait for all tasks (keepalive + confirmation) to reach a terminal
+	// state. Once they do, demand_monitor will start publishing ActiveTransfers=0
+	// and the 15-minute scale-in alarm clock begins.
+	allIDs := append(keepAliveIDs, confirmID)
+	t.Log("step 5: waiting for all transfers to complete (demand drops to zero)...")
+	e.waitForAllTasksTerminal(ctx, t, allIDs, 5*time.Minute)
+	t.Log("step 5 complete: all transfers done — scale-in alarm clock starts now")
+
+	// Step 6: wait for the scale-in alarm to fire and the scalein Lambda to
+	// reduce ASG desired. The alarm fires after Period=300s × EvalPeriods=3 =
+	// 15 min of consecutive zero-demand datapoints.
+	t.Log("step 6: waiting for automatic scale-in (~15min for alarm to fire)...")
+	scaleInStart := time.Now()
+	prevDesired := e.waitForASGDesiredChange(ctx, t, 1, 20*time.Minute)
+	t.Logf("step 6 complete: ASG desired 1 → %d after %s (automatic scale-in)",
+		prevDesired, time.Since(scaleInStart).Round(time.Second))
+
+	// Step 7: wait for the instance to complete its lifecycle hook (node disable)
+	// and return to Warmed:Stopped in the warm pool.
+	t.Log("step 7: waiting for instance to return to Warmed:Stopped...")
+	e.waitForWarmPool(ctx, t, 1, 5*time.Minute)
+	t.Log("step 7 complete: instance back in warm pool — test complete")
+}
+
 // TestAutoScaleFull extends TestAutoScaleOut with a second round to prove
 // repeatability of the automatic scale-out path.
 //

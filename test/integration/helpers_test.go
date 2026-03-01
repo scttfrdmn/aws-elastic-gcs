@@ -557,6 +557,37 @@ func (e *testEnv) keepAliveSubmit(ctx context.Context, t *testing.T,
 	return taskIDs
 }
 
+// waitForAllTasksTerminal polls until every task in taskIDs has reached a
+// terminal state (SUCCEEDED, FAILED, or CANCELLED). Used to detect when
+// active transfer demand drops to zero so the scale-in clock can start.
+func (e *testEnv) waitForAllTasksTerminal(ctx context.Context, t *testing.T,
+	taskIDs []string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	pending := make(map[string]bool, len(taskIDs))
+	for _, id := range taskIDs {
+		pending[id] = true
+	}
+	for time.Now().Before(deadline) && len(pending) > 0 {
+		time.Sleep(10 * time.Second)
+		for id := range pending {
+			info := e.getTaskInfo(ctx, t, id)
+			switch info.Status {
+			case "SUCCEEDED", "FAILED", "CANCELLED":
+				t.Logf("task %s: %s", id, info.Status)
+				delete(pending, id)
+			}
+		}
+	}
+	if len(pending) > 0 {
+		var ids []string
+		for id := range pending {
+			ids = append(ids, id)
+		}
+		t.Fatalf("tasks still pending after %s: %v", timeout, ids)
+	}
+}
+
 // waitForTransferSucceeded polls until the task reaches SUCCEEDED (or fails/cancels).
 // Uses the `globus` CLI since the task was submitted under the endpoint owner's identity.
 func (e *testEnv) waitForTransferSucceeded(ctx context.Context, t *testing.T, taskID string, timeout time.Duration) *globusTaskInfo {
