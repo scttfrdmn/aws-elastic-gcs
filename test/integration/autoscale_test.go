@@ -127,10 +127,13 @@ func TestAutoScaleIn(t *testing.T) {
 
 	// Step 6: wait for the scale-in alarm to fire and the scalein Lambda to
 	// reduce ASG desired. The alarm fires after Period=300s × EvalPeriods=3 =
-	// 15 min of consecutive zero-demand datapoints.
+	// 15 min of consecutive zero-demand datapoints from demand_monitor.
+	// Allow 25 min: 15 min alarm window + up to 5 min for demand_monitor timing
+	// (if a non-zero publish lands just before step 6, the clock resets by up
+	// to one demand_monitor cycle before the first clean zero period begins).
 	t.Log("step 6: waiting for automatic scale-in (~15min for alarm to fire)...")
 	scaleInStart := time.Now()
-	prevDesired := e.waitForASGDesiredChange(ctx, t, 1, 20*time.Minute)
+	prevDesired := e.waitForASGDesiredChange(ctx, t, 1, 25*time.Minute)
 	t.Logf("step 6 complete: ASG desired 1 → %d after %s (automatic scale-in)",
 		prevDesired, time.Since(scaleInStart).Round(time.Second))
 
