@@ -53,6 +53,7 @@ type testEnv struct {
 	ssmClient      *ssm.Client
 	cwClient       *cloudwatch.Client
 	scaleOutAlarm  string // CloudWatch alarm name driving scale-out
+	scaleInAlarm   string // CloudWatch alarm name driving scale-in
 
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
@@ -134,7 +135,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		asgClient:     autoscaling.NewFromConfig(cfg),
 		ssmClient:     ssmClient,
 		cwClient:      cloudwatch.NewFromConfig(cfg),
-		scaleOutAlarm: fmt.Sprintf("elastic-gcs-scaleout-%s", region),
+		scaleOutAlarm:  fmt.Sprintf("elastic-gcs-scaleout-%s", region),
+		scaleInAlarm:   fmt.Sprintf("elastic-gcs-scalein-%s", region),
 		transferClient: tc,
 	}
 }
@@ -567,19 +569,21 @@ func (e *testEnv) triggerScaleOut(ctx context.Context, t *testing.T) []string {
 		t.Logf("triggerScaleOut: scale-out alarm reset to OK")
 	}
 
-	// Submit one demand transfer. Retry briefly on transient errors (e.g. DNS
-	// propagation lag after scale-in).
+	// Submit one demand transfer. Retry for up to 3 minutes to cover GCS DNS
+	// propagation after a prior scale-in (Globus docs: "up to 2 minutes").
+	// The prior test's lifecycle hook calls `node disable`, but DNS may still
+	// route new connections to the just-stopped DTN for ~2 minutes after that.
 	destPath := fmt.Sprintf("/~/elastic-gcs-demand-%d.txt", time.Now().Unix())
 	var taskID string
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= 12; attempt++ {
 		var err error
 		taskID, err = e.trySubmitTransferWithDest(ctx, destPath)
 		if err == nil {
 			break
 		}
 		t.Logf("triggerScaleOut: submission attempt %d failed: %v", attempt, err)
-		if attempt < 3 {
-			time.Sleep(5 * time.Second)
+		if attempt < 12 {
+			time.Sleep(15 * time.Second)
 		}
 	}
 	if taskID == "" {
@@ -600,6 +604,130 @@ func (e *testEnv) triggerScaleOut(ctx context.Context, t *testing.T) []string {
 	}
 
 	return []string{taskID}
+}
+
+// waitForScalingActivityComplete polls DescribeScalingActivities until all
+// recent ASG activities are complete (Progress=100). This is needed before
+// triggering scale-in: the ASG rejects SetDesiredCapacity with
+// ScalingActivityInProgress while the scale-out lifecycle hook is still
+// running (health check grace period, typically ~5 min after InService).
+func (e *testEnv) waitForScalingActivityComplete(ctx context.Context, t *testing.T, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(15 * time.Second)
+		out, err := e.asgClient.DescribeScalingActivities(ctx,
+			&autoscaling.DescribeScalingActivitiesInput{
+				AutoScalingGroupName: aws.String(e.asgName),
+				MaxRecords:           aws.Int32(5),
+			})
+		if err != nil {
+			continue
+		}
+		allDone := true
+		for _, act := range out.Activities {
+			if aws.ToInt32(act.Progress) < 100 {
+				allDone = false
+				t.Logf("waitForScalingActivityComplete: activity %s progress=%d%%",
+					aws.ToString(act.ActivityId)[:8], aws.ToInt32(act.Progress))
+				break
+			}
+		}
+		if allDone {
+			t.Log("waitForScalingActivityComplete: all scaling activities complete")
+			return
+		}
+	}
+	t.Fatalf("waitForScalingActivityComplete: timed out after %s", timeout)
+}
+
+// waitForCleanScaleInMetric polls CloudWatch GetMetricStatistics until
+// ActiveTransfers has been 0 (max) for the last 5 minutes. This mirrors the
+// active transfer guard in the scale-in Lambda: if this passes, the Lambda
+// will not abort the scale-in.
+//
+// Why this is needed: the Globus endpoint_manager/task_list API has a ~1-2
+// minute lag before removing SUCCEEDED tasks from ACTIVE. demand_monitor may
+// therefore publish non-zero ActiveTransfers for up to ~2 minutes after the
+// Globus CLI confirms tasks are terminal. The Lambda's 5-minute lookback then
+// blocks scale-in for up to ~7 minutes after transfer completion.
+//
+// We wait for this window to clear before calling triggerScaleIn so the Lambda
+// proceeds rather than silently skipping.
+func (e *testEnv) waitForCleanScaleInMetric(ctx context.Context, t *testing.T, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(30 * time.Second)
+		stats, err := e.cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String("ElasticGCS"),
+			MetricName: aws.String("ActiveTransfers"),
+			StartTime:  aws.Time(time.Now().Add(-5 * time.Minute)),
+			EndTime:    aws.Time(time.Now()),
+			Period:     aws.Int32(300),
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
+			Dimensions: []cwtypes.Dimension{
+				{Name: aws.String("Region"), Value: aws.String(e.region)},
+			},
+		})
+		if err != nil {
+			t.Logf("waitForCleanScaleInMetric: GetMetricStatistics warning: %v", err)
+			continue
+		}
+		// No datapoints = missing data, treated as 0 by the Lambda guard.
+		// Max = 0 = clean window.
+		if len(stats.Datapoints) == 0 || aws.ToFloat64(stats.Datapoints[0].Maximum) == 0 {
+			t.Logf("waitForCleanScaleInMetric: ActiveTransfers clear — Lambda guard will pass")
+			return
+		}
+		t.Logf("waitForCleanScaleInMetric: max=%.0f in last 5min, waiting...",
+			aws.ToFloat64(stats.Datapoints[0].Maximum))
+	}
+	t.Fatalf("waitForCleanScaleInMetric: timed out after %s", timeout)
+}
+
+// triggerScaleIn immediately forces the scale-in alarm to ALARM state,
+// driving the scale-in Lambda without waiting 15 minutes for demand_monitor
+// to organically produce three consecutive zero-demand periods.
+//
+// Why not wait for the organic path:
+//   - demand_monitor uses endpoint_manager/task_list which has a ~1-2 minute
+//     lag before marking SUCCEEDED tasks as terminal. This resets CloudWatch's
+//     3×5-minute evaluation window every test run.
+//   - Test transfers (1168 bytes, ~13s) complete far too quickly for organic
+//     scale-in to be reliable in any reasonable test timeout.
+//   - The production scale-in path works correctly for real transfers (minutes
+//     to hours), but is not suitable for automated testing with tiny files.
+//
+// What we do test:
+//   - The scale-in Lambda fires on OK→ALARM transition
+//   - The Lambda reduces ASG desired capacity
+//   - The lifecycle hook (disable→stop) completes and returns the instance to Warmed:Stopped
+//
+// The alarm is first reset to OK so the OK→ALARM transition always fires
+// regardless of state left by demand_monitor or a prior run.
+func (e *testEnv) triggerScaleIn(ctx context.Context, t *testing.T) {
+	t.Helper()
+
+	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+		AlarmName:   aws.String(e.scaleInAlarm),
+		StateValue:  cwtypes.StateValueOk,
+		StateReason: aws.String("reset by integration test before triggerScaleIn"),
+	}); err != nil {
+		t.Logf("triggerScaleIn: SetAlarmState(OK) warning: %v", err)
+	} else {
+		t.Logf("triggerScaleIn: scale-in alarm reset to OK")
+	}
+
+	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
+		AlarmName:   aws.String(e.scaleInAlarm),
+		StateValue:  cwtypes.StateValueAlarm,
+		StateReason: aws.String("integration test: active transfers dropped to zero"),
+	}); err != nil {
+		t.Logf("triggerScaleIn: SetAlarmState(ALARM) warning: %v", err)
+	} else {
+		t.Logf("triggerScaleIn: scale-in alarm set to ALARM (SNS→scalein Lambda→ASG triggered)")
+	}
 }
 
 // waitForAllTasksTerminal polls until every task in taskIDs has reached a

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -106,12 +107,36 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	newDesired := currentDesired - 1
 	logger.Info("scaling in", "from", currentDesired, "to", newDesired)
 
-	_, err = asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
-		AutoScalingGroupName: aws.String(asgName),
-		DesiredCapacity:      aws.Int32(int32(newDesired)),
-		HonorCooldown:        aws.Bool(true), // Respect cooldown on scale-in
-	})
-	if err != nil {
+	// SetDesiredCapacity with retry on ScalingActivityInProgress.
+	//
+	// The ASG rejects capacity changes while a scaling activity is in progress
+	// (e.g. the scale-out lifecycle hook completing, or warm pool replenishment
+	// finishing its health-check grace period — typically 5 min after InService).
+	// Rather than returning an error and relying on SNS retry timing, we retry
+	// internally so the scale-in completes as soon as the activity clears.
+	//
+	// HonorCooldown=false: the CloudWatch alarm (15-min zero-demand window, or
+	// forced in tests) is the appropriate gate for scale-in. Adding the ASG
+	// cooldown period on top is redundant and causes spurious failures.
+	const (
+		maxRetries    = 16
+		retryInterval = 30 * time.Second
+	)
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		_, err = asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
+			AutoScalingGroupName: aws.String(asgName),
+			DesiredCapacity:      aws.Int32(int32(newDesired)),
+			HonorCooldown:        aws.Bool(false),
+		})
+		if err == nil {
+			break
+		}
+		if strings.Contains(err.Error(), "ScalingActivityInProgress") && attempt < maxRetries {
+			logger.Info("scaling activity in progress, retrying",
+				"attempt", attempt, "max", maxRetries, "backoff_sec", int(retryInterval.Seconds()))
+			time.Sleep(retryInterval)
+			continue
+		}
 		return fmt.Errorf("SetDesiredCapacity failed: %w", err)
 	}
 

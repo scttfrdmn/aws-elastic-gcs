@@ -68,17 +68,23 @@ func TestAutoScaleOut(t *testing.T) {
 	t.Log("step 5 complete: warm pool restored")
 }
 
-// TestAutoScaleIn validates the full automatic scale-in path after load ends:
+// TestAutoScaleIn validates the scale-in path end-to-end:
 //
-//	demand_monitor publishes ActiveTransfers=0 → scale-in alarm fires after
-//	15 min → scalein Lambda reduces desired → lifecycle hook disables node →
-//	instance returns to Warmed:Stopped in warm pool.
+//	scale-in alarm fires (forced via SetAlarmState) → scalein Lambda reduces
+//	desired → lifecycle hook disables node → instance returns to Warmed:Stopped.
+//
+// Scale-out is triggered the same way as TestAutoScaleOut (SetAlarmState on
+// the scale-out alarm). Scale-in is also force-triggered because the organic
+// 15-minute path (demand_monitor → CloudWatch 3×5min window → alarm) is not
+// suitable for automated testing: tiny test transfers (13s, 1168 bytes) finish
+// before demand_monitor even polls once, and endpoint_manager/task_list has a
+// ~1-2 min lag before removing SUCCEEDED tasks from ACTIVE.
 //
 // Skipped unless ELASTIC_GCS_TEST_SCALE_IN=true.
-// Expected runtime: ~20 minutes.
+// Expected runtime: ~12 minutes (includes ~7min CloudWatch metric cleanup window).
 func TestAutoScaleIn(t *testing.T) {
 	if os.Getenv("ELASTIC_GCS_TEST_SCALE_IN") != "true" {
-		t.Skip("skipping: set ELASTIC_GCS_TEST_SCALE_IN=true to run (~20min)")
+		t.Skip("skipping: set ELASTIC_GCS_TEST_SCALE_IN=true to run (~12min)")
 	}
 
 	ctx := context.Background()
@@ -125,16 +131,41 @@ func TestAutoScaleIn(t *testing.T) {
 	e.waitForAllTasksTerminal(ctx, t, allIDs, 5*time.Minute)
 	t.Log("step 5 complete: all transfers done — scale-in alarm clock starts now")
 
-	// Step 6: wait for the scale-in alarm to fire and the scalein Lambda to
-	// reduce ASG desired. The alarm fires after Period=300s × EvalPeriods=3 =
-	// 15 min of consecutive zero-demand datapoints from demand_monitor.
-	// Allow 25 min: 15 min alarm window + up to 5 min for demand_monitor timing
-	// (if a non-zero publish lands just before step 6, the clock resets by up
-	// to one demand_monitor cycle before the first clean zero period begins).
-	t.Log("step 6: waiting for automatic scale-in (~15min for alarm to fire)...")
+	// Step 5a: wait for all ASG scaling activities to complete before triggering
+	// scale-in. The ASG rejects SetDesiredCapacity with ScalingActivityInProgress
+	// while the scale-out lifecycle hook is finishing (health-check grace period,
+	// typically ~5 min after InService). The scale-in Lambda now retries on this
+	// error internally, but waiting here avoids burning Lambda execution time.
+	t.Log("step 5a: waiting for ASG scaling activities to complete...")
+	e.waitForScalingActivityComplete(ctx, t, 10*time.Minute)
+	t.Log("step 5a complete: no in-progress scaling activities")
+
+	// Step 5b: wait for CloudWatch ActiveTransfers metric to show 0 for the
+	// last 5 minutes. The scale-in Lambda checks this before acting — if
+	// non-zero data exists in that window it silently skips the scale-in.
+	// endpoint_manager/task_list lag means demand_monitor may publish non-zero
+	// for ~2 min post-completion; combined with the 5-min lookback that's up
+	// to ~7 minutes before the Lambda guard clears.
+	t.Log("step 5b: waiting for CloudWatch ActiveTransfers to clear (Lambda guard)...")
+	e.waitForCleanScaleInMetric(ctx, t, 10*time.Minute)
+	t.Log("step 5b complete: metric history clean")
+
+	// Step 6: trigger scale-in by forcing the scale-in alarm to ALARM state,
+	// then wait for the scalein Lambda to reduce ASG desired.
+	//
+	// We force the alarm rather than waiting for organic scale-in (~15 min)
+	// because endpoint_manager/task_list has a ~1-2 min lag after a task
+	// SUCCEEDS before removing it from ACTIVE, which resets CloudWatch's
+	// 3×5-min evaluation window. With 13-second test transfers this makes
+	// organic scale-in unreliable in any reasonable test timeout.
+	//
+	// What this tests: scale-in Lambda fires → ASG desired drops → lifecycle
+	// hook (node disable → stop) completes → instance returns to Warmed:Stopped.
+	t.Log("step 6: triggering scale-in alarm + waiting for automatic scale-in...")
 	scaleInStart := time.Now()
-	prevDesired := e.waitForASGDesiredChange(ctx, t, 1, 25*time.Minute)
-	t.Logf("step 6 complete: ASG desired 1 → %d after %s (automatic scale-in)",
+	e.triggerScaleIn(ctx, t)
+	prevDesired := e.waitForASGDesiredChange(ctx, t, 1, 5*time.Minute)
+	t.Logf("step 6 complete: ASG desired 1 → %d after %s (scale-in Lambda fired)",
 		prevDesired, time.Since(scaleInStart).Round(time.Second))
 
 	// Step 7: wait for the instance to complete its lifecycle hook (node disable)

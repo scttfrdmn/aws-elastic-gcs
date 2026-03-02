@@ -643,7 +643,7 @@ fi
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
 		Code:         awslambda.Code_FromAsset(jsii.String("lambda/scalein"), nil),
-		Timeout:      awscdk.Duration_Minutes(jsii.Number(5)),
+		Timeout:      awscdk.Duration_Minutes(jsii.Number(10)), // up to 8 min of ScalingActivityInProgress retries
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":         asg.AutoScalingGroupName(),
