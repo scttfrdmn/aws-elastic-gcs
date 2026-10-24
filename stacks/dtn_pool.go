@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssns"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssnssubscriptions"
 	"github.com/aws/aws-cdk-go/awscdk/v2/customresources"
+	"github.com/aws/aws-cdk-go/awscdk/v2/interfaces/interfacesawscloudwatch"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 
@@ -45,6 +46,11 @@ type DTNPoolStackProps struct {
 	// 0 = disabled (control node runs continuously). See docs/ephemeral-control-node.md.
 	IdleShutdownMinutes int
 	MinUptimeMinutes    int // default 30 when IdleShutdownMinutes > 0
+
+	// GCSVersion is the exact globus-connect-server54 package version (e.g.
+	// "5.4.99"). Selects the matching DTN AMI and pins the UserData fallback
+	// install so DTNs always match the control node.
+	GCSVersion string
 }
 
 // NewDTNPoolStack creates the Phase 3 DTN pool infrastructure:
@@ -321,7 +327,7 @@ if ! command -v aws &>/dev/null; then
 fi
 `)),
 		// Install GCS if not already present (no-op if DTN AMI has it pre-baked)
-		jsii.String(strings.TrimSpace(`
+		jsii.String(strings.ReplaceAll(strings.TrimSpace(`
 if ! command -v globus-connect-server &>/dev/null; then
     echo ">>> Installing GCS (not found in AMI)..."
     . /etc/os-release
@@ -329,9 +335,9 @@ if ! command -v globus-connect-server &>/dev/null; then
     dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VER}.noarch.rpm || true
     dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
     rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
-    dnf install -y globus-connect-server54
+    dnf install -y globus-connect-server54-GCS_VERSION
 fi
-`)),
+`), "GCS_VERSION", props.GCSVersion)),
 		// Install scripts via base64 to avoid heredoc escaping issues
 		jsii.String("mkdir -p /opt/elastic-gcs/scripts"),
 		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/dtn_boot.sh", bootScriptB64)),
@@ -359,24 +365,16 @@ fi
 		dtnInstanceStr = "m6i.xlarge"
 	}
 
-	// Use the pre-built DTN AMI (GCS 5.4 pre-installed) built by scripts/build_ami.sh.
-	// AMIs are named "elastic-gcs-dtn-YYYYMMDD-HHMMSS" and owned by this account.
-	// MachineImage_Lookup picks the latest matching AMI at synth time.
-	// If no pre-built AMI exists yet, falls back to base Rocky Linux 9 (UserData installs GCS).
-	account := awscdk.Stack_Of(stack).Account()
+	// Use the pre-built DTN AMI built by scripts/build_ami.sh for this exact GCS
+	// version. AMIs are named "elastic-gcs-dtn-gcs<version>-YYYYMMDD-HHMMSS" and
+	// owned by this account; MachineImage_Lookup picks the latest match at synth
+	// time and fails synth if none exists, so run `make ami` after bumping
+	// globus:gcsVersion. Including the version in the filter also invalidates the
+	// cdk.context.json lookup cache on every version bump.
 	dtnAMI := awsec2.MachineImage_Lookup(&awsec2.LookupMachineImageProps{
-		Name:   jsii.String("elastic-gcs-dtn-*"),
-		Owners: &[]*string{account},
+		Name:   jsii.String(fmt.Sprintf("elastic-gcs-dtn-gcs%s-*", props.GCSVersion)),
+		Owners: &[]*string{awscdk.Stack_Of(stack).Account()},
 	})
-	// If lookup returns no result (pre-built AMI not yet created), fall back to Rocky Linux 9.
-	// The UserData will install GCS on first boot in that case.
-	_ = dtnAMI // may be overridden below if no pre-built AMI found
-	if account == nil || *account == "" {
-		dtnAMI = awsec2.MachineImage_Lookup(&awsec2.LookupMachineImageProps{
-			Name:   jsii.String("Rocky-9-EC2-Base-*.x86_64"),
-			Owners: jsii.Strings("792107900819"),
-		})
-	}
 
 	ltProps := &awsec2.LaunchTemplateProps{
 		LaunchTemplateName: jsii.String(fmt.Sprintf("elastic-gcs-dtn-%s", region)),
@@ -1035,7 +1033,7 @@ fi
 			Title:  jsii.String("Alarm Status"),
 			Width:  jsii.Number(8),
 			Height: jsii.Number(6),
-			Alarms: &[]awscloudwatch.IAlarm{scaleOutAlarm, throughputAlarm, scaleInAlarm, versionDriftAlarm},
+			Alarms: &[]interfacesawscloudwatch.IAlarmRef{scaleOutAlarm, throughputAlarm, scaleInAlarm, versionDriftAlarm},
 		}),
 	)
 

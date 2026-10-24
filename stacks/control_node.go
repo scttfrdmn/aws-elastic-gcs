@@ -33,6 +33,10 @@ type ControlNodeStackProps struct {
 	// MaxDTNs is the maximum number of simultaneously active DTN nodes.
 	// TOTAL_SLOTS = MaxDTNs + WarmPoolSize identities are pre-created.
 	MaxDTNs int
+
+	// GCSVersion is the exact globus-connect-server54 package version to install
+	// (e.g. "5.4.99"). Must match the DTN AMI built by scripts/build_ami.sh.
+	GCSVersion string
 }
 
 // ControlNodeStack is the CDK stack for the GCS control node.
@@ -49,7 +53,7 @@ type ControlNodeStack struct {
 //   - VPC with public subnets in 2 AZs (no NAT gateways)
 //   - Security group for GCS (TCP 443, 50000-51000, SSH)
 //   - IAM role with least-privilege S3/Secrets Manager/SSM/CloudWatch access
-//   - EC2 t4g.medium (Graviton, 8GB RAM — GCS minimum) with AL2023 ARM64
+//   - EC2 t3a.large (x86-64, 8GB RAM — GCS minimum) with Rocky Linux 9
 //   - UserData that runs control_node_init.sh on first boot
 func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNodeStackProps) *ControlNodeStack {
 	var sprops awscdk.StackProps
@@ -285,6 +289,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export ORGANIZATION_NAME=%q", orgName)),
 		jsii.String(fmt.Sprintf("export GLOBUS_OWNER_IDENTITY=%q", props.GlobusOwnerIdentity)),
 		jsii.String(fmt.Sprintf("export GLOBUS_SUBSCRIPTION_ID=%q", props.GlobusSubscriptionID)),
+		jsii.String(fmt.Sprintf("export GCS_VERSION=%q", props.GCSVersion)),
 		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.RegionConfig.WarmPoolSize)),
 		// TOTAL_SLOTS = maxDTNs + warmPoolSize: every EIP slot needs a node identity.
 		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.MaxDTNs+props.RegionConfig.WarmPoolSize)),
