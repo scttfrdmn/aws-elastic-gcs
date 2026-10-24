@@ -18,7 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/scttfrdmn/elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
 // WakeRequest is the body for both direct Lambda invocations and HTTP Function URL calls.

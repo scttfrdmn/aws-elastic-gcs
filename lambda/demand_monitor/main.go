@@ -20,7 +20,7 @@ import (
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 
-	"github.com/scttfrdmn/elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
 // wakeRequest matches the WakeRequest struct in the waker Lambda.

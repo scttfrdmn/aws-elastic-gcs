@@ -15,7 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 
-	"github.com/scttfrdmn/elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
 // snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.

@@ -1,4 +1,4 @@
-module github.com/scttfrdmn/elastic-gcs
+module github.com/scttfrdmn/aws-elastic-gcs
 
 go 1.23
 

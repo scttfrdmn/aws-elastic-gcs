@@ -17,7 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/scttfrdmn/elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
 // LifecycleEvent is the detail payload from EventBridge ASG lifecycle hook events.

@@ -265,7 +265,7 @@ fi
 
 # --- 6. Pre-create DTN node identities ---
 # (Storage gateway and collection setup is a post-deploy step.
-#  Run: elastic-gcs-ctl collections setup --config config/open_data_buckets.yaml)
+#  Run: aws-elastic-gcs-ctl collections setup --config config/open_data_buckets.yaml)
 # TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible slot needs an identity.
 # Idempotency: if a slot secret already exists AND its node_id is registered on this
 # endpoint, reuse it rather than creating an orphaned node on every control node replacement.

@@ -27,7 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/scttfrdmn/elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
 // versionRe extracts the semver string from globus-connect-server --version output.

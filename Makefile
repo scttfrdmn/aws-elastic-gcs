@@ -17,7 +17,7 @@ build-lambdas:
 
 build-ctl:
 	@echo "Building CLI tool..."
-	go build -o bin/elastic-gcs-ctl ./cmd/elastic-gcs-ctl/
+	go build -o bin/aws-elastic-gcs-ctl ./cmd/aws-elastic-gcs-ctl/
 
 # === CDK ===
 
@@ -66,7 +66,7 @@ ami:
 # === Utility ===
 
 status:
-	./bin/elastic-gcs-ctl status --region $(REGION)
+	./bin/aws-elastic-gcs-ctl status --region $(REGION)
 
 clean:
 	rm -rf cdk.out/

@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.0] - 2026-02-26
 
 ### Added
-- **`elastic-gcs-ctl deprovision [--confirm]`** (#20): complete ordered teardown of all
+- **`aws-elastic-gcs-ctl deprovision [--confirm]`** (#20): complete ordered teardown of all
   Elastic GCS resources in a region. Without `--confirm` performs a dry run: inventories
   every resource and prints what would be deleted, then exits cleanly. With `--confirm`
   executes a 10-step teardown in order:
@@ -143,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Warm-pool DTNs remain stopped (not terminated) when the control node stops,
     preserving the fast (~60s) wake path. Cache eviction still terminates
     instances after 72h (two-stage cost model: ~$4.50/month → ~$2.50/month).
-- `elastic-gcs-ctl wake [--scale-out]`: new CLI command invokes the waker Lambda
+- `aws-elastic-gcs-ctl wake [--scale-out]`: new CLI command invokes the waker Lambda
   directly and reports warm-pool vs cold-boot path.
 - `config/regions.yaml`: new per-region fields `idle_shutdown_minutes` (0 =
   disabled, default) and `min_uptime_minutes` (default 30).
@@ -155,7 +155,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stack output: `WakerFunctionUrl`.
 
 ### Fixed
-- `elastic-gcs-ctl status`: gracefully handles a stopped control node — shows
+- `aws-elastic-gcs-ctl status`: gracefully handles a stopped control node — shows
   `○ stopped` with a wake hint and skips SSM-dependent queries (GCS node list)
   rather than timing out.
 
@@ -202,13 +202,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/configuration.md`: CDK context parameters, Secrets Manager keys, SSM parameters,
   Lambda environment variables, S3 bucket configuration reference (#18)
 - `README.md`: rewritten for any Globus subscriber (not Open Data-specific); adds cost
-  comparison table, architecture summary, `elastic-gcs-ctl` command reference, project
+  comparison table, architecture summary, `aws-elastic-gcs-ctl` command reference, project
   structure, documentation links (#18)
 
 ### Fixed
-- `elastic-gcs-ctl nodes delete`: resolve 8-char node ID prefix to full UUID before
+- `aws-elastic-gcs-ctl nodes delete`: resolve 8-char node ID prefix to full UUID before
   issuing `globus-connect-server node delete` (GCS CLI requires full UUID)
-- `elastic-gcs-ctl transfer test`: replaced 170-line OAuth/PKCE/SDK flow with
+- `aws-elastic-gcs-ctl transfer test`: replaced 170-line OAuth/PKCE/SDK flow with
   `exec.Command("globus", "transfer", ...)` — delegates to the operator's installed
   and authenticated `globus` CLI
 
@@ -227,7 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Row 1: Active Transfers line, DTN scale (InService + warm pool), alarm status widget.
   Row 2: Scale events bar chart, lifecycle P99 latency, all-Lambda error counts.
   Row 3: GCS Version Drift single-value, demand monitor invocations/errors, cache eviction duration.
-- **`elastic-gcs-ctl` CLI** (full implementation, previously stubs):
+- **`aws-elastic-gcs-ctl` CLI** (full implementation, previously stubs):
   `status`, `scale up/down [--to N] [--watch]`, `nodes list/delete/version-check`,
   `logs <lambda> [--since] [--tail] [--json]`, `metrics [--since]`, `refresh [--force]`,
   `transfer test`, `build-ami`, `version`. Uses Cobra + fatih/color.
@@ -414,13 +414,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.4.1...HEAD
-[0.4.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.1...v0.4.0
-[0.3.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.3...v0.3.0
-[0.2.3]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/scttfrdmn/elastic-gcs/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/scttfrdmn/elastic-gcs/releases/tag/v0.1.0
+[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.2.3...v0.3.0
+[0.2.3]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/scttfrdmn/aws-elastic-gcs/releases/tag/v0.1.0

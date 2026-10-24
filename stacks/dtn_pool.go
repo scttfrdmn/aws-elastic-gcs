@@ -22,7 +22,7 @@ import (
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 
-	"github.com/scttfrdmn/elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/config"
 )
 
 // DTNPoolStackProps extends the basic props with Open Data bucket access
@@ -1157,7 +1157,7 @@ fi
 	// the function code runs. Only IAM principals with lambda:InvokeFunctionUrl
 	// permission on this function can call the URL.
 	//
-	// elastic-gcs-ctl wake uses direct Lambda Invoke (also IAM-signed).
+	// aws-elastic-gcs-ctl wake uses direct Lambda Invoke (also IAM-signed).
 	// Globus Flows HTTP actions cannot call AWS_IAM URLs directly; see
 	// docs/ephemeral-control-node.md for the proxy pattern.
 	// -------------------------------------------------------------------------
@@ -1293,7 +1293,7 @@ fi
 
 	awscdk.NewCfnOutput(stack, jsii.String("WakerFunctionUrl"), &awscdk.CfnOutputProps{
 		Value:       wakerURL.Url(),
-		Description: jsii.String("Waker Lambda Function URL — POST here (or use elastic-gcs-ctl wake) to start the control node"),
+		Description: jsii.String("Waker Lambda Function URL — POST here (or use aws-elastic-gcs-ctl wake) to start the control node"),
 	})
 
 	return stack

@@ -17,7 +17,7 @@ The primary use case is fronting the **AWS Open Data Registry** with Globus endp
 
 All work is tracked in GitHub:
 - **Project board:** https://github.com/users/scttfrdmn/projects/27
-- **Issues:** https://github.com/scttfrdmn/elastic-gcs/issues
+- **Issues:** https://github.com/scttfrdmn/aws-elastic-gcs/issues
 - **Milestones:** v0.2 (scaling fixes), v0.3 (cost/reliability), v0.4 (observability/multi-region)
 
 | Milestone | Focus | Key Issues |
@@ -212,7 +212,7 @@ elastic-gcs/
 │   └── regions.yaml                   # Target regions and instance type preferences
 │
 ├── cmd/
-│   └── elastic-gcs-ctl/
+│   └── aws-elastic-gcs-ctl/
 │       └── main.go                    # CLI tool for manual operations (check status, force scale, etc.)
 │
 ├── internal/
@@ -251,13 +251,13 @@ Single-region deployment with control node, ASG + warm pool, Lambda lifecycle ho
 - Warm pool `MinSize=2` reset on every `cdk deploy` (no CDK custom resource)
 
 ### v0.2 — Correct Automatic Scaling
-See GitHub milestone [v0.2](https://github.com/scttfrdmn/elastic-gcs/milestone/1) and issues [#1–#6](https://github.com/scttfrdmn/elastic-gcs/issues).
+See GitHub milestone [v0.2](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/1) and issues [#1–#6](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
 
 ### v0.3 — Cost & Reliability
-See GitHub milestone [v0.3](https://github.com/scttfrdmn/elastic-gcs/milestone/2) and issues [#7–#10](https://github.com/scttfrdmn/elastic-gcs/issues).
+See GitHub milestone [v0.3](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/2) and issues [#7–#10](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
 
 ### v0.4 — Observability & Multi-Region
-See GitHub milestone [v0.4](https://github.com/scttfrdmn/elastic-gcs/milestone/3) and issues [#11–#14](https://github.com/scttfrdmn/elastic-gcs/issues).
+See GitHub milestone [v0.4](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/3) and issues [#11–#14](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
 
 ## Key Design Decisions
 

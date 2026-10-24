@@ -71,7 +71,7 @@ A single `t3a.large` EC2 instance (x86-64 required — GCS 5.4 has no aarch64 pa
 - Hosting the GCS endpoint (Globus Manager API, data channel)
 - Pre-creating DTN node identities (`globus-connect-server node create --export-node`)
 - Storing node identity JSON files in Secrets Manager
-- Running GCS CLI commands on behalf of `elastic-gcs-ctl` via SSM Run Command
+- Running GCS CLI commands on behalf of `aws-elastic-gcs-ctl` via SSM Run Command
 
 ### DTN Pool (ASG + Warm Pool)
 

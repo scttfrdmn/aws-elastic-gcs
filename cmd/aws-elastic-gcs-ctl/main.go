@@ -1,4 +1,4 @@
-// elastic-gcs-ctl is an operator CLI for managing Elastic GCS deployments.
+// aws-elastic-gcs-ctl is an operator CLI for managing Elastic GCS deployments.
 // It provides a one-stop view of system state and commands for common operations,
 // designed for live GlobusWorld demos and day-to-day operations.
 package main
@@ -38,7 +38,7 @@ import (
 	gcs "github.com/scttfrdmn/globus-gcs-go"
 	"github.com/spf13/cobra"
 
-	"github.com/scttfrdmn/elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/config"
 )
 
 const toolVersion = "v0.6.0"
@@ -55,9 +55,9 @@ var (
 	regionFlag  string
 	profileFlag string
 	rootCmd     = &cobra.Command{
-		Use:   "elastic-gcs-ctl",
+		Use:   "aws-elastic-gcs-ctl",
 		Short: "Elastic GCS operator CLI",
-		Long:  "elastic-gcs-ctl — manage Elastic Globus Connect Server deployments on AWS",
+		Long:  "aws-elastic-gcs-ctl — manage Elastic Globus Connect Server deployments on AWS",
 	}
 )
 
@@ -89,7 +89,7 @@ func init() {
 		Use:   "version",
 		Short: "Print version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("elastic-gcs-ctl %s\n", toolVersion)
+			fmt.Printf("aws-elastic-gcs-ctl %s\n", toolVersion)
 		},
 	})
 }
@@ -367,7 +367,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// GCS nodes
 	bold.Printf("GCS Nodes\n")
 	if controlState != "running" {
-		dim.Printf("  (control node stopped — run: elastic-gcs-ctl wake)\n")
+		dim.Printf("  (control node stopped — run: aws-elastic-gcs-ctl wake)\n")
 	}
 	for _, n := range gcsNodes {
 		sym, nc := "○", dim
@@ -431,8 +431,8 @@ The waker Lambda is invoked directly via the Lambda Invoke API using your
 AWS credentials — no bearer token needed from the CLI.
 
 Typical use:
-  elastic-gcs-ctl wake              # start control node only
-  elastic-gcs-ctl wake --scale-out  # start control node + bring up one DTN`,
+  aws-elastic-gcs-ctl wake              # start control node only
+  aws-elastic-gcs-ctl wake --scale-out  # start control node + bring up one DTN`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runWake(cmd.Context(), scaleOut)
 		},
@@ -822,7 +822,7 @@ func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
 
 	if summary == nil {
 		color.Green("Version check completed.\n")
-		fmt.Println("(Log output not yet available — run `./elastic-gcs-ctl logs version-check --since 5m` to see results)")
+		fmt.Println("(Log output not yet available — run `./aws-elastic-gcs-ctl logs version-check --since 5m` to see results)")
 		return nil
 	}
 
@@ -1223,7 +1223,7 @@ func transferTestCmd() *cobra.Command {
 }
 
 func runTransferTest(cmd *cobra.Command, args []string) error {
-	label := fmt.Sprintf("elastic-gcs-ctl test %s", time.Now().Format("20060102-150405"))
+	label := fmt.Sprintf("aws-elastic-gcs-ctl test %s", time.Now().Format("20060102-150405"))
 	fmt.Printf("Submitting test transfer via globus CLI:\n")
 	fmt.Printf("  Source: %s:%s\n", collection1000Genomes, testTransferFile)
 	fmt.Printf("  Dest:   %s:%s\n\n", tutorialEndpoint2, testTransferDest)

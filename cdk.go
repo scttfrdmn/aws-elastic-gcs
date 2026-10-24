@@ -7,8 +7,8 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/jsii-runtime-go"
 
-	"github.com/scttfrdmn/elastic-gcs/config"
-	"github.com/scttfrdmn/elastic-gcs/stacks"
+	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/stacks"
 )
 
 func main() {

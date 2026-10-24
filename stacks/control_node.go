@@ -11,7 +11,7 @@ import (
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 
-	"github.com/scttfrdmn/elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/config"
 )
 
 // ControlNodeStackProps defines configuration for the control node stack.

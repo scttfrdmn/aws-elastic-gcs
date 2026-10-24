@@ -64,7 +64,7 @@ The control node UserData (~10 min) will:
 
 **Validation:**
 ```bash
-./bin/elastic-gcs-ctl status --region us-east-1
+./bin/aws-elastic-gcs-ctl status --region us-east-1
 ```
 Expected: Control Node `● running`, Endpoint UUID present.
 
@@ -78,7 +78,7 @@ This deploys: ASG + warm pool, Lambda functions, EventBridge rules, CloudWatch a
 
 **Validation:**
 ```bash
-./bin/elastic-gcs-ctl status --region us-east-1
+./bin/aws-elastic-gcs-ctl status --region us-east-1
 ```
 Expected: DTN Pool shows `warm=2` (or your configured `warmPoolSize`) with `Warmed:Stopped` instances.
 
@@ -90,19 +90,19 @@ Run through these checks after first deploy to confirm end-to-end function.
 
 ### Scale up and watch
 ```bash
-./bin/elastic-gcs-ctl scale up --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale up --watch --region us-east-1
 ```
 Expected: `InService=1` within ~60 seconds.
 
 ### Confirm GCS node active
 ```bash
-./bin/elastic-gcs-ctl status --region us-east-1
+./bin/aws-elastic-gcs-ctl status --region us-east-1
 ```
 Expected: one GCS node shows `● active` (the DTN), one shows `● active` (control node).
 
 ### Run a test transfer
 ```bash
-./bin/elastic-gcs-ctl transfer test --region us-east-1
+./bin/aws-elastic-gcs-ctl transfer test --region us-east-1
 ```
 This shells out to the `globus` CLI to transfer a small file from the 1000 Genomes collection to Globus Tutorial Collection 2. Requires `globus` CLI to be installed and logged in.
 
@@ -110,19 +110,19 @@ Expected: `Status: SUCCEEDED`.
 
 ### Check version drift
 ```bash
-./bin/elastic-gcs-ctl nodes version-check --region us-east-1
+./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
 ```
 Expected: `GCSVersionDrift = 0` and all nodes showing the same version string.
 
 ### Check logs
 ```bash
-./bin/elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
+./bin/aws-elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
 ```
 Expected: structured JSON log lines from the scale-out lifecycle hook.
 
 ### Scale back down
 ```bash
-./bin/elastic-gcs-ctl scale down --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale down --watch --region us-east-1
 ```
 Expected: `InService=0` within ~30 seconds.
 
@@ -148,21 +148,21 @@ Alarms:
 
 ```bash
 # Scale to a specific count
-./bin/elastic-gcs-ctl scale up --to 2 --watch --region us-east-1
-./bin/elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale up --to 2 --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
 ```
 
 ### Viewing Logs
 
 ```bash
 # Pretty-print last 1h of lifecycle Lambda logs
-./bin/elastic-gcs-ctl logs lifecycle --since 1h --region us-east-1
+./bin/aws-elastic-gcs-ctl logs lifecycle --since 1h --region us-east-1
 
 # Stream live logs (polls every 2s)
-./bin/elastic-gcs-ctl logs demand-monitor --tail --region us-east-1
+./bin/aws-elastic-gcs-ctl logs demand-monitor --tail --region us-east-1
 
 # Raw JSON (pipe to jq)
-./bin/elastic-gcs-ctl logs scaleout --since 2h --json --region us-east-1 | jq .
+./bin/aws-elastic-gcs-ctl logs scaleout --since 2h --json --region us-east-1 | jq .
 ```
 
 Available Lambda names: `lifecycle`, `scaleout`, `scalein`, `demand-monitor`, `cache-eviction`, `version-check`.
@@ -173,12 +173,12 @@ All nodes in a GCS endpoint **must run the same GCS version**. To upgrade:
 
 1. **Scale to zero** (avoid disabling active transfers):
    ```bash
-   ./bin/elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
+   ./bin/aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
    ```
 
 2. **Rebuild the DTN AMI** with the new GCS version:
    ```bash
-   ./bin/elastic-gcs-ctl build-ami --region us-east-1
+   ./bin/aws-elastic-gcs-ctl build-ami --region us-east-1
    # or: bash scripts/build_ami.sh us-east-1
    ```
 
@@ -191,12 +191,12 @@ All nodes in a GCS endpoint **must run the same GCS version**. To upgrade:
 
 4. **Trigger a rolling instance refresh** to replace warm pool instances with the new AMI:
    ```bash
-   ./bin/elastic-gcs-ctl refresh --region us-east-1
+   ./bin/aws-elastic-gcs-ctl refresh --region us-east-1
    ```
 
 5. **Verify**:
    ```bash
-   ./bin/elastic-gcs-ctl nodes version-check --region us-east-1
+   ./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
    ```
    Expected: `GCSVersionDrift = 0` with the new version on all nodes.
 
@@ -218,10 +218,10 @@ Orphaned GCS nodes (registered on the endpoint but no longer backed by an EC2 in
 
 ```bash
 # List all nodes
-./bin/elastic-gcs-ctl nodes list --region us-east-1
+./bin/aws-elastic-gcs-ctl nodes list --region us-east-1
 
 # Delete by 8-char prefix or full UUID
-./bin/elastic-gcs-ctl nodes delete <node-id-prefix> --region us-east-1
+./bin/aws-elastic-gcs-ctl nodes delete <node-id-prefix> --region us-east-1
 ```
 
 The cache eviction Lambda also sweeps orphaned nodes automatically (when all warm pool instances carry the `elastic-gcs:gcs-node-id` tag).
@@ -253,13 +253,13 @@ Follow these steps in order to avoid leaving orphaned GCS nodes or AWS resources
 
 ### Step 1: Scale to zero
 ```bash
-./bin/elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
 ```
 
 ### Step 2: Remove all GCS nodes (except control node)
 ```bash
-./bin/elastic-gcs-ctl nodes list --region us-east-1
-./bin/elastic-gcs-ctl nodes delete <dtn-node-id> --region us-east-1
+./bin/aws-elastic-gcs-ctl nodes list --region us-east-1
+./bin/aws-elastic-gcs-ctl nodes delete <dtn-node-id> --region us-east-1
 # repeat for each non-control DTN node
 ```
 
@@ -312,7 +312,7 @@ At this point AWS cost = $0 for this deployment (no running EC2, no allocated EI
 
 1. Check lifecycle Lambda logs:
    ```bash
-   ./bin/elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
+   ./bin/aws-elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
    ```
 2. Check the instance boot log via SSM:
    ```bash
@@ -325,9 +325,9 @@ At this point AWS cost = $0 for this deployment (no running EC2, no allocated EI
    - GCS lock file owned by root — `chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause`
    - SSM slot lock already held by a terminated instance — check `/elastic-gcs/{region}/slot-lock/{N}` parameters and delete stale ones
 
-### `elastic-gcs-ctl status` shows stale GCS nodes
+### `aws-elastic-gcs-ctl status` shows stale GCS nodes
 
-Run `./bin/elastic-gcs-ctl nodes delete <node-id>`. If that fails, the GCS CLI on the control node may need auth — confirm `elastic-gcs/{region}/globus-client-id` and `globus-client-secret` are present in Secrets Manager.
+Run `./bin/aws-elastic-gcs-ctl nodes delete <node-id>`. If that fails, the GCS CLI on the control node may need auth — confirm `elastic-gcs/{region}/globus-client-id` and `globus-client-secret` are present in Secrets Manager.
 
 ### `scalein ● ALARM` when desired=0
 
@@ -337,7 +337,7 @@ Expected behavior. The scalein alarm fires whenever `ActiveTransfers == 0` for 1
 
 1. Find which nodes are out of sync:
    ```bash
-   ./bin/elastic-gcs-ctl nodes version-check --region us-east-1
+   ./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
    ```
 2. Follow the GCS Version Upgrade procedure in Day-2 Operations.
 3. Do not run transfers while nodes are on different GCS versions — Globus does not support mixed-version endpoints.

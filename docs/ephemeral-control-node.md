@@ -14,7 +14,7 @@ Two new Lambda functions manage the control node lifecycle:
 
 **`elastic-gcs-waker`** — starts the control node on demand.
 Exposed via an HTTPS Function URL callable by Globus Flows, curl, or the
-`elastic-gcs-ctl wake` CLI. Optionally triggers DTN scale-out concurrently
+`aws-elastic-gcs-ctl wake` CLI. Optionally triggers DTN scale-out concurrently
 so warm-pool instances begin resuming in parallel with the control node boot.
 
 **`elastic-gcs-idle-shutdown`** — runs every 15 minutes via EventBridge.
@@ -59,7 +59,7 @@ unavailable endpoints.
 **Suitable for:**
 - Operator-managed usage windows ("workshop at 2pm, wake at 1:55pm")
 - Endpoints primarily accessed via Globus Flows (see Flow integration below)
-- Teams that run `elastic-gcs-ctl wake` before starting work
+- Teams that run `aws-elastic-gcs-ctl wake` before starting work
 - Scheduled/batch workflows where the transfer time is known in advance
 
 ---
@@ -96,18 +96,18 @@ endpoint).
 
 ## Wake Mechanisms
 
-### 1. `elastic-gcs-ctl wake` (operator CLI)
+### 1. `aws-elastic-gcs-ctl wake` (operator CLI)
 
 The simplest path. Uses your AWS credentials to invoke the waker Lambda
 directly via the Lambda Invoke API — no bearer token needed.
 
 ```bash
 # Start control node only (~40s)
-elastic-gcs-ctl wake
+aws-elastic-gcs-ctl wake
 
 # Start control node and trigger DTN scale-out simultaneously
 # Total time to first transfer: ~100s (warm pool) or ~4min (cold)
-elastic-gcs-ctl wake --scale-out
+aws-elastic-gcs-ctl wake --scale-out
 ```
 
 Example output:

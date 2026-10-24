@@ -62,8 +62,8 @@ See [docs/architecture.md](docs/architecture.md) for full details.
 
 ```bash
 # 1. Clone
-git clone https://github.com/scttfrdmn/elastic-gcs
-cd elastic-gcs
+git clone https://github.com/scttfrdmn/aws-elastic-gcs
+cd aws-elastic-gcs
 
 # 2. Configure region
 cp config/regions.example.yaml config/regions.yaml
@@ -83,20 +83,20 @@ make deploy-dtn REGION=us-east-1      # ~3 min (ASG, Lambdas, dashboard)
 
 # 5. Validate
 make build
-./bin/elastic-gcs-ctl status --region us-east-1
-./bin/elastic-gcs-ctl scale up --watch --region us-east-1
-./bin/elastic-gcs-ctl transfer test --region us-east-1
-./bin/elastic-gcs-ctl scale down --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl status --region us-east-1
+./bin/aws-elastic-gcs-ctl scale up --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl transfer test --region us-east-1
+./bin/aws-elastic-gcs-ctl scale down --watch --region us-east-1
 ```
 
 See [docs/operator-guide.md](docs/operator-guide.md) for the full deploy-through-destroy lifecycle.
 
-## elastic-gcs-ctl
+## aws-elastic-gcs-ctl
 
 The operator CLI provides a single-screen system overview and common operations:
 
 ```
-$ ./bin/elastic-gcs-ctl status --region us-east-1
+$ ./bin/aws-elastic-gcs-ctl status --region us-east-1
 Elastic GCS — us-east-1
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Control Node   i-065c4e068da377b11     ● running       34.224.250.21
@@ -154,7 +154,7 @@ elastic-gcs/
 │   ├── dtn_boot.sh
 │   └── dtn_shutdown.sh
 ├── internal/logger/          Structured JSON logging (slog wrapper)
-├── cmd/elastic-gcs-ctl/      Operator CLI
+├── cmd/aws-elastic-gcs-ctl/      Operator CLI
 ├── config/                   regions.yaml, open_data_buckets.yaml
 └── docs/                     Architecture, operator guide, configuration
 ```

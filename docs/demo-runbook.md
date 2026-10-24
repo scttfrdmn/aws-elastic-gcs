@@ -11,7 +11,7 @@
 
 - [ ] `aws sso login --profile aws` — ensure AWS credentials are fresh
 - [ ] `globus whoami` — confirm authenticated as `scofri@globusid.org`
-- [ ] `elastic-gcs-ctl status --region us-east-1` — check baseline state (see expected output below)
+- [ ] `aws-elastic-gcs-ctl status --region us-east-1` — check baseline state (see expected output below)
 - [ ] Warm pool has ≥ 1 `Warmed:Stopped` instance — if evicted, run `make deploy-dtn REGION=us-east-1` to restore
 - [ ] Terminal font ≥ 16pt, dark background, 120-column width
 - [ ] Browser tab open to CloudWatch dashboard for `elastic-gcs-us-east-1`
@@ -39,7 +39,7 @@ Alarms:  scaleout ○ OK  scalein ● ALARM  version-drift ○ OK
 ```
 
 > **Note:** The control node is shown running here. If `idle_shutdown` is enabled, it may
-> be stopped — run `elastic-gcs-ctl wake` ~40s before the demo starts, or start the demo
+> be stopped — run `aws-elastic-gcs-ctl wake` ~40s before the demo starts, or start the demo
 > from step 2 with "we're about to wake the endpoint."
 
 ---
@@ -49,7 +49,7 @@ Alarms:  scaleout ○ OK  scalein ● ALARM  version-drift ○ OK
 ### Step 1 — Show the idle state (~45 seconds of talk)
 
 ```bash
-elastic-gcs-ctl status --region us-east-1
+aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 **Say:** *"This is a live Globus Connect Server endpoint fronting the AWS 1000 Genomes
@@ -64,7 +64,7 @@ about $4–12 per month."*
 ### Step 2 — Wake the endpoint and trigger scale-out (~60 seconds)
 
 ```bash
-elastic-gcs-ctl wake --scale-out --region us-east-1
+aws-elastic-gcs-ctl wake --scale-out --region us-east-1
 ```
 
 **Say:** *"Watch what happens when I request a DTN. The waker Lambda starts the
@@ -88,7 +88,7 @@ Control node ready (2s, already running)
 ### Step 3 — Watch the DTN come InService (~60 seconds of live polling)
 
 ```bash
-watch -n 5 elastic-gcs-ctl status --region us-east-1
+watch -n 5 aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 **Say:** *"The instance is resuming from the warm pool. On cold boot from AMI this would
@@ -101,7 +101,7 @@ the GCS agent is pre-installed, we just run `node enable` and update DNS."*
 
 ```bash
 # Ctrl-C out of watch
-elastic-gcs-ctl status --region us-east-1
+aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 ---
@@ -109,7 +109,7 @@ elastic-gcs-ctl status --region us-east-1
 ### Step 4 — Submit a test transfer (~30 seconds)
 
 ```bash
-elastic-gcs-ctl transfer test --region us-east-1
+aws-elastic-gcs-ctl transfer test --region us-east-1
 ```
 
 **Say:** *"Let's do a real transfer. This submits a file from the 1000 Genomes collection
@@ -146,7 +146,7 @@ submit a transfer before the endpoint is up and the system wakes itself."*
 ### Step 6 — Scale back in (~45 seconds)
 
 ```bash
-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
+aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
 ```
 
 **Say:** *"Now scale-in. The lifecycle hook calls `node disable` before the instance stops
@@ -166,7 +166,7 @@ Done (1m 08s)
 ### Step 7 — Cost story (~30 seconds of talk)
 
 ```bash
-elastic-gcs-ctl status --region us-east-1
+aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 **Say:** *"Back to idle. Two warm DTNs sitting stopped, costing a few dollars a month in EBS.
@@ -198,7 +198,7 @@ m6i.xlarge DTNs always on: $400/month. For a dataset that researchers access occ
 
 ### Control node is stopped (not running)
 
-Run `elastic-gcs-ctl wake --scale-out` **5 minutes before** the session starts.
+Run `aws-elastic-gcs-ctl wake --scale-out` **5 minutes before** the session starts.
 Or demonstrate the wake from stopped as the opening step — it takes ~40s and is
 a good story in itself.
 
@@ -208,7 +208,7 @@ The scale-out will launch from AMI — ~3–5 minutes, not 60s. Options:
 
 1. If you have time: let it run, narrate the cold boot, show the contrast
 2. If tight on time: skip steps 2–4, use pre-recorded [terminal cast] of warm path
-3. Prevention: run `elastic-gcs-ctl wake` once in the 72h before the demo
+3. Prevention: run `aws-elastic-gcs-ctl wake` once in the 72h before the demo
 
 ### Globus auth expired
 
@@ -226,7 +226,7 @@ The endpoint ID is stored in SSM. Check:
 aws ssm get-parameter --name /elastic-gcs/us-east-1/endpoint-id --query Parameter.Value --output text
 ```
 If this doesn't match `09c97a5c-63e2-40a2-bcc9-caf96c0de230`, update the constant in
-`cmd/elastic-gcs-ctl/main.go` and rebuild.
+`cmd/aws-elastic-gcs-ctl/main.go` and rebuild.
 
 ### DTN node doesn't activate within 3 minutes
 
@@ -246,7 +246,7 @@ permission error, GCS version mismatch. See [docs/operator-guide.md](operator-gu
 ### CloudWatch dashboard not showing data
 
 The custom metrics namespace is `elastic-gcs`. If no data appears:
-- `demand_monitor` Lambda runs every minute — check its logs: `elastic-gcs-ctl logs demand_monitor --since 5m`
+- `demand_monitor` Lambda runs every minute — check its logs: `aws-elastic-gcs-ctl logs demand_monitor --since 5m`
 - Confirm `ENDPOINT_ID` env var on the Lambda matches the active endpoint
 
 ---
@@ -255,10 +255,10 @@ The custom metrics namespace is `elastic-gcs`. If no data appears:
 
 ```bash
 # Scale to 0 if not already done
-elastic-gcs-ctl scale down --to 0 --region us-east-1
+aws-elastic-gcs-ctl scale down --to 0 --region us-east-1
 
 # Verify warm pool restored
-elastic-gcs-ctl status --region us-east-1
+aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 Leave the control node running (it will auto-shutdown after 30 min if idle shutdown is enabled).
