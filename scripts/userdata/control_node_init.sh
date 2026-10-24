@@ -19,6 +19,7 @@ set -euo pipefail
 #   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
 #   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
 #   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
+#   - GCS_VERSION: exact GCS package version to install (e.g. 5.4.99)
 # =============================================================================
 
 LOG="/var/log/elastic-gcs-setup.log"
@@ -106,8 +107,8 @@ case "$OS_ID" in
         # on Rocky/RHEL 9, causing GPG check failures. Import explicitly.
         dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
         rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
-        # Install GCS
-        dnf install -y globus-connect-server54
+        # Install GCS, pinned so every node in the endpoint runs the same version
+        dnf install -y "globus-connect-server54-${GCS_VERSION}"
         ;;
     ubuntu|debian)
         apt-get update
@@ -116,7 +117,7 @@ case "$OS_ID" in
         curl -LOs https://downloads.globus.org/globus-connect-server/stable/installers/repo/deb/globus-repo_latest_all.deb
         dpkg -i globus-repo_latest_all.deb
         apt-get update
-        apt-get install -y globus-connect-server54
+        apt-get install -y "globus-connect-server54=${GCS_VERSION}-*"
         ;;
     *)
         echo "ERROR: Unsupported OS: $OS_ID"

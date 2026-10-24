@@ -9,22 +9,32 @@ set -euo pipefail
 # at boot time from Secrets Manager by the UserData / systemd service.
 #
 # AMI contents:
-#   - GCS 5.4 (globus-connect-server54)
+#   - GCS 5.4 (globus-connect-server54, pinned to $GCS_VERSION)
 #   - SSM Agent (amazon-ssm-agent)
 #   - jq, awscli
 #
 # Usage:
 #   AWS_PROFILE=aws ./scripts/build_ami.sh [region]
 #   AWS_PROFILE=aws ./scripts/build_ami.sh us-east-1
+#   GCS_VERSION=5.4.99 ./scripts/build_ami.sh us-east-1
+#
+# GCS_VERSION defaults to the globus:gcsVersion value in cdk.json, which the
+# DTN pool stack uses to look up this AMI by name.
 # =============================================================================
 
 REGION="${1:-us-east-1}"
 AWS_PROFILE="${AWS_PROFILE:-default}"
+GCS_VERSION="${GCS_VERSION:-$(jq -r '.context["globus:gcsVersion"]' "$(dirname "$0")/../cdk.json")}"
+if ! [[ "$GCS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: invalid GCS_VERSION '$GCS_VERSION' (set globus:gcsVersion in cdk.json)"
+    exit 1
+fi
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-AMI_NAME="elastic-gcs-dtn-${TIMESTAMP}"
+AMI_NAME="elastic-gcs-dtn-gcs${GCS_VERSION}-${TIMESTAMP}"
 
 echo "=== Building DTN AMI ==="
 echo "Region:   $REGION"
+echo "GCS:      $GCS_VERSION"
 echo "AMI Name: $AMI_NAME"
 echo ""
 
@@ -147,11 +157,11 @@ echo "Installing GCS repo..."
 dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
 rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
 
-echo "Installing GCS..."
-dnf install -y globus-connect-server54
+echo "Installing GCS '"$GCS_VERSION"'..."
+dnf install -y globus-connect-server54-'"$GCS_VERSION"'
 
 echo "Verifying..."
-globus-connect-server --version
+globus-connect-server --version | grep -F '"$GCS_VERSION"'
 
 echo "Cleaning up..."
 dnf clean all
@@ -263,10 +273,10 @@ echo ">>> Creating AMI: $AMI_NAME ..."
 AMI_ID=$(aws ec2 create-image \
     --instance-id "$BUILDER_ID" \
     --name "$AMI_NAME" \
-    --description "Elastic GCS DTN - GCS v5.4 pre-installed on Rocky Linux 9 x86_64" \
+    --description "Elastic GCS DTN - GCS ${GCS_VERSION} pre-installed on Rocky Linux 9 x86_64" \
     --no-reboot \
     --tag-specifications \
-        "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=elastic-gcs:purpose,Value=dtn},{Key=elastic-gcs:region,Value=${REGION}}]" \
+        "ResourceType=image,Tags=[{Key=Name,Value=${AMI_NAME}},{Key=elastic-gcs:purpose,Value=dtn},{Key=elastic-gcs:region,Value=${REGION}},{Key=elastic-gcs:gcs-version,Value=${GCS_VERSION}}]" \
     --query 'ImageId' --output text \
     --region "$REGION" --profile "$AWS_PROFILE")
 
