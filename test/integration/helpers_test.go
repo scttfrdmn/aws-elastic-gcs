@@ -373,42 +373,22 @@ func hasActiveGCSNode(nodes []gcsNodeStatus) bool {
 // The `globus` CLI is authenticated as scofri@globusid.org which owns the endpoint.
 func (e *testEnv) submitTestTransfer(ctx context.Context, t *testing.T) string {
 	t.Helper()
-	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
-	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
-
-	// Resolve the globus CLI path — it may be in ~/.local/bin which isn't always
-	// in PATH when tests are invoked via `make`.
-	globusBin, err := exec.LookPath("globus")
-	if err != nil {
-		// Fallback to the known install location.
-		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
+	// Retry for up to 3 minutes to cover GCS DNS propagation after scale-out
+	// (Globus docs: "up to 2 minutes" after node enable).
+	destPath := fmt.Sprintf("/~/elastic-gcs-inttest-%d.txt", time.Now().Unix())
+	for attempt := 1; attempt <= 12; attempt++ {
+		taskID, err := e.trySubmitTransferWithDest(ctx, destPath)
+		if err == nil {
+			t.Logf("submitted transfer task %s", taskID)
+			return taskID
+		}
+		t.Logf("submitTestTransfer: attempt %d failed: %v", attempt, err)
+		if attempt < 12 {
+			time.Sleep(15 * time.Second)
+		}
 	}
-
-	// Use -F json so we can parse task_id reliably. Disable email notifications
-	// to avoid flooding the operator's inbox during test runs.
-	out, err := exec.CommandContext(ctx,
-		globusBin, "transfer",
-		"-F", "json",
-		"--notify", "off",
-		"--label", fmt.Sprintf("elastic-gcs-inttest-%s", time.Now().Format("20060102-150405")),
-		srcCollection+":"+testSourceFile,
-		dstEndpointID+":"+testDestFile,
-	).CombinedOutput()
-	if err != nil {
-		t.Fatalf("globus transfer failed (exit %v):\n%s", err, out)
-	}
-
-	var result struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		t.Fatalf("parse globus transfer output: %v\nraw: %s", err, out)
-	}
-	if result.TaskID == "" {
-		t.Fatalf("globus transfer returned empty task_id:\n%s", out)
-	}
-	t.Logf("submitted transfer task %s", result.TaskID)
-	return result.TaskID
+	t.Fatal("submitTestTransfer: all attempts failed")
+	return ""
 }
 
 // globusTaskInfo holds the fields we need from `globus task show -F json`.
