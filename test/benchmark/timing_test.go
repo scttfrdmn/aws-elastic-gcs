@@ -397,7 +397,7 @@ func TestCostModel(t *testing.T) {
 
 	// Cost estimates.
 	const (
-		dtnHourlyCostUSD     = 0.192  // m6i.xlarge on-demand
+		dtnHourlyCostUSD     = 0.544  // c8in.2xlarge on-demand, us-east-1 (docs/instance-sizing.md)
 		controlHourlyCostUSD = 0.0752 // t3a.large on-demand
 	)
 

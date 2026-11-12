@@ -164,6 +164,7 @@ elastic-gcs/
 - [Architecture](docs/architecture.md) — three-tier model, components, design decisions, cost model
 - [Operator Guide](docs/operator-guide.md) — full deploy-through-destroy lifecycle and day-2 operations
 - [Configuration Reference](docs/configuration.md) — CDK context, Secrets Manager, SSM parameters
+- [Instance Sizing](docs/instance-sizing.md) — DTN and control node types by sustained throughput and cost
 - [Ephemeral Control Node](docs/ephemeral-control-node.md) — idle-shutdown, wake mechanisms, Globus Flow integration, cost model
 - [GlobusWorld Demo Runbook](docs/demo-runbook.md) — live demo script with timing notes and contingency paths
 

@@ -279,14 +279,14 @@ ASG warm pools are the native AWS mechanism for exactly this pattern. Benefits o
 - Health checks and replacement are automatic
 - No custom state machine needed
 
-### Why t4g.medium for Control Node
-GCS requires 8GB RAM minimum. t4g.medium provides 4 vCPUs + 8GB at ~$0.0168/hr (~$12/month) on Graviton. It's the cheapest instance meeting the GCS memory requirement. The control node does minimal work — it just needs to stay registered and respond to GCS Manager API calls.
+### Why t3a.large for Control Node
+GCS requires 8GB RAM minimum and publishes no aarch64 RPMs, so Graviton is out for the Rocky Linux AMI. t3a.large (2 vCPU, 8GB, x86-64) at $0.0752/hr (~$55/month) is the cheapest x86-64 type meeting the memory requirement. The control node does minimal work — it just needs to stay registered and respond to GCS Manager API calls. See `docs/instance-sizing.md`.
 
 ### DTN Instance Type Strategy
-For S3 connector workloads, the bottleneck is network throughput, not CPU or memory. Recommended DTN types:
-- **Light transfers:** m6i.xlarge (up to 12.5 Gbps, ~$0.192/hr)
-- **Heavy transfers:** m6in.xlarge (up to 30 Gbps, ~$0.292/hr)  
-- **Maximum throughput:** c6in.2xlarge (up to 40 Gbps, ~$0.432/hr)
+The bottleneck is sustained internet-gateway throughput: most types under 32 vCPUs are capped at 5 Gbps to the internet regardless of their "up to" rating; the `*8in` families get their full baseline. See `docs/instance-sizing.md` and `scripts/instance_sizing.py`. Recommended DTN types (us-east-1, Nov 2026):
+- **Light:** m8in.xlarge (6.25 Gbps sustained, $0.334/hr)
+- **Default:** c8in.2xlarge (12.5 Gbps sustained, $0.544/hr)
+- **Heavy:** c8in.4xlarge (25 Gbps sustained, $1.089/hr)
 
 The DTN instance type should be configurable per-region in `config/regions.yaml`.
 

@@ -4,19 +4,20 @@
 regions:
   - name: us-east-1
     control_instance: t3a.large       # 2 vCPU, 8GB, x86-64 — GCS minimum (no aarch64 GCS packages)
-    dtn_instance: m6i.xlarge           # 4 vCPU, 16GB, up to 12.5 Gbps
+    dtn_instance: c8in.2xlarge         # 8 vCPU, 16GB, 12.5 Gbps sustained to the internet (docs/instance-sizing.md)
+    # throughput_scaleout_mbps: 1100   # default: ~70% of what one DTN of dtn_instance sustains
     warm_pool_size: 2                  # Keep 2 stopped DTNs ready
     key_pair_name: ""                  # Your EC2 key pair name
 
   # Uncomment for Phase 4 multi-region
   # - name: us-west-2
   #   control_instance: t3a.large
-  #   dtn_instance: m6i.xlarge
+  #   dtn_instance: c8in.2xlarge
   #   warm_pool_size: 2
   #   key_pair_name: ""
 
   # - name: eu-west-1
   #   control_instance: t3a.large
-  #   dtn_instance: m6i.xlarge
+  #   dtn_instance: c8in.2xlarge
   #   warm_pool_size: 1
   #   key_pair_name: ""

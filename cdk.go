@@ -74,7 +74,8 @@ func main() {
 		}
 		// throughputMBps: MB/s above which a second (or third) DTN is triggered.
 		// Override via: cdk deploy -c elastic-gcs:throughputScaleOutMBps=800
-		// Falls back to per-region config, then stack default (500 MB/s).
+		// Falls back to per-region config, then ~70% of the DTN type's sustained
+		// throughput (docs/instance-sizing.md).
 		throughputMBps := 0
 		if t := ctxString(app, "elastic-gcs:throughputScaleOutMBps"); t != "" {
 			fmt.Sscanf(t, "%d", &throughputMBps)

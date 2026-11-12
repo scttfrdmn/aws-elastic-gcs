@@ -22,7 +22,7 @@ type RegionConfig struct {
 	// to trigger a second (or third, etc.) DTN. The alarm uses the
 	// ElasticGCS/TransferThroughput metric published by demand_monitor, which is
 	// the sum of effective_bytes_per_second across all ACTIVE tasks.
-	// 0 = use the stack default (500 MB/s).
+	// 0 = derive ~70% of the DTN type's sustained throughput (docs/instance-sizing.md).
 	ThroughputScaleOutMBps int `yaml:"throughput_scaleout_mbps"`
 
 	// Ephemeral control node: automatically stop when idle.
