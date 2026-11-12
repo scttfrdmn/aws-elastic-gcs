@@ -76,6 +76,14 @@ func (d Deployment) ParamPrefix() string {
 // Param is a parameter under ParamPrefix, e.g. Param("endpoint-id").
 func (d Deployment) Param(leaf string) string { return d.ParamPrefix() + "/" + leaf }
 
+// AMIParam is the region-wide SSM parameter holding the DTN AMI ID for a GCS
+// version, e.g. "/elastic-gcs/us-west-2/dtn-ami/gcs-5.4.101". It is written by
+// scripts/build_ami.sh and shared by every deployment in the region, because
+// the AMI depends only on the GCS version.
+func (d Deployment) AMIParam(gcsVersion string) string {
+	return fmt.Sprintf("/elastic-gcs/%s/dtn-ami/gcs-%s", d.Region, gcsVersion)
+}
+
 // Dashboard names the CloudWatch dashboard.
 func (d Deployment) Dashboard() string { return "ElasticGCS-" + d.ID() }
 
@@ -88,7 +96,6 @@ func (d Deployment) Dimensions() map[string]string {
 const (
 	ParamEndpointID    = "endpoint-id"
 	ParamControlNodeID = "control-node-id"
-	ParamDTNAMIID      = "dtn-ami-id"
 	ParamSlotLock      = "slot-lock"
 
 	TagDeployment = "elastic-gcs:deployment"

@@ -301,7 +301,7 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 ### SSM Parameters
 - `/elastic-gcs/<region>/<deployment>/endpoint-id` — Globus endpoint UUID
 - `/elastic-gcs/<region>/<deployment>/control-node-id` — Control node EC2 instance ID
-- `/elastic-gcs/<region>/<deployment>/dtn-ami-id` — Current DTN AMI ID
+- `/elastic-gcs/<region>/dtn-ami/gcs-<version>` — DTN AMI for a GCS version (region-wide, shared by deployments)
 
 ### CDK Context / Config
 - Target regions

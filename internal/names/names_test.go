@@ -39,6 +39,7 @@ func TestNames(t *testing.T) {
 		d.SecretsPrefix():        "elastic-gcs/us-west-2/src",
 		d.Param(ParamEndpointID): "/elastic-gcs/us-west-2/src/endpoint-id",
 		d.Dashboard():            "ElasticGCS-us-west-2-src",
+		d.AMIParam("5.4.101"):    "/elastic-gcs/us-west-2/dtn-ami/gcs-5.4.101",
 	} {
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
