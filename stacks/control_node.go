@@ -3,11 +3,12 @@ package stacks
 import (
 	"encoding/json"
 	"fmt"
-	"os"
+	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsec2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awss3assets"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 
@@ -262,15 +263,15 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 
 	// -------------------------------------------------------------------------
 	// UserData
-	// Inject required environment variables, then run control_node_init.sh.
-	// The script handles idempotency: if endpoint is already configured
-	// (deployment-key.json exists), it skips setup and is safe to re-run.
+	// Inject required environment variables, download control_node_init.sh from
+	// the CDK asset bucket, and run it. The script is an S3 asset rather than
+	// inline UserData because it is close to the 16 KB EC2 UserData limit on
+	// its own. The script handles idempotency: if endpoint is already
+	// configured (deployment-key.json exists), it skips setup.
 	// -------------------------------------------------------------------------
-	scriptBytes, err := os.ReadFile("scripts/userdata/control_node_init.sh")
-	if err != nil {
-		panic(fmt.Sprintf("cannot read scripts/userdata/control_node_init.sh: %v\n"+
-			"(ensure cdk synth is run from the project root)", err))
-	}
+	initScript := awss3assets.NewAsset(stack, jsii.String("ControlNodeInitScript"),
+		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/control_node_init.sh")})
+	initScript.GrantRead(role)
 
 	bucketsJSON, err := json.Marshal(props.OpenDataBuckets)
 	if err != nil {
@@ -309,9 +310,25 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.MaxDTNs+props.RegionConfig.WarmPoolSize)),
 		// JSON-encode the buckets array — shell-safe quoting via printf
 		jsii.String(fmt.Sprintf("export OPEN_DATA_BUCKETS_JSON=%q", string(bucketsJSON))),
-		// Run the init script (shebang on line 1 is a no-op comment here)
-		jsii.String(string(scriptBytes)),
+		// The Rocky base AMI has no AWS CLI; install v2 so the init script can
+		// be downloaded from S3.
+		jsii.String(strings.TrimSpace(`
+if ! command -v aws >/dev/null; then
+    dnf install -y unzip
+    curl -sSf https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+    (cd /tmp && unzip -q awscliv2.zip && ./aws/install)
+    ln -sf /usr/local/bin/aws /usr/bin/aws
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+fi
+`)),
 	)
+	initPath := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
+		Bucket:    initScript.Bucket(),
+		BucketKey: initScript.S3ObjectKey(),
+		LocalFile: jsii.String("/opt/elastic-gcs/scripts/control_node_init.sh"),
+		Region:    jsii.String(region),
+	})
+	ud.AddCommands(jsii.String("bash " + *initPath))
 
 	// -------------------------------------------------------------------------
 	// EC2 Instance for control node.

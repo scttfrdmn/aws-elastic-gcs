@@ -3,7 +3,6 @@ package stacks
 import (
 	"encoding/base64"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
@@ -16,6 +15,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awslambda"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awslogs"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awss3assets"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssns"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awssnssubscriptions"
 	"github.com/aws/aws-cdk-go/awscdk/v2/customresources"
@@ -255,34 +255,24 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 
 	// -------------------------------------------------------------------------
 	// DTN UserData
-	// On first EC2 boot (when entering the warm pool), this script:
-	//   1. Installs GCS if not pre-baked into the AMI
-	//   2. Installs dtn_boot.sh + dtn_shutdown.sh + spot_interrupt_monitor.sh
-	//   3. Installs and starts the elastic-gcs-dtn systemd service
-	//   4. Installs the elastic-gcs-spot-monitor systemd service
+	// On first EC2 boot (when entering the warm pool), UserData:
+	//   1. Downloads dtn_boot.sh, dtn_shutdown.sh and spot_interrupt_monitor.sh
+	//      from the CDK asset bucket (S3 gateway endpoint; DTN role has read)
+	//   2. Installs the elastic-gcs-dtn and elastic-gcs-spot-monitor units
+	//   3. Starts elastic-gcs-dtn
+	//
+	// The scripts are S3 assets rather than inline, so UserData stays far below
+	// the 16 KB EC2 limit however large the scripts grow. Changing a script
+	// changes its asset key, and therefore the launch template.
+	//
+	// The DTN AMI (scripts/build_ami.sh) is mandatory and bakes in GCS, the AWS
+	// CLI and the SSM agent, so nothing is installed here.
 	//
 	// The systemd service runs dtn_boot.sh on every subsequent start (resume),
 	// which handles first-boot vs warm-resume detection automatically.
 	// -------------------------------------------------------------------------
-	bootScriptBytes, err := os.ReadFile("scripts/userdata/dtn_boot.sh")
-	if err != nil {
-		panic(fmt.Sprintf("cannot read scripts/userdata/dtn_boot.sh: %v", err))
-	}
-	shutdownScriptBytes, err := os.ReadFile("scripts/userdata/dtn_shutdown.sh")
-	if err != nil {
-		panic(fmt.Sprintf("cannot read scripts/userdata/dtn_shutdown.sh: %v", err))
-	}
-	spotMonitorBytes, err := os.ReadFile("scripts/userdata/spot_interrupt_monitor.sh")
-	if err != nil {
-		panic(fmt.Sprintf("cannot read scripts/userdata/spot_interrupt_monitor.sh: %v", err))
-	}
-
-	// Strip comments and blank lines before encoding to stay within the 16 KB
-	// EC2 UserData limit. The source scripts are kept readable with full comments;
-	// only the embedded version is stripped. Shebang lines are preserved.
-	bootScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(bootScriptBytes))
-	shutdownScriptB64 := base64.StdEncoding.EncodeToString(stripShellComments(shutdownScriptBytes))
-	spotMonitorB64 := base64.StdEncoding.EncodeToString(stripShellComments(spotMonitorBytes))
+	const scriptDir = "/opt/elastic-gcs/scripts"
+	scriptFiles := []string{"dtn_boot.sh", "dtn_shutdown.sh", "spot_interrupt_monitor.sh"}
 
 	// Systemd service with region/secrets/slot-count env vars baked in.
 	// DTN_SLOT_NUMBER is NOT included — the boot script claims a slot at runtime
@@ -295,79 +285,60 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/opt/elastic-gcs/scripts/dtn_boot.sh
-ExecStop=/opt/elastic-gcs/scripts/dtn_shutdown.sh
+ExecStart=%[1]s/dtn_boot.sh
+ExecStop=%[1]s/dtn_shutdown.sh
 TimeoutStartSec=600
 TimeoutStopSec=300
-Environment=AWS_REGION=%s
-Environment=DEPLOYMENT=%s
-Environment=SECRETS_PREFIX=%s
-Environment=PARAM_PREFIX=%s
-Environment=TOTAL_SLOTS=%d
+Environment=AWS_REGION=%[2]s
+Environment=DEPLOYMENT=%[3]s
+Environment=SECRETS_PREFIX=%[4]s
+Environment=PARAM_PREFIX=%[5]s
+Environment=TOTAL_SLOTS=%[6]d
 
 [Install]
 WantedBy=multi-user.target
-`, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots)
+`, scriptDir, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
 
 	// Spot interruption monitor — polls IMDS every 5 seconds for a spot
 	// termination/stop notice and disables the GCS node before shutdown.
 	// Harmless on on-demand instances (IMDS returns 404 for spot endpoint).
 	// Tied to elastic-gcs-dtn.service lifecycle via BindsTo.
-	spotMonitorSvcContent := `[Unit]
+	spotMonitorSvcContent := fmt.Sprintf(`[Unit]
 Description=Spot Instance Interruption Monitor for Elastic GCS DTN
 After=elastic-gcs-dtn.service
 BindsTo=elastic-gcs-dtn.service
 
 [Service]
 Type=simple
-ExecStart=/opt/elastic-gcs/scripts/spot_interrupt_monitor.sh
+ExecStart=%s/spot_interrupt_monitor.sh
 Restart=on-failure
 RestartSec=5s
 
 [Install]
 WantedBy=elastic-gcs-dtn.service
-`
+`, scriptDir)
 	spotMonitorSvcB64 := base64.StdEncoding.EncodeToString([]byte(spotMonitorSvcContent))
 
 	ud := awsec2.UserData_ForLinux(nil)
 	ud.AddCommands(
-		// Install SSM Agent first — Rocky Linux 9 does not include it by default.
-		jsii.String("dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm 2>/dev/null || true"),
-		jsii.String("systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent"),
-		// Install AWS CLI if not already present (no-op if DTN AMI has it pre-baked)
-		jsii.String(strings.TrimSpace(`
-if ! command -v aws &>/dev/null; then
-    echo ">>> Installing AWS CLI v2 (not found in AMI)..."
-    dnf install -y unzip
-    curl -s https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
-    cd /tmp && unzip -q awscliv2.zip
-    /tmp/aws/install
-    ln -sf /usr/local/bin/aws /usr/bin/aws
-    cd /
-fi
-`)),
-		// Install GCS if not already present (no-op if DTN AMI has it pre-baked)
-		jsii.String(strings.ReplaceAll(strings.TrimSpace(`
-if ! command -v globus-connect-server &>/dev/null; then
-    echo ">>> Installing GCS (not found in AMI)..."
-    . /etc/os-release
-    OS_VER="${VERSION_ID%%.*}"
-    dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VER}.noarch.rpm || true
-    dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
-    rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
-    dnf install -y globus-connect-server54-GCS_VERSION
-fi
-`), "GCS_VERSION", props.GCSVersion)),
-		// Install scripts via base64 to avoid heredoc escaping issues
-		jsii.String("mkdir -p /opt/elastic-gcs/scripts"),
-		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/dtn_boot.sh", bootScriptB64)),
-		jsii.String("chmod +x /opt/elastic-gcs/scripts/dtn_boot.sh"),
-		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/dtn_shutdown.sh", shutdownScriptB64)),
-		jsii.String("chmod +x /opt/elastic-gcs/scripts/dtn_shutdown.sh"),
-		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /opt/elastic-gcs/scripts/spot_interrupt_monitor.sh", spotMonitorB64)),
-		jsii.String("chmod +x /opt/elastic-gcs/scripts/spot_interrupt_monitor.sh"),
-		// Install systemd services
+		jsii.String("set -euo pipefail"),
+		jsii.String(`command -v aws >/dev/null || { echo "ERROR: AWS CLI missing from DTN AMI; rebuild it with scripts/build_ami.sh"; exit 1; }`),
+		jsii.String("systemctl enable --now amazon-ssm-agent || true"),
+	)
+	for _, f := range scriptFiles {
+		asset := awss3assets.NewAsset(stack, jsii.String("DTNScript-"+strings.TrimSuffix(f, ".sh")),
+			&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/" + f)})
+		asset.GrantRead(dtnRole)
+		local := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
+			Bucket:    asset.Bucket(),
+			BucketKey: asset.S3ObjectKey(),
+			LocalFile: jsii.String(scriptDir + "/" + f),
+			Region:    jsii.String(region),
+		})
+		ud.AddCommands(jsii.String("chmod 0755 " + *local))
+	}
+	ud.AddCommands(
 		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /etc/systemd/system/elastic-gcs-dtn.service", svcB64)),
 		jsii.String(fmt.Sprintf("echo '%s' | base64 -d > /etc/systemd/system/elastic-gcs-spot-monitor.service", spotMonitorSvcB64)),
 		jsii.String("systemctl daemon-reload"),
@@ -1361,25 +1332,4 @@ var dtnSustainedBytesPerSec = map[string]int64{
 	"m6in.xlarge":  625_000_000,   // 5 Gbps IGW cap
 	"c6in.2xlarge": 625_000_000,   // 5 Gbps IGW cap
 	"m6i.xlarge":   195_250_000,   // 1.562 Gbps baseline
-}
-
-// stripShellComments removes comment lines (starting with #) and blank lines
-// from a shell script, preserving the shebang on the first line if present.
-// This keeps embedded UserData scripts under the 16 KB EC2 limit while
-// allowing the source files to remain fully documented.
-func stripShellComments(src []byte) []byte {
-	lines := strings.Split(string(src), "\n")
-	out := make([]string, 0, len(lines))
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if i == 0 && strings.HasPrefix(trimmed, "#!") {
-			out = append(out, line) // always keep shebang
-			continue
-		}
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		out = append(out, line)
-	}
-	return []byte(strings.Join(out, "\n"))
 }
