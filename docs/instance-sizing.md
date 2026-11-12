@@ -21,7 +21,7 @@ Gbps of the whole fleet, and the size of each scale-out step.
 |------|------|-----------|-------------------------------|----------------|----------|
 | **DTN (default)** | `c8in.2xlarge` | 8 / 16 | 12.5 Gbps per node | $0.544 | Most deployments. One node matches a 10 GbE campus DTN; scale out in 12.5 Gbps steps. |
 | DTN (fine-grained) | `m8in.xlarge` | 4 / 16 | 6.25 Gbps per node | $0.334 | Mostly small or bursty demand. Half-size steps for 23% more per Gbps. |
-| DTN (coarse) | `c8in.4xlarge` | 16 / 32 | 25 Gbps per node | $1.089 | Single large transfers to 100 GbE destinations, if a task stays on one node. |
+| DTN (coarse) | `c8in.4xlarge` | 16 / 32 | 25 Gbps per node | $1.089 | Very large single files, which Globus can't split across nodes, sent to 100 GbE destinations. |
 | Control node | `t3a.large` | 2 / 8 | (not a data mover, see below) | $0.0752 | Default. ~$55/month on-demand. |
 
 Avoid:
@@ -124,7 +124,8 @@ step, not cost:
 | Node failure / Spot loss | Smaller share of capacity | Larger share |
 | Nodes, slots, warm instances per Gbps | More | Fewer |
 | Scale-out events to reach a target | More (each is an alarm transition today, #26) | Fewer |
-| Single-task throughput | Lower, if Globus keeps a task on one node | Higher |
+| Single-file throughput (one file = one node) | Lower | Higher |
+| Per-task ceiling (concurrency × node Gbps) | Lower | Higher |
 
 `c8in.2xlarge` is the balance point. One node saturates a typical 10 GbE
 destination, and 4 nodes reach 50 Gbps.
@@ -148,9 +149,49 @@ Configure the fleet for its peak, not for one node:
   short).
 - **Quota:** the default on-demand standard-instance quota (2,048 vCPUs in this
   account) allows ~250 `c8in.2xlarge`. It is not a constraint.
-- **The ceiling is usually the other end.** Horizontal scale helps only with
-  concurrent tasks, or if Globus spreads one task across nodes (still to
-  measure), and only up to what the destinations can absorb.
+- **The ceiling is usually the other end.** Fan-out per task is capped by
+  concurrency (see below), and aggregate throughput by what the destinations can
+  absorb.
+
+### Why horizontal scale suits S3
+
+The S3 leg scales almost linearly with DTN count:
+
+- **No bucket throughput cap.** S3 has no per-bucket throughput limit and no
+  limit on the number of prefixes. Request rates are at least 5,500 GET/HEAD and
+  3,500 PUT/COPY/POST/DELETE per second *per partitioned prefix*, and S3
+  partitions automatically as load rises. AWS's guidance for high throughput is
+  to aggregate across many connections and instances, which is what a DTN fleet
+  does.
+- **The S3 leg isn't IGW-capped.** S3 traffic uses the gateway endpoint, so the
+  S3 side of each DTN gets full instance bandwidth (including burst), and the
+  gateway endpoint is free. The internet leg stays the per-node bottleneck.
+- **Request rate rarely binds.** It matters only for small objects or heavy
+  writes. 5,500 GET/s of 5 MB objects is ~27 GB/s from a *single* prefix, far
+  above a DTN fleet. Writes count every multipart part against the PUT limit.
+
+How Globus spreads the work (from the [Globus FAQ](https://docs.globus.org/faq/transfer-sharing/)):
+
+- **Within a task:** Globus load-balances across DTNs only when the task has
+  **more than 10 files**. Files are spread over *concurrency* GridFTP processes,
+  and those processes are distributed across nodes. A single file stays on one
+  process and node; *parallelism* (multiple TCP streams) speeds it up but
+  doesn't split it across nodes.
+- **Across tasks:** concurrent tasks are round-robined across active nodes.
+- **No prefix awareness:** Globus distributes *files to processes*, not prefixes.
+  It doesn't shard by prefix, and doesn't need to unless a workload is
+  request-rate-bound on one hot prefix. A large write into a new prefix can
+  draw S3 503 Slow Down responses while S3 repartitions; the connector should
+  retry these.
+- **Per-task fan-out = concurrency.** Concurrency is the *minimum* of the two
+  endpoints' MaximumConcurrency, so one task can use at most that many
+  processes and nodes. Its ceiling is roughly `concurrency × per-node Gbps`, and
+  the destination's settings can cap it. Nothing in this repo sets the
+  endpoint's network-use (concurrency/parallelism) policy, so it runs on the
+  GCS default. Set it so this endpoint is never the limiting side.
+- **Many small nodes win for multi-file datasets and many users.** Most Open
+  Data collections (NEXRAD, 1000 Genomes) are many-file. **Larger nodes win for
+  single huge files and low-concurrency destinations.**
 
 ## Regional availability
 
@@ -192,19 +233,19 @@ to it while DTNs are up, those flows run at ≤0.5 Gbps. Verify this in the
 benchmark. If it does carry data, disable the control node as a data node while
 DTNs are active and re-enable it on scale-in to zero.
 
-## Still to measure
+## Test matrix
 
-These figures are the AWS limits. GCS-level throughput still needs a benchmark
-on a deployed endpoint (`make benchmark`):
+The figures above are AWS limits and Globus's documented behavior. Measure on
+a deployed endpoint:
 
-1. **CPU headroom.** S3 connector HTTPS plus GridFTP data-channel encryption at
-   12.5 Gbps on 8 vCPUs, and 25 Gbps on 16.
-2. **Control-node data path.** Whether the control node carries data channels
-   (see above).
-3. **Multi-node distribution.** Whether one large task spreads across DTNs, or
-   only concurrent tasks do. This decides whether the coarse `c8in.4xlarge` tier
-   is ever worth it, and how far horizontal scale helps a single user.
-4. **Graviton viability.** GCS on Ubuntu 26.04 arm64 with `r8gn.large`, if
-   Globus confirms arm64 support.
-5. **Real destinations.** Throughput to a typical campus endpoint versus the
-   per-DTN limit.
+| # | Question | Decides |
+|---|----------|---------|
+| 1 | Per-node GCS throughput (S3 connector HTTPS + GridFTP TLS) at 6.25 / 12.5 / 25 Gbps on `m8in.xlarge` / `c8in.2xlarge` / `c8in.4xlarge`, with CPU% | Whether node sizes deliver their network limit |
+| 2 | Aggregate throughput of one many-file task vs DTN count (1, 2, 4, 8) at concurrency 4 / 8 / 16 | Horizontal scaling efficiency; per-task fan-out |
+| 3 | Same with many concurrent tasks | Round-robin balance across nodes |
+| 4 | Single large file (≥100 GB) per node size | Value of the coarse tier |
+| 5 | S3 503 rate on large writes into one new prefix vs spread prefixes | Whether prefix layout matters for writes |
+| 6 | Whether the control node carries data channels | Control node sizing, disable-while-DTNs-active |
+| 7 | Endpoint network-use setting vs achieved concurrency | Recommended concurrency policy |
+| 8 | `r8gn.large` on Ubuntu 26.04 arm64 vs `c8in.2xlarge` (if Globus confirms arm64) | Graviton adoption |
+| 9 | Throughput to typical campus destinations | Real-world ceiling vs per-DTN limit |
