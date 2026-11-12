@@ -16,7 +16,7 @@ set -euo pipefail
 # Usage:
 #   AWS_PROFILE=aws ./scripts/build_ami.sh [region]
 #   AWS_PROFILE=aws ./scripts/build_ami.sh us-east-1
-#   GCS_VERSION=5.4.99 ./scripts/build_ami.sh us-east-1
+#   GCS_VERSION=5.4.101 ./scripts/build_ami.sh us-east-1
 #
 # GCS_VERSION defaults to the globus:gcsVersion value in cdk.json, which the
 # DTN pool stack uses to look up this AMI by name.

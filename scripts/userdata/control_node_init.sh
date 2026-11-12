@@ -19,7 +19,7 @@ set -euo pipefail
 #   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
 #   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
 #   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
-#   - GCS_VERSION: exact GCS package version to install (e.g. 5.4.99)
+#   - GCS_VERSION: exact GCS package version to install (e.g. 5.4.101)
 # =============================================================================
 
 LOG="/var/log/elastic-gcs-setup.log"

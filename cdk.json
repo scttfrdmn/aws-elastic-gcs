@@ -22,7 +22,7 @@
     "globus:endpointOwner": "scofri@globusid.org",
     "globus:endpointDisplayName": "Elastic GCS - Open Data",
     "globus:organizationName": "Elastic GCS",
-    "globus:gcsVersion": "5.4.99",
+    "globus:gcsVersion": "5.4.101",
 
     "adminCIDR": "",
 
