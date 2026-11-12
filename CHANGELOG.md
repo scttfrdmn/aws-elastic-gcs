@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `docs/instance-sizing.md` and `scripts/instance_sizing.py`: DTN and control node
   sizing from live EC2 specs and prices, ranked by sustained internet-gateway
-  throughput per dollar.
+  throughput per dollar. Compares Intel, AMD and Graviton, and prices horizontal
+  N-node fleets (`--fleet-gbps`) as well as single nodes.
 
 ### Changed
 - **Default DTN type is now `c8in.2xlarge`** (12.5 Gbps sustained to the internet,
