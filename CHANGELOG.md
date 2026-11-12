@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   N-node fleets (`--fleet-gbps`) as well as single nodes.
 
 ### Changed
+- **Boot scripts are delivered as S3 assets** (#61). UserData downloads them
+  from the CDK asset bucket instead of inlining them, which takes DTN UserData from
+  14.7 KB to 2.5 KB and control node UserData from ~17 KB (over the 16 KB EC2
+  limit) to 1.9 KB. The DTN UserData no longer installs GCS, the AWS CLI or the
+  SSM agent; the mandatory DTN AMI provides them. The control node installs AWS
+  CLI v2 before downloading its init script.
 - **Breaking (naming):** names now include the deployment, e.g.
   `elastic-gcs/<region>/<deployment>/globus-client-id` and
   `ElasticGCS-Control-<region>-<deployment>`. Existing deployments need fresh

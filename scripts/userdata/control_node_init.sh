@@ -100,7 +100,9 @@ fi
 
 case "$OS_ID" in
     amzn|rhel|rocky|almalinux)
-        dnf install -y jq awscli
+        dnf install -y jq
+        # UserData installs AWS CLI v2 before downloading this script.
+        command -v aws >/dev/null || dnf install -y awscli
         # Install EPEL (required for GCS dependencies)
         dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION_ID}.noarch.rpm || true
         # Install GCS repo and import its GPG key.
@@ -113,7 +115,8 @@ case "$OS_ID" in
         ;;
     ubuntu|debian)
         apt-get update
-        apt-get install -y jq awscli curl
+        apt-get install -y jq curl
+        command -v aws >/dev/null || apt-get install -y awscli
         # Install GCS repo
         curl -LOs https://downloads.globus.org/globus-connect-server/stable/installers/repo/deb/globus-repo_latest_all.deb
         dpkg -i globus-repo_latest_all.deb
