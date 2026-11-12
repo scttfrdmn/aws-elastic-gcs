@@ -1,8 +1,8 @@
 # AWS Open Data Registry buckets to front with Globus
 # Reference: https://registry.opendata.aws/
 #
-# Each bucket becomes a storage gateway + mapped collection on the
-# regional Elastic GCS endpoint.
+# Each bucket becomes a storage gateway + mapped collection on every
+# deployment in its region, or only on those listed in `deployments`.
 
 buckets:
   # === us-east-1 ===

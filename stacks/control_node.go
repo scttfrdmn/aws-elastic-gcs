@@ -12,14 +12,16 @@ import (
 	"github.com/aws/jsii-runtime-go"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // ControlNodeStackProps defines configuration for the control node stack.
 // Globus-specific settings come from CDK context (cdk.json or -c flags).
 type ControlNodeStackProps struct {
 	awscdk.StackProps
-	RegionConfig         config.RegionConfig
-	OpenDataBuckets      []config.OpenDataBucket
+	Deployment      names.Deployment
+	RegionConfig    config.RegionConfig
+	OpenDataBuckets []config.OpenDataBucket
 
 	// Globus endpoint configuration
 	GlobusSubscriptionID string // Globus subscription ID (required for managed endpoint)
@@ -47,6 +49,7 @@ type ControlNodeStack struct {
 	SecurityGroup   awsec2.ISecurityGroup
 	ControlInstance awsec2.IInstance
 	SecretsPrefix   string
+	Deployment      names.Deployment
 }
 
 // NewControlNodeStack creates the Phase 1 control node infrastructure:
@@ -63,9 +66,16 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	stack := awscdk.NewStack(scope, &id, &sprops)
 	s := &ControlNodeStack{Stack: stack}
 
-	region := props.RegionConfig.Name
-	secretsPrefix := fmt.Sprintf("elastic-gcs/%s", region)
+	dep := props.Deployment
+	region := dep.Region
+	secretsPrefix := dep.SecretsPrefix()
 	s.SecretsPrefix = secretsPrefix
+	s.Deployment = dep
+
+	// Tag everything in the stack with its deployment, for cost tracking and
+	// so several deployments in one region stay distinguishable.
+	awscdk.Tags_Of(stack).Add(jsii.String(names.TagDeployment), jsii.String(dep.ID()), nil)
+	awscdk.Tags_Of(stack).Add(jsii.String(names.TagRegion), jsii.String(region), nil)
 
 	// -------------------------------------------------------------------------
 	// VPC
@@ -167,7 +177,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	role := awsiam.NewRole(stack, jsii.String("ControlNodeRole"), &awsiam.RoleProps{
 		AssumedBy:   awsiam.NewServicePrincipal(jsii.String("ec2.amazonaws.com"), nil),
 		Description: jsii.String("IAM role for Elastic GCS control node"),
-		RoleName:    jsii.String(fmt.Sprintf("elastic-gcs-control-%s", region)),
+		RoleName:    jsii.String(dep.Resource("control")),
 	})
 
 	// SSM Session Manager — enables SSH-free maintenance
@@ -227,7 +237,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 			"ssm:DeleteParameter",
 		),
 		Resources: jsii.Strings(
-			fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/*", region, region),
+			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/*", region, dep.ParamPrefix()),
 		),
 	}))
 
@@ -267,10 +277,13 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		bucketsJSON = []byte("[]")
 	}
 
+	// The deployment ID is part of the display name so endpoints from several
+	// deployments are distinguishable in the Globus web app.
 	endpointName := props.EndpointDisplayName
 	if endpointName == "" {
-		endpointName = fmt.Sprintf("Elastic GCS Open Data - %s", region)
+		endpointName = "Elastic GCS Open Data"
 	}
+	endpointName = fmt.Sprintf("%s (%s)", endpointName, dep.ID())
 	orgName := props.OrganizationName
 	if orgName == "" {
 		orgName = "Elastic GCS"
@@ -285,6 +298,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		// Environment variables consumed by control_node_init.sh
 		jsii.String(fmt.Sprintf("export AWS_REGION=%q", region)),
 		jsii.String(fmt.Sprintf("export SECRETS_PREFIX=%q", secretsPrefix)),
+		jsii.String(fmt.Sprintf("export PARAM_PREFIX=%q", dep.ParamPrefix())),
 		jsii.String(fmt.Sprintf("export ENDPOINT_DISPLAY_NAME=%q", endpointName)),
 		jsii.String(fmt.Sprintf("export ORGANIZATION_NAME=%q", orgName)),
 		jsii.String(fmt.Sprintf("export GLOBUS_OWNER_IDENTITY=%q", props.GlobusOwnerIdentity)),
@@ -318,12 +332,13 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	})
 
 	instanceProps := &awsec2.InstanceProps{
-		Vpc:          vpc,
-		InstanceType: awsec2.NewInstanceType(jsii.String(controlInstanceStr)),
-		MachineImage: ami,
+		InstanceName:  jsii.String(dep.Resource("control")),
+		Vpc:           vpc,
+		InstanceType:  awsec2.NewInstanceType(jsii.String(controlInstanceStr)),
+		MachineImage:  ami,
 		SecurityGroup: sg,
-		Role:         role,
-		UserData:     ud,
+		Role:          role,
+		UserData:      ud,
 		VpcSubnets: &awsec2.SubnetSelection{
 			SubnetType: awsec2.SubnetType_PUBLIC,
 		},
@@ -351,6 +366,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	}
 
 	instance := awsec2.NewInstance(stack, jsii.String("ControlNode"), instanceProps)
+	awscdk.Tags_Of(instance).Add(jsii.String(names.TagRole), jsii.String("control"), nil)
 	s.ControlInstance = instance
 
 	// -------------------------------------------------------------------------
@@ -363,9 +379,8 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	// -------------------------------------------------------------------------
 	eip := awsec2.NewCfnEIP(stack, jsii.String("ControlNodeEIP"), &awsec2.CfnEIPProps{
 		Tags: &[]*awscdk.CfnTag{
-			{Key: jsii.String("Name"), Value: jsii.String(fmt.Sprintf("elastic-gcs-control-%s", region))},
-			{Key: jsii.String("elastic-gcs:region"), Value: jsii.String(region)},
-			{Key: jsii.String("elastic-gcs:role"), Value: jsii.String("control")},
+			{Key: jsii.String("Name"), Value: jsii.String(dep.Resource("control"))},
+			{Key: jsii.String(names.TagRole), Value: jsii.String("control")},
 		},
 	})
 

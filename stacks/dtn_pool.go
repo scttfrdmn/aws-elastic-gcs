@@ -24,12 +24,14 @@ import (
 	"github.com/aws/jsii-runtime-go"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // DTNPoolStackProps extends the basic props with Open Data bucket access
 // and cache eviction configuration.
 type DTNPoolStackProps struct {
 	awscdk.StackProps
+	Deployment         names.Deployment
 	RegionConfig       config.RegionConfig
 	ControlStack       *ControlNodeStack
 	OpenDataBuckets    []config.OpenDataBucket
@@ -69,8 +71,12 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	}
 	stack := awscdk.NewStack(scope, &id, &sprops)
 
-	region := props.RegionConfig.Name
+	dep := props.Deployment
+	region := dep.Region
 	secretsPrefix := props.ControlStack.SecretsPrefix
+	// Instances launched by the ASG inherit these tags (PropagateAtLaunch).
+	awscdk.Tags_Of(stack).Add(jsii.String(names.TagDeployment), jsii.String(dep.ID()), nil)
+	awscdk.Tags_Of(stack).Add(jsii.String(names.TagRegion), jsii.String(region), nil)
 
 	warmPoolSize := props.RegionConfig.WarmPoolSize
 	if warmPoolSize <= 0 {
@@ -125,7 +131,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
 	// without relying on CDK tokens.
-	asgName := fmt.Sprintf("elastic-gcs-dtn-%s", region)
+	asgName := dep.Resource("dtn")
 
 	// -------------------------------------------------------------------------
 	// DTN IAM Role
@@ -135,7 +141,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	dtnRole := awsiam.NewRole(stack, jsii.String("DTNRole"), &awsiam.RoleProps{
 		AssumedBy:   awsiam.NewServicePrincipal(jsii.String("ec2.amazonaws.com"), nil),
 		Description: jsii.String("IAM role for Elastic GCS DTN instances"),
-		RoleName:    jsii.String(fmt.Sprintf("elastic-gcs-dtn-%s", region)),
+		RoleName:    jsii.String(dep.Resource("dtn")),
 	})
 
 	dtnRole.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(
@@ -211,7 +217,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 			"ssm:DeleteParameter",
 		),
 		Resources: jsii.Strings(
-			fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/slot-lock/*", region, region),
+			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s/*", region, dep.ParamPrefix(), names.ParamSlotLock),
 		),
 	}))
 
@@ -243,7 +249,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 			"ssm:GetParameters",
 		),
 		Resources: jsii.Strings(
-			fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/*", region, region),
+			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/*", region, dep.ParamPrefix()),
 		),
 	}))
 
@@ -294,12 +300,14 @@ ExecStop=/opt/elastic-gcs/scripts/dtn_shutdown.sh
 TimeoutStartSec=600
 TimeoutStopSec=300
 Environment=AWS_REGION=%s
+Environment=DEPLOYMENT=%s
 Environment=SECRETS_PREFIX=%s
+Environment=PARAM_PREFIX=%s
 Environment=TOTAL_SLOTS=%d
 
 [Install]
 WantedBy=multi-user.target
-`, region, secretsPrefix, totalSlots)
+`, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
 
 	// Spot interruption monitor — polls IMDS every 5 seconds for a spot
@@ -385,7 +393,7 @@ fi
 	})
 
 	ltProps := &awsec2.LaunchTemplateProps{
-		LaunchTemplateName: jsii.String(fmt.Sprintf("elastic-gcs-dtn-%s", region)),
+		LaunchTemplateName: jsii.String(dep.Resource("dtn")),
 		InstanceType:       awsec2.NewInstanceType(jsii.String(dtnInstanceStr)),
 		MachineImage:       dtnAMI,
 		SecurityGroup:      props.ControlStack.SecurityGroup,
@@ -602,7 +610,7 @@ fi
 	}
 
 	lifecycleFn := awslambda.NewFunction(stack, jsii.String("LifecycleFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-lifecycle-%s", region)),
+		FunctionName: jsii.String(dep.Resource("lifecycle")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -630,7 +638,7 @@ fi
 	}))
 
 	scaleOutFn := awslambda.NewFunction(stack, jsii.String("ScaleOutFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-scaleout-%s", region)),
+		FunctionName: jsii.String(dep.Resource("scaleout")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -658,7 +666,7 @@ fi
 	}))
 
 	scaleInFn := awslambda.NewFunction(stack, jsii.String("ScaleInFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-scalein-%s", region)),
+		FunctionName: jsii.String(dep.Resource("scalein")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -669,7 +677,7 @@ fi
 			"ASG_NAME":         asg.AutoScalingGroupName(),
 			"REGION":           jsii.String(region),
 			"SECRETS_PREFIX":   jsii.String(secretsPrefix),
-			"METRIC_NAMESPACE": jsii.String("ElasticGCS"),
+			"METRIC_NAMESPACE": jsii.String(names.MetricNamespace),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -686,7 +694,7 @@ fi
 	}))
 
 	cacheEvictionFn := awslambda.NewFunction(stack, jsii.String("CacheEvictionFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-cache-eviction-%s", region)),
+		FunctionName: jsii.String(dep.Resource("cache-eviction")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -698,7 +706,7 @@ fi
 			"REGION":                jsii.String(region),
 			"SECRETS_PREFIX":        jsii.String(secretsPrefix),
 			"CACHE_EVICTION_HOURS":  jsii.String(fmt.Sprintf("%d", cacheEvictionHours)),
-			"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
+			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -723,14 +731,14 @@ fi
 		Sid:       jsii.String("CacheEvictionSlotLockCleanup"),
 		Effect:    awsiam.Effect_ALLOW,
 		Actions:   jsii.Strings("ssm:DeleteParameter"),
-		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:*:parameter/elastic-gcs/%s/slot-lock/*", region, region)),
+		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s/*", region, dep.ParamPrefix(), names.ParamSlotLock)),
 	}))
 
 	// Demand monitor Lambda: polls Globus Transfer API every 1 minute and
 	// publishes ElasticGCS/ActiveTransfers metric. This metric drives both
 	// the scale-out alarm (> 0) and the scale-in alarm (== 0 for 15 min).
 	demandMonitorFn := awslambda.NewFunction(stack, jsii.String("DemandMonitorFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-demand-monitor-%s", region)),
+		FunctionName: jsii.String(dep.Resource("demand-monitor")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -740,9 +748,9 @@ fi
 		Environment: &map[string]*string{
 			"REGION":              jsii.String(region),
 			"SECRETS_PREFIX":      jsii.String(secretsPrefix),
-			"ENDPOINT_ID_PARAM":   jsii.String(fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)),
-			"METRIC_NAMESPACE":    jsii.String("ElasticGCS"),
-			"WAKER_FUNCTION_NAME": jsii.String(fmt.Sprintf("elastic-gcs-waker-%s", region)),
+			"ENDPOINT_ID_PARAM":   jsii.String(dep.Param(names.ParamEndpointID)),
+			"METRIC_NAMESPACE":    jsii.String(names.MetricNamespace),
+			"WAKER_FUNCTION_NAME": jsii.String(dep.Resource("waker")),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -765,7 +773,7 @@ fi
 	// Only InService DTNs are checked — stopped warm pool instances can't run SSM.
 	// -------------------------------------------------------------------------
 	versionCheckFn := awslambda.NewFunction(stack, jsii.String("VersionCheckFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-version-check-%s", region)),
+		FunctionName: jsii.String(dep.Resource("version-check")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -775,7 +783,7 @@ fi
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),
 			"REGION":                jsii.String(region),
-			"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
+			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -862,27 +870,28 @@ fi
 	// unavailable (e.g. during a deploy), don't trigger false scale events.
 	// -------------------------------------------------------------------------
 	scaleOutTopic := awssns.NewTopic(stack, jsii.String("ScaleOutTopic"), &awssns.TopicProps{
-		TopicName:   jsii.String(fmt.Sprintf("elastic-gcs-scaleout-%s", region)),
+		TopicName:   jsii.String(dep.Resource("scaleout")),
 		DisplayName: jsii.String("Elastic GCS Scale-Out Trigger"),
 	})
 	scaleOutTopic.AddSubscription(awssnssubscriptions.NewLambdaSubscription(scaleOutFn, nil))
 
 	scaleInTopic := awssns.NewTopic(stack, jsii.String("ScaleInTopic"), &awssns.TopicProps{
-		TopicName:   jsii.String(fmt.Sprintf("elastic-gcs-scalein-%s", region)),
+		TopicName:   jsii.String(dep.Resource("scalein")),
 		DisplayName: jsii.String("Elastic GCS Scale-In Trigger"),
 	})
 	scaleInTopic.AddSubscription(awssnssubscriptions.NewLambdaSubscription(scaleInFn, nil))
 
 	// Scale-out alarm: fires when ElasticGCS/ActiveTransfers > 0 for 1 minute.
-	scaleOutAlarmName := fmt.Sprintf("elastic-gcs-scaleout-%s", region)
+	scaleOutAlarmName := dep.Resource("scaleout")
 	scaleOutAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ScaleOutAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName:        jsii.String(scaleOutAlarmName),
 		AlarmDescription: jsii.String("Trigger DTN scale-out when active Globus transfers detected"),
 		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-			Namespace:  jsii.String("ElasticGCS"),
+			Namespace:  jsii.String(names.MetricNamespace),
 			MetricName: jsii.String("ActiveTransfers"),
 			DimensionsMap: &map[string]*string{
-				"Region": jsii.String(region),
+				"Region":     jsii.String(region),
+				"Deployment": jsii.String(dep.Name),
 			},
 			Period:    awscdk.Duration_Minutes(jsii.Number(1)),
 			Statistic: jsii.String("Maximum"),
@@ -897,23 +906,24 @@ fi
 	// Scale-in alarm: fires when ElasticGCS/ActiveTransfers == 0 for 15 min.
 	// Three consecutive 5-minute periods with Maximum <= 0 means no active
 	// transfers for at least 15 minutes.
-	scaleInAlarmName := fmt.Sprintf("elastic-gcs-scalein-%s", region)
+	scaleInAlarmName := dep.Resource("scalein")
 	scaleInAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ScaleInAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName: jsii.String(scaleInAlarmName),
 		AlarmDescription: jsii.String(
 			"Trigger DTN scale-in when no active Globus transfers for 15 minutes"),
 		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-			Namespace:  jsii.String("ElasticGCS"),
+			Namespace:  jsii.String(names.MetricNamespace),
 			MetricName: jsii.String("ActiveTransfers"),
 			DimensionsMap: &map[string]*string{
-				"Region": jsii.String(region),
+				"Region":     jsii.String(region),
+				"Deployment": jsii.String(dep.Name),
 			},
 			Period:    awscdk.Duration_Minutes(jsii.Number(5)),
 			Statistic: jsii.String("Maximum"),
 		}),
 		Threshold:          jsii.Number(0),
 		ComparisonOperator: awscloudwatch.ComparisonOperator_LESS_THAN_OR_EQUAL_TO_THRESHOLD,
-		EvaluationPeriods:  jsii.Number(3), // 3 × 5min = 15 min with no active transfers
+		EvaluationPeriods:  jsii.Number(3),                               // 3 × 5min = 15 min with no active transfers
 		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING, // demand monitor down = don't scale in
 	})
 	scaleInAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleInTopic))
@@ -923,17 +933,18 @@ fi
 	// for 2 consecutive minutes. This drives 1→2 DTN and beyond. The 2-period
 	// requirement (vs 1 for the first alarm) avoids spinning up a second DTN for
 	// brief throughput spikes during task start/stop transitions.
-	throughputAlarmName := fmt.Sprintf("elastic-gcs-scaleout-throughput-%s", region)
+	throughputAlarmName := dep.Resource("scaleout-throughput")
 	throughputAlarm := awscloudwatch.NewAlarm(stack, jsii.String("ThroughputScaleOutAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName: jsii.String(throughputAlarmName),
 		AlarmDescription: jsii.String(fmt.Sprintf(
 			"Trigger additional DTN when transfer throughput exceeds %d MB/s for 2 minutes",
 			throughputThreshold/1_000_000)),
 		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-			Namespace:  jsii.String("ElasticGCS"),
+			Namespace:  jsii.String(names.MetricNamespace),
 			MetricName: jsii.String("TransferThroughput"),
 			DimensionsMap: &map[string]*string{
-				"Region": jsii.String(region),
+				"Region":     jsii.String(region),
+				"Deployment": jsii.String(dep.Name),
 			},
 			Period:    awscdk.Duration_Minutes(jsii.Number(1)),
 			Statistic: jsii.String("Maximum"),
@@ -947,15 +958,16 @@ fi
 
 	// GCS Version Drift alarm: fires when GCSVersionDrift > 0 (any drift detected).
 	// Uses the scaleOutTopic for operator notification (same SNS infrastructure).
-	versionDriftAlarmName := fmt.Sprintf("elastic-gcs-version-drift-%s", region)
+	versionDriftAlarmName := dep.Resource("version-drift")
 	versionDriftAlarm := awscloudwatch.NewAlarm(stack, jsii.String("VersionDriftAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName:        jsii.String(versionDriftAlarmName),
 		AlarmDescription: jsii.String("GCS version drift detected — nodes running different GCS versions"),
 		Metric: awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-			Namespace:  jsii.String("ElasticGCS"),
+			Namespace:  jsii.String(names.MetricNamespace),
 			MetricName: jsii.String("GCSVersionDrift"),
 			DimensionsMap: &map[string]*string{
-				"Region": jsii.String(region),
+				"Region":     jsii.String(region),
+				"Deployment": jsii.String(dep.Name),
 			},
 			Period:    awscdk.Duration_Hours(jsii.Number(6)),
 			Statistic: jsii.String("Maximum"),
@@ -976,7 +988,7 @@ fi
 	// Row 3: Health (version drift, demand monitor, cache eviction)
 	// -------------------------------------------------------------------------
 	dashboard := awscloudwatch.NewDashboard(stack, jsii.String("Dashboard"), &awscloudwatch.DashboardProps{
-		DashboardName: jsii.String(fmt.Sprintf("ElasticGCS-%s", region)),
+		DashboardName: jsii.String(dep.Dashboard()),
 	})
 
 	// Row 1: Transfer demand
@@ -987,10 +999,11 @@ fi
 			Height: jsii.Number(6),
 			Left: &[]awscloudwatch.IMetric{
 				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-					Namespace:  jsii.String("ElasticGCS"),
+					Namespace:  jsii.String(names.MetricNamespace),
 					MetricName: jsii.String("ActiveTransfers"),
 					DimensionsMap: &map[string]*string{
-						"Region": jsii.String(region),
+						"Region":     jsii.String(region),
+						"Deployment": jsii.String(dep.Name),
 					},
 					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
 					Statistic: jsii.String("Maximum"),
@@ -999,10 +1012,11 @@ fi
 			},
 			Right: &[]awscloudwatch.IMetric{
 				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-					Namespace:  jsii.String("ElasticGCS"),
+					Namespace:  jsii.String(names.MetricNamespace),
 					MetricName: jsii.String("TransferThroughput"),
 					DimensionsMap: &map[string]*string{
-						"Region": jsii.String(region),
+						"Region":     jsii.String(region),
+						"Deployment": jsii.String(dep.Name),
 					},
 					Period:    awscdk.Duration_Minutes(jsii.Number(1)),
 					Statistic: jsii.String("Maximum"),
@@ -1125,10 +1139,11 @@ fi
 			Height: jsii.Number(6),
 			Metrics: &[]awscloudwatch.IMetric{
 				awscloudwatch.NewMetric(&awscloudwatch.MetricProps{
-					Namespace:  jsii.String("ElasticGCS"),
+					Namespace:  jsii.String(names.MetricNamespace),
 					MetricName: jsii.String("GCSVersionDrift"),
 					DimensionsMap: &map[string]*string{
-						"Region": jsii.String(region),
+						"Region":     jsii.String(region),
+						"Deployment": jsii.String(dep.Name),
 					},
 					Period:    awscdk.Duration_Hours(jsii.Number(6)),
 					Statistic: jsii.String("Maximum"),
@@ -1182,7 +1197,7 @@ fi
 	// docs/ephemeral-control-node.md for the proxy pattern.
 	// -------------------------------------------------------------------------
 	wakerFn := awslambda.NewFunction(stack, jsii.String("WakerFn"), &awslambda.FunctionProps{
-		FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-waker-%s", region)),
+		FunctionName: jsii.String(dep.Resource("waker")),
 		Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 		Architecture: awslambda.Architecture_ARM_64(),
 		Handler:      jsii.String("bootstrap"),
@@ -1192,7 +1207,7 @@ fi
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),
 			"REGION":                jsii.String(region),
-			"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
+			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -1212,6 +1227,13 @@ fi
 		),
 		Resources: jsii.Strings("*"),
 	}))
+
+	// Every Lambda derives its names, SSM paths and metric dimensions from
+	// AWS_REGION (set by the runtime) and DEPLOYMENT via names.FromEnv.
+	for _, fn := range []awslambda.Function{lifecycleFn, scaleOutFn, scaleInFn,
+		cacheEvictionFn, demandMonitorFn, versionCheckFn, wakerFn} {
+		fn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
+	}
 
 	// Lambda Function URL with AWS_IAM auth — enforced by the Lambda service
 	// before code runs. Only callers with SigV4-signed requests and
@@ -1237,7 +1259,7 @@ fi
 		}
 
 		idleShutdownFn := awslambda.NewFunction(stack, jsii.String("IdleShutdownFn"), &awslambda.FunctionProps{
-			FunctionName: jsii.String(fmt.Sprintf("elastic-gcs-idle-shutdown-%s", region)),
+			FunctionName: jsii.String(dep.Resource("idle-shutdown")),
 			Runtime:      awslambda.Runtime_PROVIDED_AL2023(),
 			Architecture: awslambda.Architecture_ARM_64(),
 			Handler:      jsii.String("bootstrap"),
@@ -1247,13 +1269,14 @@ fi
 			Environment: &map[string]*string{
 				"ASG_NAME":              asg.AutoScalingGroupName(),
 				"REGION":                jsii.String(region),
-				"CONTROL_NODE_ID_PARAM": jsii.String(fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)),
+				"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 				"IDLE_MINUTES":          jsii.String(fmt.Sprintf("%d", props.IdleShutdownMinutes)),
 				"MIN_UPTIME_MINUTES":    jsii.String(fmt.Sprintf("%d", minUptime)),
-				"METRIC_NAMESPACE":      jsii.String("ElasticGCS"),
+				"METRIC_NAMESPACE":      jsii.String(names.MetricNamespace),
 			},
 			LogRetention: awslogs.RetentionDays_ONE_WEEK,
 		})
+		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
 		idleShutdownFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 			Sid:    jsii.String("IdleShutdownLambdaPerms"),
 			Effect: awsiam.Effect_ALLOW,
@@ -1307,7 +1330,7 @@ fi
 	})
 
 	awscdk.NewCfnOutput(stack, jsii.String("DTNLogGroup"), &awscdk.CfnOutputProps{
-		Value:       jsii.String(fmt.Sprintf("/aws/lambda/elastic-gcs-lifecycle-%s", region)),
+		Value:       jsii.String("/aws/lambda/" + dep.Resource("lifecycle")),
 		Description: jsii.String("CloudWatch log group for DTN lifecycle events"),
 	})
 

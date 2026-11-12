@@ -8,6 +8,7 @@ import (
 	"github.com/aws/jsii-runtime-go"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 	"github.com/scttfrdmn/aws-elastic-gcs/stacks"
 )
 
@@ -49,17 +50,30 @@ func main() {
 	// It is required for context lookups (e.g. MachineImage_Lookup for AMI IDs).
 	account := os.Getenv("CDK_DEFAULT_ACCOUNT")
 
-	// Deploy stacks per region
+	// Deploy a control stack and a DTN pool stack per deployment. Several
+	// deployments may share a region; (region, deployment) must be unique.
+	seen := map[string]bool{}
 	for _, region := range regions.Regions {
+		dep, err := names.New(region.Name, region.Deployment)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config/regions.yaml: %v\n", err)
+			os.Exit(1)
+		}
+		if seen[dep.ID()] {
+			fmt.Fprintf(os.Stderr, "config/regions.yaml: duplicate deployment %s\n", dep.ID())
+			os.Exit(1)
+		}
+		seen[dep.ID()] = true
+
 		env := &awscdk.Environment{
 			Account: jsii.String(account),
 			Region:  jsii.String(region.Name),
 		}
 
-		regionBuckets := buckets.BucketsForRegion(region.Name)
+		regionBuckets := buckets.BucketsFor(dep.Region, dep.Name)
 
 		// Phase 1 + 2: Network + Control Node
-		controlStackName := fmt.Sprintf("ElasticGCS-Control-%s", region.Name)
+		controlStackName := dep.Stack("Control")
 		// Phase 3: DTN Pool (depends on control stack)
 		cacheHours := 72
 		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
@@ -84,8 +98,9 @@ func main() {
 		controlStack := stacks.NewControlNodeStack(app, controlStackName, &stacks.ControlNodeStackProps{
 			StackProps: awscdk.StackProps{
 				Env:         env,
-				Description: jsii.String(fmt.Sprintf("Elastic GCS Control Node - %s", region.Name)),
+				Description: jsii.String(fmt.Sprintf("Elastic GCS Control Node - %s", dep.ID())),
 			},
+			Deployment:           dep,
 			RegionConfig:         region,
 			OpenDataBuckets:      regionBuckets,
 			GlobusSubscriptionID: globusSubscriptionID,
@@ -96,12 +111,13 @@ func main() {
 			MaxDTNs:              maxDTNs,
 			GCSVersion:           gcsVersion,
 		})
-		dtnStackName := fmt.Sprintf("ElasticGCS-DTNPool-%s", region.Name)
+		dtnStackName := dep.Stack("DTNPool")
 		stacks.NewDTNPoolStack(app, dtnStackName, &stacks.DTNPoolStackProps{
 			StackProps: awscdk.StackProps{
 				Env:         env,
-				Description: jsii.String(fmt.Sprintf("Elastic GCS DTN Pool - %s", region.Name)),
+				Description: jsii.String(fmt.Sprintf("Elastic GCS DTN Pool - %s", dep.ID())),
 			},
+			Deployment:                  dep,
 			RegionConfig:                region,
 			ControlStack:                controlStack,
 			OpenDataBuckets:             regionBuckets,

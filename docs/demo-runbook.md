@@ -73,7 +73,7 @@ The warm-pool instance starts resuming immediately."*
 
 **Expected output:**
 ```
-Invoking waker Lambda (elastic-gcs-waker-us-east-1)...
+Invoking waker Lambda (elastic-gcs-waker-us-east-1-default)...
 
 Control node ready (2s, already running)
   Warm pool populated — DTN scale-out will take ~60s
@@ -223,7 +223,7 @@ The `transfer test` subcommand requires an active `globus` CLI session.
 
 The endpoint ID is stored in SSM. Check:
 ```bash
-aws ssm get-parameter --name /elastic-gcs/us-east-1/endpoint-id --query Parameter.Value --output text
+aws ssm get-parameter --name /elastic-gcs/us-east-1/default/endpoint-id --query Parameter.Value --output text
 ```
 If this doesn't match `09c97a5c-63e2-40a2-bcc9-caf96c0de230`, update the constant in
 `cmd/aws-elastic-gcs-ctl/main.go` and rebuild.

@@ -26,19 +26,19 @@ synth:
 
 deploy-control:
 	@echo "Deploying control node stack..."
-	cdk deploy ElasticGCS-Control-$(REGION) --require-approval broadening
+	cdk deploy ElasticGCS-Control-$(REGION)-$(DEPLOYMENT) --require-approval broadening
 
 deploy-dtn:
 	@echo "Deploying DTN pool stack..."
-	cdk deploy ElasticGCS-DTNPool-$(REGION) --require-approval broadening
+	cdk deploy ElasticGCS-DTNPool-$(REGION)-$(DEPLOYMENT) --require-approval broadening
 
 deploy-all:
-	@echo "Deploying all stacks for region $(REGION)..."
-	cdk deploy ElasticGCS-Control-$(REGION) ElasticGCS-DTNPool-$(REGION) --require-approval broadening
+	@echo "Deploying all stacks for $(REGION)-$(DEPLOYMENT)..."
+	cdk deploy ElasticGCS-Control-$(REGION)-$(DEPLOYMENT) ElasticGCS-DTNPool-$(REGION)-$(DEPLOYMENT) --require-approval broadening
 
 destroy:
-	@echo "WARNING: Destroying all stacks for region $(REGION)..."
-	cdk destroy ElasticGCS-DTNPool-$(REGION) ElasticGCS-Control-$(REGION)
+	@echo "WARNING: Destroying all stacks for $(REGION)-$(DEPLOYMENT)..."
+	cdk destroy ElasticGCS-DTNPool-$(REGION)-$(DEPLOYMENT) ElasticGCS-Control-$(REGION)-$(DEPLOYMENT)
 
 # === Testing ===
 
@@ -48,25 +48,25 @@ test:
 # Use ELASTIC_GCS_TEST_FULL_CYCLE=true for 2-round auto-scale test (~20min)
 # Use ELASTIC_GCS_TEST_SCALE_IN=true for automatic scale-in test (~20min)
 test-integration:
-	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
+	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_DEPLOYMENT=$(DEPLOYMENT) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
 	  go test ./test/integration/ -v -tags=integration -timeout 90m \
 	  $(if $(TESTS),-run $(TESTS),) $(TEST_RUN)
 
 benchmark:
 	@echo "Running scale-out benchmark in $(REGION), tier=$(TIER)..."
-	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_TIER=$(TIER) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
+	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_DEPLOYMENT=$(DEPLOYMENT) ELASTIC_GCS_TIER=$(TIER) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
 	  go test ./test/benchmark/ -v -tags=benchmark -timeout 45m
 
 # === AMI ===
 
 ami:
 	@echo "Building DTN AMI..."
-	./scripts/build_ami.sh $(REGION)
+	./scripts/build_ami.sh $(REGION) $(DEPLOYMENT)
 
 # === Utility ===
 
 status:
-	./bin/aws-elastic-gcs-ctl status --region $(REGION)
+	./bin/aws-elastic-gcs-ctl status --region $(REGION) --deployment $(DEPLOYMENT)
 
 clean:
 	rm -rf cdk.out/
@@ -75,5 +75,6 @@ clean:
 
 # === Defaults ===
 REGION ?= us-east-1
+DEPLOYMENT ?= default
 TIER ?= warm
 ITERATIONS ?=

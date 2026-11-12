@@ -21,6 +21,7 @@ import (
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // wakeRequest matches the WakeRequest struct in the waker Lambda.
@@ -45,7 +46,6 @@ type wakeRequest struct {
 //
 //	INACTIVE tasks exist → endpoint offline → invoke waker with scale_out=true
 func handler(ctx context.Context, _ interface{}) error {
-	region := os.Getenv("REGION")
 	secretsPrefix := os.Getenv("SECRETS_PREFIX")
 	endpointIDParam := os.Getenv("ENDPOINT_ID_PARAM")
 	metricNamespace := os.Getenv("METRIC_NAMESPACE")
@@ -130,7 +130,10 @@ func handler(ctx context.Context, _ interface{}) error {
 
 	// Publish all three metrics in a single PutMetricData call.
 	cwClient := cloudwatch.NewFromConfig(cfg)
-	dim := []cwtypes.Dimension{{Name: aws.String("Region"), Value: aws.String(region)}}
+	dim := []cwtypes.Dimension{
+		{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+		{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
+	}
 	_, err = cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
 		Namespace: aws.String(metricNamespace),
 		MetricData: []cwtypes.MetricDatum{
@@ -242,8 +245,16 @@ func fetchEndpointManagerStats(ctx context.Context, bearerToken, endpointID, sta
 	return stats, nil
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-demand-monitor", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }

@@ -360,7 +360,8 @@ func TestCostModel(t *testing.T) {
 		Period:     aws.Int32(3600),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(e.region)},
+			{Name: aws.String("Region"), Value: aws.String(e.dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(e.dep.Name)},
 		},
 	})
 	if err != nil || len(out.Datapoints) == 0 {
@@ -383,7 +384,8 @@ func TestCostModel(t *testing.T) {
 		Period:     aws.Int32(3600),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticSum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(e.region)},
+			{Name: aws.String("Region"), Value: aws.String(e.dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(e.dep.Name)},
 		},
 	})
 	var queuedEvents int

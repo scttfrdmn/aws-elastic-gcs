@@ -23,6 +23,8 @@ import (
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
+
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // Well-known IDs used across all integration tests.
@@ -36,6 +38,7 @@ const (
 // testEnv holds shared AWS and Globus clients for integration tests.
 type testEnv struct {
 	region           string
+	dep              names.Deployment
 	asgName          string
 	secretsPrefix    string
 	controlNodeParam string
@@ -48,12 +51,12 @@ type testEnv struct {
 	gcsCLIClientSecret string
 	gcsEndpointID      string
 
-	cfg            aws.Config
-	asgClient      *autoscaling.Client
-	ssmClient      *ssm.Client
-	cwClient       *cloudwatch.Client
-	scaleOutAlarm  string // CloudWatch alarm name driving scale-out
-	scaleInAlarm   string // CloudWatch alarm name driving scale-in
+	cfg           aws.Config
+	asgClient     *autoscaling.Client
+	ssmClient     *ssm.Client
+	cwClient      *cloudwatch.Client
+	scaleOutAlarm string // CloudWatch alarm name driving scale-out
+	scaleInAlarm  string // CloudWatch alarm name driving scale-in
 
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
@@ -69,7 +72,8 @@ func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string
 
 // newTestEnv initialises shared clients from environment variables.
 // Required env vars: GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
-// Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_ASG_NAME.
+// Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_DEPLOYMENT
+// (default "default"), ELASTIC_GCS_ASG_NAME.
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
@@ -80,10 +84,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	clientID := requireEnv(t, "GLOBUS_CLIENT_ID")
 	clientSecret := requireEnv(t, "GLOBUS_CLIENT_SECRET")
 
-	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", fmt.Sprintf("elastic-gcs-dtn-%s", region))
-	secretsPrefix := getEnvOrDefault("ELASTIC_GCS_SECRETS_PREFIX", fmt.Sprintf("elastic-gcs/%s", region))
-	controlNodeParam := fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)
-	endpointIDParam := fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)
+	dep, err := names.New(region, os.Getenv("ELASTIC_GCS_DEPLOYMENT"))
+	if err != nil {
+		t.Fatalf("ELASTIC_GCS_REGION/ELASTIC_GCS_DEPLOYMENT: %v", err)
+	}
+	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", dep.Resource("dtn"))
+	secretsPrefix := getEnvOrDefault("ELASTIC_GCS_SECRETS_PREFIX", dep.SecretsPrefix())
+	controlNodeParam := dep.Param(names.ParamControlNodeID)
+	endpointIDParam := dep.Param(names.ParamEndpointID)
 
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion(region))
@@ -124,6 +132,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	return &testEnv{
 		region:             region,
+		dep:                dep,
 		asgName:            asgName,
 		secretsPrefix:      secretsPrefix,
 		controlNodeParam:   controlNodeParam,
@@ -131,13 +140,13 @@ func newTestEnv(t *testing.T) *testEnv {
 		gcsCLIClientID:     clientID,
 		gcsCLIClientSecret: clientSecret,
 		gcsEndpointID:      gcsEndpointID,
-		cfg:           cfg,
-		asgClient:     autoscaling.NewFromConfig(cfg),
-		ssmClient:     ssmClient,
-		cwClient:      cloudwatch.NewFromConfig(cfg),
-		scaleOutAlarm:  fmt.Sprintf("elastic-gcs-scaleout-%s", region),
-		scaleInAlarm:   fmt.Sprintf("elastic-gcs-scalein-%s", region),
-		transferClient: tc,
+		cfg:                cfg,
+		asgClient:          autoscaling.NewFromConfig(cfg),
+		ssmClient:          ssmClient,
+		cwClient:           cloudwatch.NewFromConfig(cfg),
+		scaleOutAlarm:      dep.Resource("scaleout"),
+		scaleInAlarm:       dep.Resource("scalein"),
+		transferClient:     tc,
 	}
 }
 
@@ -647,7 +656,8 @@ func (e *testEnv) waitForCleanScaleInMetric(ctx context.Context, t *testing.T, t
 			Period:     aws.Int32(300),
 			Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 			Dimensions: []cwtypes.Dimension{
-				{Name: aws.String("Region"), Value: aws.String(e.region)},
+				{Name: aws.String("Region"), Value: aws.String(e.dep.Region)},
+				{Name: aws.String("Deployment"), Value: aws.String(e.dep.Name)},
 			},
 		})
 		if err != nil {

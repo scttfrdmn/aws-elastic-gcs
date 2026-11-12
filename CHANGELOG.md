@@ -8,12 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Multiple deployments per region** (#57). Each `regions.yaml` entry has a
+  `deployment` name (default `default`), and `internal/names` derives every
+  stack, resource, secret, SSM path and alarm name from `(region, deployment)`.
+  Custom metrics carry a `Deployment` dimension, IAM is scoped to the
+  deployment's own secrets and parameters, and everything is tagged
+  `elastic-gcs:deployment`. The CLI takes `--deployment`, the Makefile
+  `DEPLOYMENT=`, and the tests `ELASTIC_GCS_DEPLOYMENT`. Buckets can be limited
+  to specific deployments with `deployments:`.
 - `docs/instance-sizing.md` and `scripts/instance_sizing.py`: DTN and control node
   sizing from live EC2 specs and prices, ranked by sustained internet-gateway
   throughput per dollar. Compares Intel, AMD and Graviton, and prices horizontal
   N-node fleets (`--fleet-gbps`) as well as single nodes.
 
 ### Changed
+- **Breaking (naming):** names now include the deployment, e.g.
+  `elastic-gcs/<region>/<deployment>/globus-client-id` and
+  `ElasticGCS-Control-<region>-<deployment>`. Existing deployments need fresh
+  secrets/parameters under the new paths.
+- Enable `@aws-cdk/aws-ec2:uniqueImdsv2TemplateName`. Without it, every control
+  stack creates a launch template named `ControlNodeLaunchTemplate`, which
+  collides with a second deployment in the region.
+- The Globus endpoint display name includes the deployment ID.
 - **Default DTN type is now `c8in.2xlarge`** (12.5 Gbps sustained to the internet,
   $0.544/hr in us-east-1). `m6i.xlarge` is previous-generation and sustains
   1.56 Gbps; its internet traffic is capped at 5 Gbps even while bursting.

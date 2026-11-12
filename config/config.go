@@ -8,7 +8,11 @@ import (
 
 // RegionConfig defines per-region deployment settings
 type RegionConfig struct {
-	Name            string `yaml:"name"`
+	Name string `yaml:"name"`
+	// Deployment distinguishes independent endpoints in the same region
+	// (1-12 lowercase letters/digits; default "default"). Every resource name,
+	// secret, SSM path and metric dimension includes it; see internal/names.
+	Deployment      string `yaml:"deployment"`
 	ControlInstance string `yaml:"control_instance"`
 	DTNInstance     string `yaml:"dtn_instance"`
 	WarmPoolSize    int    `yaml:"warm_pool_size"`
@@ -57,6 +61,9 @@ type OpenDataBucket struct {
 	// Domain restricts which Globus identity provider is accepted by the storage gateway.
 	// Defaults to "globusid.org" if empty.
 	Domain string `yaml:"domain" json:"domain,omitempty"`
+	// Deployments limits the bucket to the named deployments in its region.
+	// Empty means every deployment in the region.
+	Deployments []string `yaml:"deployments" json:"-"`
 }
 
 // GatewayName returns the display name to use for the storage gateway.
@@ -83,12 +90,23 @@ type OpenDataBucketsConfig struct {
 	Buckets []OpenDataBucket `yaml:"buckets"`
 }
 
-// BucketsForRegion returns buckets available in a specific region
-func (c *OpenDataBucketsConfig) BucketsForRegion(region string) []OpenDataBucket {
+// BucketsFor returns the buckets for one deployment: those in its region whose
+// Deployments list is empty or includes it.
+func (c *OpenDataBucketsConfig) BucketsFor(region, deployment string) []OpenDataBucket {
 	var result []OpenDataBucket
 	for _, b := range c.Buckets {
-		if b.Region == region {
+		if b.Region != region {
+			continue
+		}
+		if len(b.Deployments) == 0 {
 			result = append(result, b)
+			continue
+		}
+		for _, d := range b.Deployments {
+			if d == deployment {
+				result = append(result, b)
+				break
+			}
 		}
 	}
 	return result

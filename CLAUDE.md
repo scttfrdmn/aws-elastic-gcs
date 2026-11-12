@@ -293,15 +293,15 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 ## Environment Variables and Secrets
 
 ### Secrets Manager Keys
-- `elastic-gcs/<region>/deployment-key` — The deployment-key.json
-- `elastic-gcs/<region>/node-slot-<N>` — Pre-created node identity JSON files
-- `elastic-gcs/<region>/globus-client-id` — Globus client ID
-- `elastic-gcs/<region>/globus-client-secret` — Globus client secret
+- `elastic-gcs/<region>/<deployment>/deployment-key` — The deployment-key.json
+- `elastic-gcs/<region>/<deployment>/node-slot-<N>` — Pre-created node identity JSON files
+- `elastic-gcs/<region>/<deployment>/globus-client-id` — Globus client ID
+- `elastic-gcs/<region>/<deployment>/globus-client-secret` — Globus client secret
 
 ### SSM Parameters
-- `/elastic-gcs/<region>/endpoint-id` — Globus endpoint UUID
-- `/elastic-gcs/<region>/control-node-id` — Control node EC2 instance ID
-- `/elastic-gcs/<region>/dtn-ami-id` — Current DTN AMI ID
+- `/elastic-gcs/<region>/<deployment>/endpoint-id` — Globus endpoint UUID
+- `/elastic-gcs/<region>/<deployment>/control-node-id` — Control node EC2 instance ID
+- `/elastic-gcs/<region>/<deployment>/dtn-ami-id` — Current DTN AMI ID
 
 ### CDK Context / Config
 - Target regions

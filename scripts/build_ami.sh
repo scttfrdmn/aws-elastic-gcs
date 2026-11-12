@@ -14,15 +14,20 @@ set -euo pipefail
 #   - jq, awscli
 #
 # Usage:
-#   AWS_PROFILE=aws ./scripts/build_ami.sh [region]
-#   AWS_PROFILE=aws ./scripts/build_ami.sh us-east-1
-#   GCS_VERSION=5.4.101 ./scripts/build_ami.sh us-east-1
+#   AWS_PROFILE=aws ./scripts/build_ami.sh [region] [deployment]
+#   AWS_PROFILE=aws ./scripts/build_ami.sh us-west-2 src
+#   GCS_VERSION=5.4.101 ./scripts/build_ami.sh us-west-2 src
+#
+# The builder borrows the networking of <deployment>'s control node. The AMI
+# itself is shared by every deployment in the region running that GCS version.
 #
 # GCS_VERSION defaults to the globus:gcsVersion value in cdk.json, which the
 # DTN pool stack uses to look up this AMI by name.
 # =============================================================================
 
 REGION="${1:-us-east-1}"
+DEPLOYMENT="${2:-default}"
+PARAM_PREFIX="/elastic-gcs/${REGION}/${DEPLOYMENT}"
 AWS_PROFILE="${AWS_PROFILE:-default}"
 GCS_VERSION="${GCS_VERSION:-$(jq -r '.context["globus:gcsVersion"]' "$(dirname "$0")/../cdk.json")}"
 if ! [[ "$GCS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -53,7 +58,7 @@ echo ">>> Base AMI: $BASE_AMI"
 
 # --- Get networking from control node (reuse same VPC/subnet/sg) ---
 CONTROL_INSTANCE=$(aws ssm get-parameter \
-    --name "/elastic-gcs/${REGION}/control-node-id" \
+    --name "${PARAM_PREFIX}/control-node-id" \
     --query Parameter.Value --output text \
     --region "$REGION" --profile "$AWS_PROFILE")
 
@@ -284,12 +289,12 @@ echo ">>> AMI ID: $AMI_ID (building — this takes 2-5 minutes)"
 
 # --- Store AMI ID in SSM ---
 aws ssm put-parameter \
-    --name "/elastic-gcs/${REGION}/dtn-ami-id" \
+    --name "${PARAM_PREFIX}/dtn-ami-id" \
     --type String \
     --value "$AMI_ID" \
     --overwrite \
     --region "$REGION" --profile "$AWS_PROFILE"
-echo ">>> Stored in SSM: /elastic-gcs/${REGION}/dtn-ami-id"
+echo ">>> Stored in SSM: ${PARAM_PREFIX}/dtn-ami-id"
 
 # --- Wait for AMI to be available ---
 echo ">>> Waiting for AMI to become available..."
@@ -310,9 +315,9 @@ echo "=== DTN AMI Build Complete ==="
 echo "AMI ID:      $AMI_ID"
 echo "AMI Name:    $AMI_NAME"
 echo "Region:      $REGION"
-echo "SSM:         /elastic-gcs/${REGION}/dtn-ami-id"
+echo "SSM:         ${PARAM_PREFIX}/dtn-ami-id"
 echo ""
 echo "Next: update the DTN launch template to use this AMI, then deploy:"
 echo "  CDK_DEFAULT_ACCOUNT=\$(aws sts get-caller-identity --query Account --output text)"
-echo "  AWS_PROFILE=$AWS_PROFILE cdk deploy ElasticGCS-DTNPool-$REGION"
+echo "  AWS_PROFILE=$AWS_PROFILE cdk deploy ElasticGCS-DTNPool-$REGION-$DEPLOYMENT"
 echo "=============================="

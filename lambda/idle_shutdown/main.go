@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 func handler(ctx context.Context) error {
@@ -136,7 +137,8 @@ func handler(ctx context.Context) error {
 		Period:     aws.Int32(int32(idleMinutes * 60)),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(region)},
+			{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 		},
 	})
 	if err != nil {
@@ -160,8 +162,16 @@ func handler(ctx context.Context) error {
 	return nil
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-idle-shutdown", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }

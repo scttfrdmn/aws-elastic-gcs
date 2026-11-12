@@ -15,8 +15,11 @@ set -euo pipefail
 # ASG launch template to work for all DTN slots without per-instance config.
 #
 # Required environment variables (injected by systemd unit):
-#   AWS_REGION      — AWS region (e.g. us-east-1)
-#   SECRETS_PREFIX  — Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
+#   AWS_REGION      — AWS region (e.g. us-west-2)
+#   DEPLOYMENT      — deployment name within the region (e.g. src)
+#   SECRETS_PREFIX  — Secrets Manager prefix (e.g. elastic-gcs/us-west-2/src)
+#   PARAM_PREFIX    — SSM Parameter Store prefix (e.g. /elastic-gcs/us-west-2/src)
+#   TOTAL_SLOTS     — number of pre-created node identity slots
 # =============================================================================
 
 LOG="/var/log/elastic-gcs-dtn.log"
@@ -59,7 +62,7 @@ echo "Instance ID: $INSTANCE_ID"
 # Slot number is saved to /var/lib/elastic-gcs/slot for the shutdown script.
 echo ">>> Claiming DTN slot via SSM Parameter Store..."
 
-SLOT_LOCK_PREFIX="/elastic-gcs/${AWS_REGION}/slot-lock"
+SLOT_LOCK_PREFIX="${PARAM_PREFIX}/slot-lock"
 DTN_SLOT_NUMBER=""
 
 # First: check if this instance already owns a slot (handles service restart)
@@ -231,7 +234,7 @@ aws cloudwatch put-metric-data \
     --metric-name "$METRIC_NAME" \
     --value "$METRIC_VALUE" \
     --unit Milliseconds \
-    --dimensions "Region=$AWS_REGION,Slot=$DTN_SLOT_NUMBER" \
+    --dimensions "Region=$AWS_REGION,Deployment=$DEPLOYMENT,Slot=$DTN_SLOT_NUMBER" \
     --region "$AWS_REGION" 2>/dev/null \
     || echo "WARNING: Failed to publish CloudWatch metric"
 

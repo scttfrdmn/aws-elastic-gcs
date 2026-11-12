@@ -17,6 +17,7 @@
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws"],
+    "@aws-cdk/aws-ec2:uniqueImdsv2TemplateName": true,
 
     "globus:subscriptionId": "1e8d2d5b-d29f-46a1-b152-059a7c3c9971",
     "globus:endpointOwner": "scofri@globusid.org",
