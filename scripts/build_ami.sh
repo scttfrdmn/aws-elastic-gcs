@@ -287,21 +287,27 @@ AMI_ID=$(aws ec2 create-image \
 
 echo ">>> AMI ID: $AMI_ID (building — this takes 2-5 minutes)"
 
-# --- Store AMI ID in SSM ---
-aws ssm put-parameter \
-    --name "${PARAM_PREFIX}/dtn-ami-id" \
-    --type String \
-    --value "$AMI_ID" \
-    --overwrite \
-    --region "$REGION" --profile "$AWS_PROFILE"
-echo ">>> Stored in SSM: ${PARAM_PREFIX}/dtn-ami-id"
-
 # --- Wait for AMI to be available ---
 echo ">>> Waiting for AMI to become available..."
 aws ec2 wait image-available \
     --image-ids "$AMI_ID" \
     --region "$REGION" --profile "$AWS_PROFILE"
 echo ">>> AMI is available."
+
+# --- Publish the AMI for this GCS version ---
+# Region-wide and version-keyed: every deployment in the region pinned to this
+# GCS version resolves its DTN AMI from here at deploy time (stacks/dtn_pool.go).
+# Written only after the AMI is available, so a deploy never picks up a pending
+# image.
+AMI_PARAM="/elastic-gcs/${REGION}/dtn-ami/gcs-${GCS_VERSION}"
+aws ssm put-parameter \
+    --name "$AMI_PARAM" \
+    --type String \
+    --data-type aws:ec2:image \
+    --value "$AMI_ID" \
+    --overwrite \
+    --region "$REGION" --profile "$AWS_PROFILE" > /dev/null
+echo ">>> Stored in SSM: $AMI_PARAM"
 
 # --- Terminate builder instance ---
 echo ">>> Terminating builder instance..."
@@ -315,7 +321,7 @@ echo "=== DTN AMI Build Complete ==="
 echo "AMI ID:      $AMI_ID"
 echo "AMI Name:    $AMI_NAME"
 echo "Region:      $REGION"
-echo "SSM:         ${PARAM_PREFIX}/dtn-ami-id"
+echo "SSM:         $AMI_PARAM"
 echo ""
 echo "Next: update the DTN launch template to use this AMI, then deploy:"
 echo "  CDK_DEFAULT_ACCOUNT=\$(aws sts get-caller-identity --query Account --output text)"

@@ -79,7 +79,7 @@ The automation client authenticates Lambda functions and CLI commands to the GCS
 |------|-------------|
 | `/elastic-gcs/{region}/{deployment}/control-node-id` | EC2 instance ID of the control node. Written by control node UserData. |
 | `/elastic-gcs/{region}/{deployment}/endpoint-id` | Globus endpoint UUID. Written by control node UserData after `endpoint setup`. |
-| `/elastic-gcs/{region}/{deployment}/dtn-ami-id` | AMI ID to use for DTN instances. Updated by `build-ami`. |
+| `/elastic-gcs/{region}/dtn-ami/gcs-{version}` | DTN AMI for a GCS version, shared by every deployment in the region. Written by `build-ami`; resolved by the DTN pool stack at deploy time. |
 | `/elastic-gcs/{region}/{deployment}/slot-lock/{N}` | Slot lock for slot N. Value = EC2 instance ID of the current holder. Written atomically by DTN boot script; deleted by lifecycle Lambda on termination. |
 
 ## Lambda Environment Variables

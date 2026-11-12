@@ -352,16 +352,13 @@ WantedBy=elastic-gcs-dtn.service
 	// Uses the same security group as the control node (GCS requires same ports).
 	// -------------------------------------------------------------------------
 
-	// Use the pre-built DTN AMI built by scripts/build_ami.sh for this exact GCS
-	// version. AMIs are named "elastic-gcs-dtn-gcs<version>-YYYYMMDD-HHMMSS" and
-	// owned by this account; MachineImage_Lookup picks the latest match at synth
-	// time and fails synth if none exists, so run `make ami` after bumping
-	// globus:gcsVersion. Including the version in the filter also invalidates the
-	// cdk.context.json lookup cache on every version bump.
-	dtnAMI := awsec2.MachineImage_Lookup(&awsec2.LookupMachineImageProps{
-		Name:   jsii.String(fmt.Sprintf("elastic-gcs-dtn-gcs%s-*", props.GCSVersion)),
-		Owners: &[]*string{awscdk.Stack_Of(stack).Account()},
-	})
+	// Use the DTN AMI that scripts/build_ami.sh built for this exact GCS version.
+	// It is resolved from a version-keyed SSM parameter at deploy time, not
+	// looked up at synth time, so the app synthesizes before any AMI exists (the
+	// control stack must be deployed first, because the AMI builder borrows its
+	// networking). Deploying this stack fails until `make ami` has written the
+	// parameter, so a DTN can never run a different GCS version than the pin.
+	dtnAMI := awsec2.MachineImage_FromSsmParameter(jsii.String(dep.AMIParam(props.GCSVersion)), nil)
 
 	ltProps := &awsec2.LaunchTemplateProps{
 		LaunchTemplateName: jsii.String(dep.Resource("dtn")),

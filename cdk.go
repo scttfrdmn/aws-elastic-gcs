@@ -79,11 +79,20 @@ func main() {
 		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
 			fmt.Sscanf(h, "%d", &cacheHours)
 		}
-		maxDTNs := 0
-		if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
-			fmt.Sscanf(m, "%d", &maxDTNs)
+		// Resolve pool sizes once so both stacks agree: the control node
+		// pre-creates maxDTNs+warmPoolSize node identities and DTNs claim slots
+		// 1..maxDTNs+warmPoolSize. max_dtns in regions.yaml (per deployment)
+		// wins over the elastic-gcs:maxDTNs context default.
+		if region.WarmPoolSize <= 0 {
+			region.WarmPoolSize = 2
 		}
-		if maxDTNs == 0 {
+		maxDTNs := region.MaxDTNs
+		if maxDTNs <= 0 {
+			if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
+				fmt.Sscanf(m, "%d", &maxDTNs)
+			}
+		}
+		if maxDTNs <= 0 {
 			maxDTNs = region.WarmPoolSize + 1
 		}
 		// throughputMBps: MB/s above which a second (or third) DTN is triggered.

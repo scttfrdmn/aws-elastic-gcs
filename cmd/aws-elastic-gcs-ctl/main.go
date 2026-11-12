@@ -1934,7 +1934,8 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 	}
 
 	// ── DTN AMI ───────────────────────────────────────────────────────────────
-	inv.amiID, _ = getSSMParam(ctx, ssmClient, dep.Param(names.ParamDTNAMIID))
+	// The DTN AMI is shared by every deployment in the region on the same GCS
+	// version (names.AMIParam), so deprovisioning one deployment leaves it.
 	if inv.amiID != "" {
 		imgOut, imerr := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 			ImageIds: []string{inv.amiID},
