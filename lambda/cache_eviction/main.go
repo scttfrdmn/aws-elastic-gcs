@@ -18,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 )
 
@@ -343,9 +344,16 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 }
 
 // deleteGCSNode deletes a GCS node registration via `node delete` run on the control node.
+// nodeID comes from the elastic-gcs:gcs-node-id EC2 tag (writable by DTNs) or
+// from GCS CLI output, and is interpolated into a root shell command, so it
+// must be validated as a UUID first.
 func deleteGCSNode(ctx context.Context, ssmClient *ssm.Client,
 	controlNodeID, secretsPrefix, region, nodeID string) error {
 
+	if err := gcsid.Validate(nodeID); err != nil {
+		logger.Error("refusing to delete GCS node with invalid ID", "error", err.Error())
+		return err
+	}
 	out, err := runGCSCLI(ctx, ssmClient, controlNodeID, secretsPrefix, region,
 		fmt.Sprintf("globus-connect-server node delete %s 2>&1 || true", nodeID))
 	if err != nil {

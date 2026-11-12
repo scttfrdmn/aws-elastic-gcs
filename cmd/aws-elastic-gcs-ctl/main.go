@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -39,6 +41,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 )
 
 const toolVersion = "v0.6.0"
@@ -58,7 +61,17 @@ var (
 		Use:   "aws-elastic-gcs-ctl",
 		Short: "Elastic GCS operator CLI",
 		Long:  "aws-elastic-gcs-ctl — manage Elastic Globus Connect Server deployments on AWS",
+		// --region is interpolated into resource names and into shell scripts
+		// run as root on the control node, so reject anything that isn't a
+		// region name.
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			if !regionRe.MatchString(regionFlag) {
+				return fmt.Errorf("invalid --region %q", regionFlag)
+			}
+			return nil
+		},
 	}
+	regionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
 )
 
 func init() {
@@ -739,6 +752,9 @@ func runNodesDelete(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if err := gcsid.Validate(fullID); err != nil {
+		return err
+	}
 	out, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
 		fmt.Sprintf("globus-connect-server node delete %s 2>&1", fullID))
 	if err != nil {
@@ -1326,8 +1342,9 @@ func runCollectionsSetup(configFile string, dryRun bool) error {
 		return nil
 	}
 
-	// Marshal bucket list as JSON for embedding in the SSM shell script.
-	// Single-quoting is safe here — JSON contains no single quotes.
+	// Marshal bucket list as JSON for embedding in the SSM shell script. It is
+	// base64-encoded because bucket and collection names can contain quotes
+	// and the script runs as root on the control node.
 	bucketsJSON, err := json.Marshal(buckets)
 	if err != nil {
 		return fmt.Errorf("marshal buckets: %w", err)
@@ -1347,7 +1364,7 @@ func runCollectionsSetup(configFile string, dryRun bool) error {
 	// Build a script that processes all buckets in one SSM invocation.
 	// It outputs one JSON line per bucket with the result.
 	script := fmt.Sprintf(`
-BUCKETS_JSON='%s'
+BUCKETS_JSON=$(echo '%s' | base64 -d)
 REGION='%s'
 
 EXISTING_GWS=$(globus-connect-server storage-gateway list -F json 2>/dev/null || echo '[]')
@@ -1395,7 +1412,7 @@ echo "$BUCKETS_JSON" | jq -c '.[]' | while IFS= read -r entry; do
 
     echo "{\"name\":\"$NAME\",\"gateway_id\":\"$GW_ID\",\"collection_id\":\"$COL_ID\",\"gateway_created\":$GW_CREATED,\"collection_created\":$COL_CREATED}"
 done
-`, string(bucketsJSON), regionFlag)
+`, base64.StdEncoding.EncodeToString(bucketsJSON), regionFlag)
 
 	output, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID, script)
 	if err != nil {
@@ -2164,6 +2181,11 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 	} else {
 		anyErr := false
 		for _, nodeID := range inv.gcsNodeIDs {
+			if err := gcsid.Validate(nodeID); err != nil {
+				printErr(err)
+				anyErr = true
+				continue
+			}
 			err := gcsDelete(
 				func() error { return gcsClient.DeleteNode(ctx, nodeID) },
 				fmt.Sprintf("globus-connect-server node delete %s 2>&1 || true", nodeID),
@@ -2187,6 +2209,11 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 	} else {
 		anyErr := false
 		for _, colID := range inv.collectionIDs {
+			if err := gcsid.Validate(colID); err != nil {
+				printErr(err)
+				anyErr = true
+				continue
+			}
 			err := gcsDelete(
 				func() error { return gcsClient.DeleteCollection(ctx, colID) },
 				fmt.Sprintf("globus-connect-server collection delete %s 2>&1 || true", colID),
@@ -2210,6 +2237,11 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 	} else {
 		anyErr := false
 		for _, gwID := range inv.gatewayIDs {
+			if err := gcsid.Validate(gwID); err != nil {
+				printErr(err)
+				anyErr = true
+				continue
+			}
 			err := gcsDelete(
 				func() error { return gcsClient.DeleteStorageGateway(ctx, gwID) },
 				fmt.Sprintf("globus-connect-server storage-gateway delete %s 2>&1 || true", gwID),
