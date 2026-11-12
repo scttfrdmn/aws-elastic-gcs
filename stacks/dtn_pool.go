@@ -48,7 +48,7 @@ type DTNPoolStackProps struct {
 	MinUptimeMinutes    int // default 30 when IdleShutdownMinutes > 0
 
 	// GCSVersion is the exact globus-connect-server54 package version (e.g.
-	// "5.4.99"). Selects the matching DTN AMI and pins the UserData fallback
+	// "5.4.101"). Selects the matching DTN AMI and pins the UserData fallback
 	// install so DTNs always match the control node.
 	GCSVersion string
 }

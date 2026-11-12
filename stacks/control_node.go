@@ -35,7 +35,7 @@ type ControlNodeStackProps struct {
 	MaxDTNs int
 
 	// GCSVersion is the exact globus-connect-server54 package version to install
-	// (e.g. "5.4.99"). Must match the DTN AMI built by scripts/build_ami.sh.
+	// (e.g. "5.4.101"). Must match the DTN AMI built by scripts/build_ami.sh.
 	GCSVersion string
 }
 

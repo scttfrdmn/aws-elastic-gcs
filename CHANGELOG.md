@@ -8,13 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **GCS pinned to 5.4.99** via a single `globus:gcsVersion` CDK context key. The
+- **GCS pinned to 5.4.101** via a single `globus:gcsVersion` CDK context key. The
   control node, DTN UserData fallback, and `scripts/build_ami.sh` all install that
-  exact version. GCS 5.4.98 and lower lose support on April 22, 2027.
+  exact version. GCS 5.4.98 and lower lose support on April 22, 2027; 5.4.101
+  (2026-11-04) includes the 5.4.99 S3 end-of-transfer fixes and fixes S3 listing
+  timestamps.
 - DTN AMIs are now named `elastic-gcs-dtn-gcs<version>-<timestamp>`, and the DTN
   pool looks up the AMI for the pinned version only. Run `make ami` after bumping
   the version. The old Rocky Linux fallback lookup could never run and is removed.
-- Dependencies: aws-cdk-go v2.177 → v2.274, jsii-runtime-go v1.142, aws-sdk-go-v2
+- Dependencies: aws-cdk-go v2.177 → v2.276, jsii-runtime-go v1.142, aws-sdk-go-v2
   v1.47, aws-lambda-go v1.55, Go 1.26. CDK CLI ≥ 2.1145 is now required.
 - `config/regions.example.yaml` now uses `t3a.large` for the control node.
   `t4g.medium` is ARM (incompatible with the x86-64 Rocky AMI) and has only 4 GB RAM.

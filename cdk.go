@@ -42,7 +42,7 @@ func main() {
 	// (scripts/build_ami.sh) all key off this one value.
 	gcsVersion := ctxString(app, "globus:gcsVersion")
 	if gcsVersion == "" {
-		gcsVersion = "5.4.99"
+		gcsVersion = "5.4.101"
 	}
 
 	// CDK_DEFAULT_ACCOUNT is injected by the CDK CLI when running cdk commands.
