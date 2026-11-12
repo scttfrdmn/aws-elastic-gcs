@@ -69,17 +69,17 @@ cd aws-elastic-gcs
 cp config/regions.example.yaml config/regions.yaml
 # Edit config/regions.yaml — set your region, instance type, pool sizes
 
-# 3. Store Globus credentials
+# 3. Store Globus credentials (names are elastic-gcs/<region>/<deployment>/...)
 aws secretsmanager create-secret \
-  --name elastic-gcs/us-east-1/globus-client-id \
+  --name elastic-gcs/us-east-1/default/globus-client-id \
   --secret-string "<your-automation-client-id>"
 aws secretsmanager create-secret \
-  --name elastic-gcs/us-east-1/globus-client-secret \
+  --name elastic-gcs/us-east-1/default/globus-client-secret \
   --secret-string "<your-automation-client-secret>"
 
 # 4. Deploy
-make deploy-control REGION=us-east-1  # ~10 min (GCS endpoint setup)
-make deploy-dtn REGION=us-east-1      # ~3 min (ASG, Lambdas, dashboard)
+make deploy-control REGION=us-east-1 DEPLOYMENT=default  # ~10 min (GCS endpoint setup)
+make deploy-dtn REGION=us-east-1 DEPLOYMENT=default      # ~3 min (ASG, Lambdas, dashboard)
 
 # 5. Validate
 make build

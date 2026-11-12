@@ -85,7 +85,7 @@ AWS Auto Scaling warm pools keep `warmPoolSize` instances stopped (paying EBS + 
 
 ### Node Slot Identity
 
-Each DTN slot has a pre-created GCS node identity (UUID + encryption key) stored in Secrets Manager at `elastic-gcs/{region}/node-slot-{N}`. This decouples GCS registration from EC2 instance lifecycle:
+Each DTN slot has a pre-created GCS node identity (UUID + encryption key) stored in Secrets Manager at `elastic-gcs/{region}/{deployment}/node-slot-{N}`. This decouples GCS registration from EC2 instance lifecycle:
 
 - AMIs are generic — no baked-in identity
 - Failed instances are replaced without creating orphaned GCS nodes
@@ -123,7 +123,7 @@ ElasticGCS/ActiveTransfers (CloudWatch metric)
 
 Originally DTN slots were assigned via Elastic IPs (one EIP per slot, discovered by tag). This cost ~$3.60/slot/month at idle and required EIP quota.
 
-Current design: each DTN claims a slot by calling `aws ssm put-parameter --name /elastic-gcs/{region}/slot-lock/{N} --value {instance-id}` without `--overwrite`. SSM rejects duplicate writes atomically. Slot locks are held for the instance lifetime and released by the lifecycle Lambda on termination.
+Current design: each DTN claims a slot by calling `aws ssm put-parameter --name /elastic-gcs/{region}/{deployment}/slot-lock/{N} --value {instance-id}` without `--overwrite`. SSM rejects duplicate writes atomically. Slot locks are held for the instance lifetime and released by the lifecycle Lambda on termination.
 
 Node IP is fetched from IMDS at boot; `node update --ip-address` handles IP registration dynamically.
 

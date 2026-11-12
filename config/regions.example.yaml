@@ -1,8 +1,13 @@
 # Regions to deploy Elastic GCS endpoints
 # Start with us-east-1 for Phase 1, expand later
 
+# Each entry is one deployment (an independent Globus endpoint). Several may
+# share a region if they have different `deployment` names (1-12 lowercase
+# letters/digits; default "default"). See docs/configuration.md.
+
 regions:
   - name: us-east-1
+    deployment: default
     control_instance: t3a.large       # 2 vCPU, 8GB, x86-64 — GCS minimum (no aarch64 GCS packages)
     dtn_instance: c8in.2xlarge         # 8 vCPU, 16GB, 12.5 Gbps sustained to the internet (docs/instance-sizing.md)
     # throughput_scaleout_mbps: 1100   # default: ~70% of what one DTN of dtn_instance sustains
@@ -21,3 +26,16 @@ regions:
   #   dtn_instance: c8in.2xlarge
   #   warm_pool_size: 1
   #   key_pair_name: ""
+
+  # Two deployments in one region, e.g. a source and destination for
+  # benchmarking (test/benchmark, issue #58):
+  # - name: us-west-2
+  #   deployment: src
+  #   control_instance: t3a.large
+  #   dtn_instance: c8in.2xlarge
+  #   warm_pool_size: 4
+  # - name: us-west-2
+  #   deployment: dst
+  #   control_instance: t3a.large
+  #   dtn_instance: c8in.2xlarge
+  #   warm_pool_size: 4

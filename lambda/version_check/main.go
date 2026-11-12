@@ -28,6 +28,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // versionRe extracts the semver string from globus-connect-server --version output.
@@ -134,7 +135,8 @@ func handler(ctx context.Context, _ interface{}) error {
 				Value:      aws.Float64(float64(driftCount)),
 				Unit:       cwtypes.StandardUnitCount,
 				Dimensions: []cwtypes.Dimension{
-					{Name: aws.String("Region"), Value: aws.String(region)},
+					{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+					{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 				},
 			},
 		},
@@ -195,8 +197,16 @@ func getGCSVersion(ctx context.Context, ssmClient *ssm.Client, instanceID string
 	return "", fmt.Errorf("timed out waiting for version command on %s", instanceID)
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-version-check", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }

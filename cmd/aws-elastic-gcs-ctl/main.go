@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +41,7 @@ import (
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 const toolVersion = "v0.6.0"
@@ -55,23 +55,27 @@ const (
 )
 
 var (
-	regionFlag  string
+	regionFlag     string
+	deploymentFlag string
+	// dep is resolved from --region and --deployment before any command runs.
+	dep         names.Deployment
 	profileFlag string
 	rootCmd     = &cobra.Command{
 		Use:   "aws-elastic-gcs-ctl",
 		Short: "Elastic GCS operator CLI",
 		Long:  "aws-elastic-gcs-ctl — manage Elastic Globus Connect Server deployments on AWS",
-		// --region is interpolated into resource names and into shell scripts
-		// run as root on the control node, so reject anything that isn't a
-		// region name.
+		// --region and --deployment are interpolated into resource names and
+		// into shell scripts run as root on the control node; names.New
+		// validates both.
 		PersistentPreRunE: func(*cobra.Command, []string) error {
-			if !regionRe.MatchString(regionFlag) {
-				return fmt.Errorf("invalid --region %q", regionFlag)
+			d, err := names.New(regionFlag, deploymentFlag)
+			if err != nil {
+				return err
 			}
+			dep = d
 			return nil
 		},
 	}
-	regionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
 )
 
 func init() {
@@ -85,6 +89,8 @@ func init() {
 	}
 
 	rootCmd.PersistentFlags().StringVar(&regionFlag, "region", defaultRegion, "AWS region")
+	rootCmd.PersistentFlags().StringVar(&deploymentFlag, "deployment", envOr("ELASTIC_GCS_DEPLOYMENT", names.DefaultDeployment),
+		"deployment name within the region (regions.yaml `deployment`)")
 	rootCmd.PersistentFlags().StringVar(&profileFlag, "profile", defaultProfile, "AWS profile")
 
 	rootCmd.AddCommand(statusCmd())
@@ -127,14 +133,17 @@ func getSSMParam(ctx context.Context, ssmClient *ssm.Client, name string) (strin
 	return aws.ToString(out.Parameter.Value), nil
 }
 
-func secretsPrefix() string { return fmt.Sprintf("elastic-gcs/%s", regionFlag) }
-func asgName() string        { return fmt.Sprintf("elastic-gcs-dtn-%s", regionFlag) }
-func controlNodeIDParamPath() string {
-	return fmt.Sprintf("/elastic-gcs/%s/control-node-id", regionFlag)
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
-func endpointIDParamPath() string {
-	return fmt.Sprintf("/elastic-gcs/%s/endpoint-id", regionFlag)
-}
+
+func secretsPrefix() string          { return dep.SecretsPrefix() }
+func asgName() string                { return dep.Resource("dtn") }
+func controlNodeIDParamPath() string { return dep.Param(names.ParamControlNodeID) }
+func endpointIDParamPath() string    { return dep.Param(names.ParamEndpointID) }
 
 // runGCSCLIOnControlNode sends an SSM command to the control node that sets
 // up GCS CLI auth from Secrets Manager and runs the given GCS command.
@@ -149,9 +158,9 @@ export GCS_CLI_CLIENT_SECRET=$(aws secretsmanager get-secret-value \
     --secret-id %s/globus-client-secret \
     --query SecretString --output text --region %s 2>/dev/null)
 export GCS_CLI_ENDPOINT_ID=$(aws ssm get-parameter \
-    --name /elastic-gcs/%s/endpoint-id \
+    --name %s \
     --query Parameter.Value --output text --region %s 2>/dev/null)
-%s`, pfx, region, pfx, region, region, region, gcsCmd)
+%s`, pfx, region, pfx, region, endpointIDParamPath(), region, gcsCmd)
 
 	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  []string{controlNodeID},
@@ -315,14 +324,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Active transfers (last 5 min)
 	var activeTransfers float64
 	stats, _ := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("ElasticGCS"),
+		Namespace:  aws.String(names.MetricNamespace),
 		MetricName: aws.String("ActiveTransfers"),
 		StartTime:  aws.Time(time.Now().Add(-5 * time.Minute)),
 		EndTime:    aws.Time(time.Now()),
 		Period:     aws.Int32(300),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(regionFlag)},
+			{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 		},
 	})
 	if len(stats.Datapoints) > 0 {
@@ -331,9 +341,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Alarm states
 	alarmNames := []string{
-		fmt.Sprintf("elastic-gcs-scaleout-%s", regionFlag),
-		fmt.Sprintf("elastic-gcs-scalein-%s", regionFlag),
-		fmt.Sprintf("elastic-gcs-version-drift-%s", regionFlag),
+		dep.Resource("scaleout"),
+		dep.Resource("scalein"),
+		dep.Resource("version-drift"),
 	}
 	alarmStates := make(map[string]string)
 	alarmsOut, _ := cwClient.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{
@@ -350,7 +360,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	yellow := color.New(color.FgYellow)
 	dim := color.New(color.Faint)
 
-	bold.Printf("\nElastic GCS — %s\n", regionFlag)
+	bold.Printf("\nElastic GCS — %s\n", dep.ID())
 	fmt.Println(strings.Repeat("━", 60))
 
 	// Control node
@@ -474,7 +484,7 @@ func runWake(ctx context.Context, scaleOut bool) error {
 		return err
 	}
 
-	fnName := fmt.Sprintf("elastic-gcs-waker-%s", regionFlag)
+	fnName := dep.Resource("waker")
 	payload, _ := json.Marshal(wakerRequest{ScaleOut: scaleOut})
 
 	bold := color.New(color.Bold)
@@ -781,7 +791,7 @@ func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
 	lambdaClient := lambda.NewFromConfig(cfg)
 	logsClient := cloudwatchlogs.NewFromConfig(cfg)
 
-	fnName := fmt.Sprintf("elastic-gcs-version-check-%s", regionFlag)
+	fnName := dep.Resource("version-check")
 	logGroup := fmt.Sprintf("/aws/lambda/%s", fnName)
 	fmt.Printf("Invoking %s...\n", fnName)
 
@@ -806,10 +816,10 @@ func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
 	// invocation so we can show actual version data rather than just "check the metric".
 	// Retry for up to 15s to allow CloudWatch Logs to flush.
 	type logLine struct {
-		Msg      string              `json:"msg"`
-		Versions map[string]string   `json:"versions"`
-		Distinct int                 `json:"distinct_versions"`
-		Drift    int                 `json:"drift_count"`
+		Msg      string            `json:"msg"`
+		Versions map[string]string `json:"versions"`
+		Distinct int               `json:"distinct_versions"`
+		Drift    int               `json:"drift_count"`
 	}
 
 	startMS := invokeStart.UnixMilli()
@@ -930,7 +940,7 @@ func parseDuration(s string) (time.Duration, error) {
 	case 'h':
 		return time.Duration(val * float64(time.Hour)), nil
 	case 'd':
-		return time.Duration(val * float64(24 * time.Hour)), nil
+		return time.Duration(val * float64(24*time.Hour)), nil
 	default:
 		return 0, fmt.Errorf("unknown duration unit %q (use m, h, d)", string(unit))
 	}
@@ -942,7 +952,7 @@ func runLogs(lambdaName, since string, tail, asJSON bool) error {
 		return fmt.Errorf("unknown lambda %q — available: %s",
 			lambdaName, strings.Join(sortedLambdaNames(), ", "))
 	}
-	logGroup := fmt.Sprintf("/aws/lambda/%s-%s", base, regionFlag)
+	logGroup := "/aws/lambda/" + base + "-" + dep.ID()
 
 	dur, err := parseDuration(since)
 	if err != nil {
@@ -1070,14 +1080,15 @@ func runMetrics(since string) error {
 	}
 
 	out, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String("ElasticGCS"),
+		Namespace:  aws.String(names.MetricNamespace),
 		MetricName: aws.String("ActiveTransfers"),
 		StartTime:  aws.Time(time.Now().Add(-dur)),
 		EndTime:    aws.Time(time.Now()),
 		Period:     aws.Int32(period),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(regionFlag)},
+			{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 		},
 	})
 	if err != nil {
@@ -1089,7 +1100,7 @@ func runMetrics(since string) error {
 		return aws.ToTime(points[i].Timestamp).Before(aws.ToTime(points[j].Timestamp))
 	})
 
-	fmt.Printf("\nActive Transfers — last %s  [%s]\n", since, regionFlag)
+	fmt.Printf("\nActive Transfers — last %s  [%s]\n", since, dep.ID())
 	if len(points) == 0 {
 		fmt.Println("  (no data)")
 	} else {
@@ -1108,7 +1119,7 @@ func runMetrics(since string) error {
 	fmt.Printf("\nLambda invocations — last %s\n", since)
 	for _, name := range sortedLambdaNames() {
 		base := lambdaFunctionBases[name]
-		fnName := fmt.Sprintf("%s-%s", base, regionFlag)
+		fnName := base + "-" + dep.ID()
 		invOut, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
 			Namespace:  aws.String("AWS/Lambda"),
 			MetricName: aws.String("Invocations"),
@@ -1262,8 +1273,8 @@ func buildAMICmd() *cobra.Command {
 		Use:   "build-ami",
 		Short: "Build a new DTN AMI (runs scripts/build_ami.sh)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("Building DTN AMI for region %s...\n", regionFlag)
-			c := exec.Command("bash", "scripts/build_ami.sh", regionFlag)
+			fmt.Printf("Building DTN AMI for %s...\n", dep.ID())
+			c := exec.Command("bash", "scripts/build_ami.sh", dep.Region, dep.Name)
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			c.Env = append(os.Environ(),
@@ -1323,7 +1334,7 @@ func runCollectionsSetup(configFile string, dryRun bool) error {
 	if err != nil {
 		return fmt.Errorf("load config %s: %w", configFile, err)
 	}
-	buckets := cfg.BucketsForRegion(regionFlag)
+	buckets := cfg.BucketsFor(dep.Region, dep.Name)
 	if len(buckets) == 0 {
 		fmt.Printf("No buckets configured for region %s in %s\n", regionFlag, configFile)
 		return nil
@@ -1719,7 +1730,7 @@ func runDeprovision(ctx context.Context, confirm bool) error {
 		return err
 	}
 
-	fmt.Printf("Collecting inventory for %s...\n", regionFlag)
+	fmt.Printf("Collecting inventory for %s...\n", dep.ID())
 	inv, err := collectDeprovisionInventory(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("inventory: %w", err)
@@ -1789,8 +1800,12 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 			}
 			gwJSON, _ := runGCSCLIOnControlNode(ctx, ssmClient, inv.controlNodeID,
 				"globus-connect-server storage-gateway list -F json 2>/dev/null")
-			type gw struct{ ID string `json:"id"` }
-			type gwPage struct{ Data []gw `json:"data"` }
+			type gw struct {
+				ID string `json:"id"`
+			}
+			type gwPage struct {
+				Data []gw `json:"data"`
+			}
 			var gwPages []gwPage
 			if json.Unmarshal([]byte(gwJSON), &gwPages) == nil && len(gwPages) > 0 {
 				for _, g := range gwPages[0].Data {
@@ -1840,8 +1855,8 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 	// ── CloudFormation stacks ────────────────────────────────────────────────
 	// DTN stack first (depends on control stack), so delete it first.
 	for _, stackName := range []string{
-		fmt.Sprintf("ElasticGCS-DTNPool-%s", regionFlag),
-		fmt.Sprintf("ElasticGCS-Control-%s", regionFlag),
+		dep.Stack("DTNPool"),
+		dep.Stack("Control"),
 	} {
 		out, err := cfnClient.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{
 			StackName: aws.String(stackName),
@@ -1879,7 +1894,7 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 	var ssmToken *string
 	for {
 		paramOut, perr := ssmClient.GetParametersByPath(ctx, &ssm.GetParametersByPathInput{
-			Path:      aws.String(fmt.Sprintf("/elastic-gcs/%s", regionFlag)),
+			Path:      aws.String(dep.ParamPrefix()),
 			Recursive: aws.Bool(true),
 			NextToken: ssmToken,
 		})
@@ -1908,7 +1923,7 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 		}
 		for _, lg := range lgOut.LogGroups {
 			name := aws.ToString(lg.LogGroupName)
-			if strings.HasSuffix(name, "-"+regionFlag) {
+			if strings.HasSuffix(name, "-"+dep.ID()) {
 				inv.logGroupNames = append(inv.logGroupNames, name)
 			}
 		}
@@ -1919,7 +1934,7 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 	}
 
 	// ── DTN AMI ───────────────────────────────────────────────────────────────
-	inv.amiID, _ = getSSMParam(ctx, ssmClient, fmt.Sprintf("/elastic-gcs/%s/dtn-ami-id", regionFlag))
+	inv.amiID, _ = getSSMParam(ctx, ssmClient, dep.Param(names.ParamDTNAMIID))
 	if inv.amiID != "" {
 		imgOut, imerr := ec2Client.DescribeImages(ctx, &ec2.DescribeImagesInput{
 			ImageIds: []string{inv.amiID},
@@ -1957,7 +1972,7 @@ func printDeprovisionDryRun(inv *deprovisionInventory) {
 	bold := color.New(color.Bold)
 	yellow := color.New(color.FgYellow)
 
-	bold.Printf("\nElastic GCS — %s deprovision dry run\n", regionFlag)
+	bold.Printf("\nElastic GCS — %s deprovision dry run\n", dep.ID())
 	fmt.Println(strings.Repeat("━", 52))
 	fmt.Println()
 	yellow.Printf("⚠  WARNING: --confirm will permanently destroy all resources listed below.\n\n")
@@ -2045,14 +2060,14 @@ func printDeprovisionDryRun(inv *deprovisionInventory) {
 
 	// SSM params
 	if len(inv.ssmParamNames) > 0 {
-		fmt.Printf("  SSM params     %d: /elastic-gcs/%s/*\n", len(inv.ssmParamNames), regionFlag)
+		fmt.Printf("  SSM params     %d: %s/*\n", len(inv.ssmParamNames), dep.ParamPrefix())
 	} else {
 		fmt.Printf("  SSM params     (none found)\n")
 	}
 
 	// Log groups
 	if len(inv.logGroupNames) > 0 {
-		fmt.Printf("  Log groups     %d: /aws/lambda/elastic-gcs-*-%s\n", len(inv.logGroupNames), regionFlag)
+		fmt.Printf("  Log groups     %d: /aws/lambda/elastic-gcs-*-%s\n", len(inv.logGroupNames), dep.ID())
 	} else {
 		fmt.Printf("  Log groups     (none found)\n")
 	}
@@ -2434,7 +2449,7 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 
 	// ── Final report ──────────────────────────────────────────────────────────
 	fmt.Println()
-	bold.Printf("Deprovisioned: %s\n", regionFlag)
+	bold.Printf("Deprovisioned: %s\n", dep.ID())
 	green.Printf("  ✓ %d GCS nodes deleted\n", gcsNodesDeleted)
 	green.Printf("  ✓ %d collections deleted\n", collectionsDeleted)
 	green.Printf("  ✓ %d storage gateways deleted\n", gatewaysDeleted)

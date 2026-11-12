@@ -20,6 +20,8 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // Well-known IDs used across benchmark tests.
@@ -33,6 +35,7 @@ const (
 // benchEnv holds AWS clients and configuration for benchmark tests.
 type benchEnv struct {
 	region           string
+	dep              names.Deployment
 	asgName          string
 	controlNodeParam string
 	endpointIDParam  string
@@ -49,7 +52,8 @@ type benchEnv struct {
 
 // newBenchEnv initialises clients from environment variables.
 // Required: GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
-// Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_ASG_NAME.
+// Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_DEPLOYMENT
+// (default "default"), ELASTIC_GCS_ASG_NAME.
 func newBenchEnv(t *testing.T) *benchEnv {
 	t.Helper()
 
@@ -57,9 +61,13 @@ func newBenchEnv(t *testing.T) *benchEnv {
 	clientID := requireEnv(t, "GLOBUS_CLIENT_ID")
 	clientSecret := requireEnv(t, "GLOBUS_CLIENT_SECRET")
 
-	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", fmt.Sprintf("elastic-gcs-dtn-%s", region))
-	controlNodeParam := fmt.Sprintf("/elastic-gcs/%s/control-node-id", region)
-	endpointIDParam := fmt.Sprintf("/elastic-gcs/%s/endpoint-id", region)
+	dep, err := names.New(region, os.Getenv("ELASTIC_GCS_DEPLOYMENT"))
+	if err != nil {
+		t.Fatalf("ELASTIC_GCS_REGION/ELASTIC_GCS_DEPLOYMENT: %v", err)
+	}
+	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", dep.Resource("dtn"))
+	controlNodeParam := dep.Param(names.ParamControlNodeID)
+	endpointIDParam := dep.Param(names.ParamEndpointID)
 
 	cfg, err := awsconfig.LoadDefaultConfig(context.Background(),
 		awsconfig.WithRegion(region))
@@ -80,6 +88,7 @@ func newBenchEnv(t *testing.T) *benchEnv {
 
 	return &benchEnv{
 		region:             region,
+		dep:                dep,
 		asgName:            asgName,
 		controlNodeParam:   controlNodeParam,
 		endpointIDParam:    endpointIDParam,

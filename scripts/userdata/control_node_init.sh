@@ -18,7 +18,8 @@ set -euo pipefail
 #   - AWS_REGION: Current AWS region
 #   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
 #   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
-#   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-east-1)
+#   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-west-2/src)
+#   - PARAM_PREFIX: SSM Parameter Store prefix (e.g. /elastic-gcs/us-west-2/src)
 #   - GCS_VERSION: exact GCS package version to install (e.g. 5.4.101)
 # =============================================================================
 
@@ -78,7 +79,7 @@ if [ -s "$GCS_INFO" ]; then
 
     # Update SSM with current instance ID (in case instance was replaced)
     aws ssm put-parameter \
-        --name "/elastic-gcs/${AWS_REGION}/control-node-id" \
+        --name "${PARAM_PREFIX}/control-node-id" \
         --type String --value "$INSTANCE_ID" \
         --overwrite --region "$AWS_REGION" \
         && echo ">>> SSM control-node-id updated." || true
@@ -325,7 +326,7 @@ echo ">>> Storing endpoint metadata in SSM Parameter Store..."
 ENDPOINT_ID=$(globus-connect-server endpoint show -F json | jq -r '.id')
 
 aws ssm put-parameter \
-    --name "/elastic-gcs/${AWS_REGION}/endpoint-id" \
+    --name "${PARAM_PREFIX}/endpoint-id" \
     --type String \
     --value "$ENDPOINT_ID" \
     --overwrite \
@@ -334,7 +335,7 @@ aws ssm put-parameter \
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
     http://169.254.169.254/latest/meta-data/instance-id)
 aws ssm put-parameter \
-    --name "/elastic-gcs/${AWS_REGION}/control-node-id" \
+    --name "${PARAM_PREFIX}/control-node-id" \
     --type String \
     --value "$INSTANCE_ID" \
     --overwrite \

@@ -35,22 +35,23 @@ Create a Globus automation client (confidential app) and grant it Administrator 
 
 ```bash
 REGION=us-east-1
+DEPLOYMENT=default   # the regions.yaml `deployment` name
 
 aws secretsmanager create-secret \
   --region $REGION \
-  --name elastic-gcs/$REGION/globus-client-id \
+  --name elastic-gcs/$REGION/$DEPLOYMENT/globus-client-id \
   --secret-string "<your-client-id>"
 
 aws secretsmanager create-secret \
   --region $REGION \
-  --name elastic-gcs/$REGION/globus-client-secret \
+  --name elastic-gcs/$REGION/$DEPLOYMENT/globus-client-secret \
   --secret-string "<your-client-secret>"
 ```
 
 ### 1.4 Deploy Control Node
 
 ```bash
-make deploy-control REGION=us-east-1
+make deploy-control REGION=us-east-1 DEPLOYMENT=default
 ```
 
 This deploys: VPC, security group (TCP 443 + 50000–51000), control node EC2 instance.
@@ -71,7 +72,7 @@ Expected: Control Node `● running`, Endpoint UUID present.
 ### 1.5 Deploy DTN Pool
 
 ```bash
-make deploy-dtn REGION=us-east-1
+make deploy-dtn REGION=us-east-1 DEPLOYMENT=default
 ```
 
 This deploys: ASG + warm pool, Lambda functions, EventBridge rules, CloudWatch alarms and dashboard.
@@ -138,9 +139,9 @@ The CloudWatch dashboard `ElasticGCS-{region}` provides:
 - GCS version drift value and Lambda error counts
 
 Alarms:
-- `elastic-gcs-scaleout-{region}` — fires when `ActiveTransfers > 0` for 5 min
-- `elastic-gcs-scalein-{region}` — fires when `ActiveTransfers == 0` for 15 min
-- `elastic-gcs-version-drift-{region}` — fires when nodes run different GCS versions
+- `elastic-gcs-scaleout-{region}-{deployment}` — fires when `ActiveTransfers > 0` for 5 min
+- `elastic-gcs-scalein-{region}-{deployment}` — fires when `ActiveTransfers == 0` for 15 min
+- `elastic-gcs-version-drift-{region}-{deployment}` — fires when nodes run different GCS versions
 
 **Note:** The scalein alarm fires at idle (desired=0) as a false positive. The scalein Lambda is a no-op when desired is already 0.
 
@@ -238,7 +239,7 @@ for i in $(seq 1 $TOTAL_SLOTS); do
     --deployment-key /etc/globus-connect-server/deployment-key.json \
     --export-node /tmp/node-slot-$i.json
   aws secretsmanager put-secret-value \
-    --secret-id elastic-gcs/$REGION/node-slot-$i \
+    --secret-id elastic-gcs/$REGION/$DEPLOYMENT/node-slot-$i \
     --secret-string "$(cat /tmp/node-slot-$i.json)"
 done
 ```
@@ -278,7 +279,7 @@ sudo globus-connect-server node cleanup
 REGION=us-east-1
 CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text) \
   AWS_PROFILE=aws \
-  npx cdk destroy "ElasticGCS-DTNPool-$REGION" "ElasticGCS-Control-$REGION" "ElasticGCS-Network-$REGION" \
+  npx cdk destroy "ElasticGCS-DTNPool-$REGION-$DEPLOYMENT" "ElasticGCS-Control-$REGION-$DEPLOYMENT" "ElasticGCS-Network-$REGION" \
   --region $REGION --force
 ```
 
@@ -287,7 +288,7 @@ CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REGION=us-east-1
 for secret in deployment-key globus-client-id globus-client-secret $(seq -f "node-slot-%.0f" 1 6); do
   aws secretsmanager delete-secret \
-    --secret-id elastic-gcs/$REGION/$secret \
+    --secret-id elastic-gcs/$REGION/$DEPLOYMENT/$secret \
     --force-delete-without-recovery \
     --region $REGION
 done
@@ -323,11 +324,11 @@ At this point AWS cost = $0 for this deployment (no running EC2, no allocated EI
 3. Common causes:
    - Secrets Manager missing `node-slot-N` — control node didn't finish setup
    - GCS lock file owned by root — `chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause`
-   - SSM slot lock already held by a terminated instance — check `/elastic-gcs/{region}/slot-lock/{N}` parameters and delete stale ones
+   - SSM slot lock already held by a terminated instance — check `/elastic-gcs/{region}/{deployment}/slot-lock/{N}` parameters and delete stale ones
 
 ### `aws-elastic-gcs-ctl status` shows stale GCS nodes
 
-Run `./bin/aws-elastic-gcs-ctl nodes delete <node-id>`. If that fails, the GCS CLI on the control node may need auth — confirm `elastic-gcs/{region}/globus-client-id` and `globus-client-secret` are present in Secrets Manager.
+Run `./bin/aws-elastic-gcs-ctl nodes delete <node-id>`. If that fails, the GCS CLI on the control node may need auth — confirm `elastic-gcs/{region}/{deployment}/globus-client-id` and `globus-client-secret` are present in Secrets Manager.
 
 ### `scalein ● ALARM` when desired=0
 

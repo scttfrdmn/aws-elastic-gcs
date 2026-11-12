@@ -16,6 +16,7 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.
@@ -71,7 +72,8 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		Period:     aws.Int32(300),
 		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
 		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(region)},
+			{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 		},
 	})
 	if err != nil {
@@ -144,8 +146,16 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	return nil
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-scalein", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }

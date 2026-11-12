@@ -41,7 +41,7 @@ echo ">>> Node disabled in ${DISABLE_MS}ms"
 # The ASG lifecycle hook should allow for this delay.
 echo ">>> Node disabled. DNS propagation may take up to 2 minutes."
 
-# Note: The SSM slot lock (/elastic-gcs/{region}/slot-lock/{N}) is released by
+# Note: The SSM slot lock (${PARAM_PREFIX}/slot-lock/{N}) is released by
 # the lifecycle Lambda (lambda/lifecycle/main.go) when the instance is permanently
 # terminated (Destination=="EC2"). The shutdown script intentionally does NOT
 # release the lock here — doing so would allow a new instance to claim the slot

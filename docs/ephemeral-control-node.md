@@ -112,7 +112,7 @@ aws-elastic-gcs-ctl wake --scale-out
 
 Example output:
 ```
-Invoking waker Lambda (elastic-gcs-waker-us-east-1)...
+Invoking waker Lambda (elastic-gcs-waker-us-east-1-default)...
 
 Control node ready (41s, 41s)
   Warm pool populated — DTN scale-out will take ~60s
@@ -129,7 +129,7 @@ are admitted. There is no separate bearer token.
 Wake via curl (using `awscurl` or AWS CLI v2 with `--sigv4`):
 ```bash
 WAKER_URL=$(aws cloudformation describe-stacks \
-  --stack-name ElasticGCS-DTNPool-us-east-1 \
+  --stack-name ElasticGCS-DTNPool-us-east-1-default \
   --query "Stacks[0].Outputs[?OutputKey=='WakerFunctionUrl'].OutputValue" \
   --output text)
 
@@ -174,11 +174,11 @@ aws events put-rule \
 
 aws events put-targets \
   --rule elastic-gcs-scheduled-wake \
-  --targets '[{"Id":"WakerLambda","Arn":"arn:aws:lambda:us-east-1:ACCOUNT:function:elastic-gcs-waker-us-east-1"}]'
+  --targets '[{"Id":"WakerLambda","Arn":"arn:aws:lambda:us-east-1:ACCOUNT:function:elastic-gcs-waker-us-east-1-default"}]'
 
 # Grant EventBridge permission to invoke the Lambda
 aws lambda add-permission \
-  --function-name elastic-gcs-waker-us-east-1 \
+  --function-name elastic-gcs-waker-us-east-1-default \
   --statement-id scheduled-wake \
   --action lambda:InvokeFunction \
   --principal events.amazonaws.com \

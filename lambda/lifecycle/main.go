@@ -18,6 +18,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // LifecycleEvent is the detail payload from EventBridge ASG lifecycle hook events.
@@ -244,7 +245,7 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		)
 		return
 	}
-	paramName := fmt.Sprintf("/elastic-gcs/%s/slot-lock/%s", region, slot)
+	paramName := dep.Param(names.ParamSlotLock + "/" + slot)
 
 	// Verify this instance actually holds the lock before releasing it.
 	// The EC2 slot tag may be stale (e.g. if the instance never acquired the lock
@@ -310,8 +311,16 @@ func completeLifecycle(ctx context.Context, asgClient *autoscaling.Client, event
 	return nil
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-lifecycle", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }

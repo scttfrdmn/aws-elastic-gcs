@@ -20,6 +20,7 @@ import (
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 const (
@@ -185,7 +186,7 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 
 			// Release SSM slot lock (may be orphaned if shutdown script didn't run).
 			if slotNum := slotNumber(inst.Tags); slotNum != "" {
-				lockParam := fmt.Sprintf("/elastic-gcs/%s/slot-lock/%s", region, slotNum)
+				lockParam := dep.Param(names.ParamSlotLock + "/" + slotNum)
 				if _, ssmErr := ssmClient.DeleteParameter(ctx, &ssm.DeleteParameterInput{
 					Name: aws.String(lockParam),
 				}); ssmErr != nil {
@@ -377,9 +378,9 @@ export GCS_CLI_CLIENT_SECRET=$(aws secretsmanager get-secret-value \
     --secret-id %s/globus-client-secret \
     --query SecretString --output text --region %s 2>/dev/null)
 export GCS_CLI_ENDPOINT_ID=$(aws ssm get-parameter \
-    --name /elastic-gcs/%s/endpoint-id \
+    --name %s \
     --query Parameter.Value --output text --region %s 2>/dev/null)
-%s`, secretsPrefix, region, secretsPrefix, region, region, region, gcsCommand)
+%s`, secretsPrefix, region, secretsPrefix, region, dep.Param(names.ParamEndpointID), region, gcsCommand)
 
 	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
 		InstanceIds:  []string{controlNodeID},
@@ -454,8 +455,16 @@ func warmPoolEntryTime(tags []ec2types.Tag, launchTime time.Time) time.Time {
 	return launchTime
 }
 
+// dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
+var dep names.Deployment
+
 func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-cache-eviction", region)
+	var err error
+	if dep, err = names.FromEnv(); err != nil {
+		logger.Error("invalid deployment configuration", "error", err.Error())
+		os.Exit(1)
+	}
 	lambda.Start(handler)
 }
