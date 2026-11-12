@@ -6,17 +6,22 @@ prices and EC2 network specs pulled from the AWS APIs on 2026-11-12. Re-run
 numbers in any region:
 
 ```bash
-AWS_PROFILE=aws scripts/instance_sizing.py --region us-east-1
+AWS_PROFILE=aws scripts/instance_sizing.py --region us-east-1                     # rank single nodes
+AWS_PROFILE=aws scripts/instance_sizing.py --arch any --fleet-gbps 50              # rank N-node fleets
+AWS_PROFILE=aws scripts/instance_sizing.py --arch arm64 --cpu graviton --min-mem-gib 8
 AWS_PROFILE=aws scripts/instance_sizing.py --region eu-west-1 --types m8in.xlarge,c8in.2xlarge,c8in.4xlarge
 ```
+
+DTNs scale out horizontally, so the instance type sets two things: the cost per
+Gbps of the whole fleet, and the size of each scale-out step.
 
 ## Recommendation
 
 | Role | Type | vCPU / GiB | Sustained internet throughput | us-east-1 $/hr | Use when |
 |------|------|-----------|-------------------------------|----------------|----------|
-| **DTN (default)** | `c8in.2xlarge` | 8 / 16 | 12.5 Gbps | $0.544 | Most deployments. Matches 10 GbE campus DTNs. |
-| DTN (light) | `m8in.xlarge` | 4 / 16 | 6.25 Gbps | $0.334 | Small datasets, or to cap per-node cost. |
-| DTN (heavy) | `c8in.4xlarge` | 16 / 32 | 25 Gbps | $1.089 | Destinations that can absorb >10 Gbps (100 GbE DTNs). |
+| **DTN (default)** | `c8in.2xlarge` | 8 / 16 | 12.5 Gbps per node | $0.544 | Most deployments. One node matches a 10 GbE campus DTN; scale out in 12.5 Gbps steps. |
+| DTN (fine-grained) | `m8in.xlarge` | 4 / 16 | 6.25 Gbps per node | $0.334 | Mostly small or bursty demand. Half-size steps for 23% more per Gbps. |
+| DTN (coarse) | `c8in.4xlarge` | 16 / 32 | 25 Gbps per node | $1.089 | Single large transfers to 100 GbE destinations, if a task stays on one node. |
 | Control node | `t3a.large` | 2 / 8 | (not a data mover, see below) | $0.0752 | Default. ~$55/month on-demand. |
 
 Avoid:
@@ -31,8 +36,10 @@ Avoid:
   `c8in.2xlarge` for 40% of the internet throughput.
 - **`c8ine` / `m8ine`.** Same internet throughput as `c8in` / `m8in` at a ~25%
   higher price. Their advantage is packet rate, which GridFTP doesn't need.
-- **`c8in.xlarge`.** Cheapest per Gbps, but only 8 GiB, the GCS minimum, which
-  Globus says is not a production size.
+- **`c8in.xlarge`.** Same cost per Gbps as the other c8in sizes, but only 8 GiB,
+  the GCS minimum, which Globus says is not a production size.
+- **AMD (`c8a`, `m8a`, `m7a`, `c6a`, `m8azn`) for DTNs.** See below. AMD is fine
+  for the control node; `t3a.large` is AMD EPYC.
 
 ## Why throughput, not $/hr, decides
 
@@ -70,10 +77,80 @@ Data Egress Waiver before quoting costs.
 (about 52% off), but Spot disables the warm pool, so every scale-out takes the
 2–3 minute cold path. That saves ~$0.05/TB on a ~$50–90/TB transfer.
 
-**Graviton isn't worth it for DTNs.** GCS has no official arm64 support (arm64
-packages exist only for Ubuntu 24.04/26.04). Graviton types under 32 vCPUs are
-also capped at 5 Gbps to the internet. Graviton is only cheaper per Gbps at 32+
-vCPUs (`c8gn.8xlarge`, 50 Gbps, ~13% less than `c8in.8xlarge`).
+## Intel vs AMD vs Graviton
+
+Cheapest fleet from each CPU vendor reaching 50 Gbps sustained internet
+throughput (us-east-1, on-demand, including $0.005/hr public IPv4 per node):
+
+| Vendor | Best type | GiB | Gbps/node | Nodes | Fleet $/hr | $/Gbps-h | vs c8in |
+|--------|-----------|-----|-----------|-------|-----------|----------|---------|
+| Graviton | `m8gn.large` | 8 | 5 | 10 | $1.51 | $0.030 | −32% |
+| Graviton | `r8gn.large` | 16 | 5 | 10 | $1.87 | $0.037 | −15% |
+| Graviton | `c8gn.8xlarge` | 64 | 50 | 1 | $1.90 | $0.038 | −13% |
+| **Intel** | **`c8in.2xlarge`** | 16 | 12.5 | 4 | $2.20 | $0.044 | — |
+| Intel | `m6in.xlarge` | 16 | 5 | 10 | $2.84 | $0.057 | +29% |
+| AMD | `m8azn.xlarge` | 16 | 5 | 10 | $4.18 | $0.084 | +90% |
+| AMD | `c8a.2xlarge` | 16 | 3.75 | 14 | $6.11 | $0.122 | +178% |
+
+**AMD loses for DTNs at every size.** No AMD family is exempt from the IGW cap,
+and AMD network baselines are low: `c8a.2xlarge` sustains 3.75 Gbps, and only
+`m8azn` reaches the 5 Gbps cap below 32 vCPUs. The cheapest AMD fleet costs
+about 1.9× the c8in fleet per Gbps.
+
+**Graviton is 13–32% cheaper per Gbps, but don't adopt it yet.**
+- **Why it's cheaper:** small Graviton nodes are cheap enough that a fleet of
+  5 Gbps-capped nodes beats c8in. At 32+ vCPUs, `c8gn` gets 50% of its 100 Gbps
+  baseline.
+- **Supported platform:** GCS officially supports only x86-64. arm64 packages
+  exist only for Ubuntu 24.04/26.04, and the scripts are Rocky-only.
+- **Memory:** the cheapest option, `m8gn.large`, is at the 8 GiB minimum.
+- **CPU:** whether 2 vCPUs can handle S3 HTTPS plus GridFTP TLS at 5 Gbps is
+  unmeasured.
+- **Node count:** reaching 50 Gbps takes 10 nodes instead of 4 (see below).
+- **Dollar value:** the saving is ~$0.016–0.03 per TB against $50–90/TB egress.
+
+Revisit Graviton if Globus adds official arm64 support (`r8gn.large` is the
+natural candidate).
+
+## Horizontal scaling
+
+Within the c8in family, cost per Gbps is the same at every size, and idle cost
+per warm slot is the same for every type. So node size is a choice of scaling
+step, not cost:
+
+| Consideration | Smaller nodes (`m8in.xlarge`, 6.25 Gbps) | Larger nodes (`c8in.4xlarge`, 25 Gbps) |
+|---------------|-------------------------------------------|-----------------------------------------|
+| Over-provisioning between steps | Less | More (but ~$0.044/Gbps-h, so small) |
+| Node failure / Spot loss | Smaller share of capacity | Larger share |
+| Nodes, slots, warm instances per Gbps | More | Fewer |
+| Scale-out events to reach a target | More (each is an alarm transition today, #26) | Fewer |
+| Single-task throughput | Lower, if Globus keeps a task on one node | Higher |
+
+`c8in.2xlarge` is the balance point. One node saturates a typical 10 GbE
+destination, and 4 nodes reach 50 Gbps.
+
+Configure the fleet for its peak, not for one node:
+
+- **`max_dtns`:** set to `ceil(peak aggregate Gbps / per-node Gbps)`. For example,
+  50 Gbps of `c8in.2xlarge` → 4. Node identities are pre-created for
+  `max_dtns + warm_pool_size` slots.
+- **`warm_pool_size`:** only warm instances resume in 30–60 s; the rest launch
+  cold (2–3 min). A warm slot costs ~$1.60/month, so size the warm pool to
+  `max_dtns` (4 × $1.60 = $6.40/month), not the default 2.
+- **Scale-out math:** today each throughput-alarm transition adds one DTN, so
+  reaching N nodes takes N transitions (#26). The fix is to set desired capacity
+  to `ceil(aggregate throughput / per-node sustained)` directly. Smaller nodes
+  make this more important.
+- **Capacity resilience:** warm pools support on-demand mixed-instance policies.
+  At large `max_dtns`, pair equal-throughput types so the per-node scaling math
+  still holds. For example, `c8in.2xlarge` first, then `m8in.2xlarge` (both
+  12.5 Gbps; m8in is 23% more expensive and used only if c8in capacity runs
+  short).
+- **Quota:** the default on-demand standard-instance quota (2,048 vCPUs in this
+  account) allows ~250 `c8in.2xlarge`. It is not a constraint.
+- **The ceiling is usually the other end.** Horizontal scale helps only with
+  concurrent tasks, or if Globus spreads one task across nodes (still to
+  measure), and only up to what the destinations can absorb.
 
 ## Regional availability
 
@@ -125,6 +202,9 @@ on a deployed endpoint (`make benchmark`):
 2. **Control-node data path.** Whether the control node carries data channels
    (see above).
 3. **Multi-node distribution.** Whether one large task spreads across DTNs, or
-   only concurrent tasks do.
-4. **Real destinations.** Throughput to a typical campus endpoint versus the
+   only concurrent tasks do. This decides whether the coarse `c8in.4xlarge` tier
+   is ever worth it, and how far horizontal scale helps a single user.
+4. **Graviton viability.** GCS on Ubuntu 26.04 arm64 with `r8gn.large`, if
+   Globus confirms arm64 support.
+5. **Real destinations.** Throughput to a typical campus endpoint versus the
    per-DTN limit.
