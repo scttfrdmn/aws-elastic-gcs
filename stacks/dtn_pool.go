@@ -159,12 +159,26 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		),
 	}))
 
-	// EC2: tag this instance with its slot number (for cache eviction cleanup)
+	// EC2: dtn_boot.sh tags its own instance with its slot number and GCS node
+	// ID (read by the cache eviction Lambda). Scope this to instances in this
+	// ASG and to those two tag keys, so a compromised DTN can't tag arbitrary
+	// instances or forge elastic-gcs:warm-pool-entry-time (written by the
+	// lifecycle Lambda) to force evictions.
 	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:       jsii.String("EC2CreateTags"),
-		Effect:    awsiam.Effect_ALLOW,
-		Actions:   jsii.Strings("ec2:CreateTags"),
-		Resources: jsii.Strings("*"),
+		Sid:     jsii.String("EC2CreateTags"),
+		Effect:  awsiam.Effect_ALLOW,
+		Actions: jsii.Strings("ec2:CreateTags"),
+		Resources: jsii.Strings(
+			fmt.Sprintf("arn:aws:ec2:%s:%s:instance/*", region, *stack.Account()),
+		),
+		Conditions: &map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"ec2:ResourceTag/aws:autoscaling:groupName": asgName,
+			},
+			"ForAllValues:StringEquals": map[string]interface{}{
+				"aws:TagKeys": []string{"elastic-gcs:slot", "elastic-gcs:gcs-node-id"},
+			},
+		},
 	}))
 
 	// SSM slot-lock: atomic slot claim (PutParameter without --overwrite) and
