@@ -19,7 +19,7 @@ Edit `config/regions.yaml` for your deployment:
 ```yaml
 regions:
   us-east-1:
-    dtnInstanceType: m6i.xlarge   # or m6in.xlarge, c6in.2xlarge for higher throughput
+    dtnInstanceType: c8in.2xlarge   # or m8in.xlarge / c8in.4xlarge; see instance-sizing.md
     maxDTNs: 4
     warmPoolSize: 2
     useSpot: false

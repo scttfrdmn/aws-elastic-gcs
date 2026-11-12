@@ -172,7 +172,7 @@ aws-elastic-gcs-ctl status --region us-east-1
 **Say:** *"Back to idle. Two warm DTNs sitting stopped, costing a few dollars a month in EBS.
 The control node is running — if I enable idle shutdown, it stops after 30 minutes of
 inactivity too, dropping to ~$3.50/month total idle cost. Compare that to keeping two
-m6i.xlarge DTNs always on: $400/month. For a dataset that researchers access occasionally
+c8in.2xlarge DTNs always on: about $800/month. For a dataset that researchers access occasionally
 — workshop days, grant deadlines — elastic is the right model."*
 
 **Point to slide:** cost comparison table from `docs/ephemeral-control-node.md`.

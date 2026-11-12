@@ -98,16 +98,29 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		cacheEvictionHours = 72
 	}
 
+	dtnInstanceStr := props.RegionConfig.DTNInstance
+	if dtnInstanceStr == "" {
+		dtnInstanceStr = defaultDTNInstance
+	}
+
 	// ThroughputScaleOutThreshold: bytes/sec above which a second (or third) DTN
-	// is triggered. Falls back to the per-region config, then to the default of
-	// 500 MB/s. For m6i.xlarge (12.5 Gbps NIC), 500 MB/s ≈ 32% utilization —
-	// conservative enough to avoid thrash while ensuring headroom for new tasks.
+	// is triggered. Falls back to the per-region config, then to ~70% of what
+	// one DTN of this type sustains to the internet (see docs/instance-sizing.md),
+	// then to 500 MB/s for types not in dtnSustainedBytesPerSec.
 	throughputThreshold := props.ThroughputScaleOutThreshold
 	if throughputThreshold <= 0 && props.RegionConfig.ThroughputScaleOutMBps > 0 {
 		throughputThreshold = int64(props.RegionConfig.ThroughputScaleOutMBps) * 1_000_000
 	}
 	if throughputThreshold <= 0 {
-		throughputThreshold = 500_000_000 // 500 MB/s default
+		if sustained, ok := dtnSustainedBytesPerSec[dtnInstanceStr]; ok {
+			throughputThreshold = sustained * 7 / 10
+		} else {
+			throughputThreshold = 500_000_000
+			awscdk.Annotations_Of(stack).AddWarningV2(jsii.String("elastic-gcs:throughputThreshold"),
+				jsii.String(fmt.Sprintf("DTN type %s has no known sustained throughput; using a "+
+					"500 MB/s scale-out threshold. Set throughput_scaleout_mbps for this region "+
+					"(see docs/instance-sizing.md).", dtnInstanceStr)), nil)
+		}
 	}
 
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
@@ -356,14 +369,9 @@ fi
 
 	// -------------------------------------------------------------------------
 	// Launch Template
-	// Instance type from config (typically m6i.xlarge for x86-64, or m6g.xlarge
-	// for Graviton). CPU type auto-detected from instance class suffix.
+	// Instance type from config (default c8in.2xlarge; see docs/instance-sizing.md).
 	// Uses the same security group as the control node (GCS requires same ports).
 	// -------------------------------------------------------------------------
-	dtnInstanceStr := props.RegionConfig.DTNInstance
-	if dtnInstanceStr == "" {
-		dtnInstanceStr = "m6i.xlarge"
-	}
 
 	// Use the pre-built DTN AMI built by scripts/build_ami.sh for this exact GCS
 	// version. AMIs are named "elastic-gcs-dtn-gcs<version>-YYYYMMDD-HHMMSS" and
@@ -1309,6 +1317,27 @@ fi
 	})
 
 	return stack
+}
+
+// defaultDTNInstance is the DTN type used when regions.yaml sets none: the
+// cheapest x86-64 type per sustained internet Gbps with at least 16 GiB.
+const defaultDTNInstance = "c8in.2xlarge"
+
+// dtnSustainedBytesPerSec is the sustained multi-flow internet-gateway
+// throughput of recommended DTN types, used to derive the default scale-out
+// threshold. The *8in families are IGW-limited to their baseline bandwidth;
+// most other types under 32 vCPUs are capped at 5 Gbps. Regenerate with
+// scripts/instance_sizing.py.
+var dtnSustainedBytesPerSec = map[string]int64{
+	"m8in.xlarge":  781_250_000,   // 6.25 Gbps
+	"c8in.2xlarge": 1_562_500_000, // 12.5 Gbps
+	"m8in.2xlarge": 1_562_500_000, // 12.5 Gbps
+	"c8in.4xlarge": 3_125_000_000, // 25 Gbps
+	"m8in.4xlarge": 3_125_000_000, // 25 Gbps
+	"c8in.8xlarge": 6_250_000_000, // 50 Gbps
+	"m6in.xlarge":  625_000_000,   // 5 Gbps IGW cap
+	"c6in.2xlarge": 625_000_000,   // 5 Gbps IGW cap
+	"m6i.xlarge":   195_250_000,   // 1.562 Gbps baseline
 }
 
 // stripShellComments removes comment lines (starting with #) and blank lines

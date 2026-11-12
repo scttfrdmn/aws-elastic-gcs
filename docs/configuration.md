@@ -10,7 +10,7 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
     "elastic-gcs:regions": ["us-east-1"],
 
     "elastic-gcs:us-east-1": {
-      "dtnInstanceType":  "m6i.xlarge",
+      "dtnInstanceType":  "c8in.2xlarge",
       "maxDTNs":          4,
       "warmPoolSize":     2,
       "totalSlots":       6,
@@ -27,7 +27,7 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `dtnInstanceType` | string | `m6i.xlarge` | EC2 instance type for DTN nodes. Network throughput is the primary bottleneck for S3 transfers. |
+| `dtnInstanceType` | string | `c8in.2xlarge` | EC2 instance type for DTN nodes. Sustained internet-gateway throughput is the bottleneck; see [Instance Sizing](instance-sizing.md). |
 | `maxDTNs` | int | `4` | Maximum number of simultaneously InService DTN instances. Scale-out Lambda caps at this value. |
 | `warmPoolSize` | int | `2` | Number of stopped instances maintained in the warm pool. Higher = faster scale-out, higher EBS cost. Set to 0 to disable warm pool (cold-start only). |
 | `totalSlots` | int | `maxDTNs + warmPoolSize` | Total node slot identities to pre-create in Secrets Manager. Must be ≥ `maxDTNs + warmPoolSize`. |
@@ -38,11 +38,15 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
 
 ### DTN Instance Type Selection
 
-| Use case | Recommended type | Network | On-demand price |
-|----------|-----------------|---------|-----------------|
-| Light / interactive | `m6i.xlarge` | up to 12.5 Gbps | ~$0.192/hr |
-| Heavy batch | `m6in.xlarge` | up to 30 Gbps | ~$0.292/hr |
-| Maximum throughput | `c6in.2xlarge` | up to 40 Gbps | ~$0.432/hr |
+| Use case | Recommended type | Sustained internet throughput | us-east-1 on-demand |
+|----------|-----------------|-------------------------------|---------------------|
+| Light | `m8in.xlarge` | 6.25 Gbps | $0.334/hr |
+| Default | `c8in.2xlarge` | 12.5 Gbps | $0.544/hr |
+| Heavy | `c8in.4xlarge` | 25 Gbps | $1.089/hr |
+
+Most other types under 32 vCPUs are capped at 5 Gbps to the internet whatever
+their "up to" rating. See [Instance Sizing](instance-sizing.md) for the
+analysis and `scripts/instance_sizing.py` to recompute for your region.
 
 ## Secrets Manager
 
@@ -127,7 +131,7 @@ Per-region configuration file. Example:
 ```yaml
 regions:
   us-east-1:
-    dtnInstanceType: m6i.xlarge
+    dtnInstanceType: c8in.2xlarge
     maxDTNs: 4
     warmPoolSize: 2
     useSpot: false

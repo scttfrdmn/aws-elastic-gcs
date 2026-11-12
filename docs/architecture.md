@@ -79,7 +79,7 @@ Data Transfer Nodes handle actual transfer I/O. Configured via CDK context:
 
 - `maxDTNs`: maximum InService DTN count (default: 4)
 - `warmPoolSize`: number of pre-warmed stopped instances (default: 2)
-- `dtnInstanceType`: EC2 instance type (default: m6i.xlarge)
+- `dtnInstanceType`: EC2 instance type (default: c8in.2xlarge; see [Instance Sizing](instance-sizing.md))
 
 AWS Auto Scaling warm pools keep `warmPoolSize` instances stopped (paying EBS + SSM only). On scale-out, ASG resumes a stopped instance rather than launching cold, cutting scale-out time from ~3 minutes to ~60 seconds.
 
@@ -139,7 +139,7 @@ Node IP is fetched from IMDS at boot; `node update --ip-address` handles IP regi
 
 AWS Auto Scaling warm pools provide lifecycle hooks, health checks, and `InstanceReusePolicy` (scale-in goes to stopped rather than terminated) as native features. The alternative — managing EC2 stop/start with a custom state machine — would replicate this complexity without the operational benefits.
 
-## Observed Timings (us-east-1, m6i.xlarge)
+## Observed Timings (us-east-1, m6i.xlarge — measured before the c8in.2xlarge default)
 
 | Phase | Time |
 |-------|------|
@@ -167,9 +167,11 @@ All alarms route through SNS. The `scalein` alarm fires at idle (desired=0) as a
 
 | State | Components | Approx. monthly cost |
 |-------|-----------|---------------------|
-| Fully idle | Control node (t3a.large) | ~$40/mo |
-| Idle + warm pool (2) | Above + 2× stopped DTN EBS (100 GB gp3) | ~$56/mo |
-| 1 active DTN | Above + 1× m6i.xlarge on-demand | ~$196/mo |
-| 1 active DTN (Spot) | Above + 1× m6i.xlarge Spot (~70% savings) | ~$112/mo |
+| Fully idle | Control node (t3a.large) + EIP | ~$59/mo |
+| Idle + warm pool (2) | Above + 2× stopped DTN EBS (20 GiB gp3 each) | ~$62/mo |
+| 1 DTN always on | Above + 1× c8in.2xlarge on-demand | ~$459/mo |
+| Elastic, 1 DTN 40 h/month | Idle + warm pool + 40 h × $0.544 | ~$84/mo |
 
-Warm pool provides faster scale-out (30–60 s vs 2–3 min cold) at the cost of ~$16/mo for EBS storage. Whether to use warm pool vs cold-start is a latency/cost trade-off. Spot instances are incompatible with warm pools (AWS constraint) — choose one or the other.
+Internet egress ($50–90/TB) dominates the cost of any transfer; see
+[Instance Sizing](instance-sizing.md). Warm pool provides faster scale-out
+(30–60 s vs 2–3 min cold) at the cost of ~$3/mo for EBS storage. Whether to use warm pool vs cold-start is a latency/cost trade-off. Spot instances are incompatible with warm pools (AWS constraint) — choose one or the other.

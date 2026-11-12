@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `docs/instance-sizing.md` and `scripts/instance_sizing.py`: DTN and control node
+  sizing from live EC2 specs and prices, ranked by sustained internet-gateway
+  throughput per dollar.
+
 ### Changed
+- **Default DTN type is now `c8in.2xlarge`** (12.5 Gbps sustained to the internet,
+  $0.544/hr in us-east-1). `m6i.xlarge` is previous-generation and sustains
+  1.56 Gbps; its internet traffic is capped at 5 Gbps even while bursting.
+- The throughput scale-out threshold now defaults to ~70% of what one DTN of the
+  configured type sustains (1,093 MB/s for `c8in.2xlarge`) instead of a fixed
+  500 MB/s. Unknown types keep 500 MB/s with a synth warning.
 - **GCS pinned to 5.4.101** via a single `globus:gcsVersion` CDK context key. The
   control node, DTN UserData fallback, and `scripts/build_ami.sh` all install that
   exact version. GCS 5.4.98 and lower lose support on April 22, 2027; 5.4.101
