@@ -112,6 +112,48 @@ about 1.9× the c8in fleet per Gbps.
 Revisit Graviton if Globus adds official arm64 support (`r8gn.large` is the
 natural candidate).
 
+## CPU: clock speed and physical cores
+
+GCS work is CPU-heavy per process: S3 HTTPS, GridFTP data-channel TLS, and
+integrity checksums. Each concurrency slot is a GridFTP process, so per-core
+speed matters, not just core count. Experience suggests Globus favors fast
+cores. The test plan (#58) checks this at equal network throughput.
+
+| Type | CPU | vCPU | Physical cores | Sustained GHz | Internet Gbps | $/hr |
+|------|-----|------|----------------|---------------|---------------|------|
+| `m8in.xlarge` | Intel Xeon 6 | 4 | 2 (SMT) | 3.9 | 6.25 | $0.334 |
+| `c8in.2xlarge` | Intel Xeon 6 | 8 | 4 (SMT) | 3.9 | 12.5 | $0.544 |
+| `c8in.4xlarge` | Intel Xeon 6 | 16 | 8 (SMT) | 3.9 | 25 | $1.089 |
+| `m8azn.xlarge` | AMD EPYC (8th gen) | 4 | 4 | 5.0 | 5 | $0.413 |
+| `c8a.2xlarge` | AMD EPYC (8th gen) | 8 | 8 | 4.5 | 3.75 | $0.431 |
+| `r8gn.large` | Graviton4 | 2 | 2 | 2.8 | 5 | $0.182 |
+| `c8gn.2xlarge` | Graviton4 | 8 | 8 | 2.8 | 5 | $0.474 |
+| `c9g.2xlarge` | Graviton (9th gen) | 8 | 8 | 3.3 | 4.25 | $0.348 |
+
+Trade-offs:
+
+- **Intel `*8in`:** the only types with uncapped internet throughput, but each
+  vCPU is a hyperthread. `c8in.2xlarge` has 4 physical cores for 12.5 Gbps.
+- **AMD 8th gen:** the fastest clocks (`m8azn` at 5.0 GHz), and every vCPU is a
+  full core. But AMD types are network-capped (5 Gbps or less below 32 vCPUs,
+  low baselines), so they only win if DTNs turn out to be CPU-bound below
+  5 Gbps.
+- **Graviton:** full cores but the slowest clocks (2.8–3.3 GHz). 9th-gen
+  Graviton (`c9g`/`m9g`/`r9g`) has no network-optimized variant yet, so its
+  baseline is 4.25 Gbps at 2xlarge.
+
+If CPU-bound per node, the fix is horizontal: more nodes, each running fewer
+concurrency processes.
+
+## Multiple network interfaces
+
+On EC2, bandwidth belongs to the **network card**, not to the network interface
+(ENI). Every candidate type below the largest sizes has one network card.
+Adding ENIs there splits the same bandwidth and the same 5 Gbps / baseline
+internet limit. Only `c8in.96xlarge`, `m8in.96xlarge` and `c8gn.48xlarge`
+have 2 cards (300 Gbps each). To get more interfaces' worth of throughput,
+scale out instead.
+
 ## Horizontal scaling
 
 Within the c8in family, cost per Gbps is the same at every size, and idle cost
@@ -235,17 +277,27 @@ DTNs are active and re-enable it on scale-in to zero.
 
 ## Test matrix
 
-The figures above are AWS limits and Globus's documented behavior. Measure on
-a deployed endpoint:
+The figures above are AWS limits and Globus's documented behavior. #58
+measures them using two Elastic GCS deployments in the same region:
+
+- **Source:** collections over RODA (AWS Open Data) buckets with different data
+  shapes: many small objects (NEXRAD), large files (1000 Genomes), and deep vs
+  flat prefixes.
+- **Destination:** a collection over our own same-region S3 bucket.
+- **Why this setup:** both sides are observable, and traffic crosses the
+  internet gateway like real users' traffic, but is billed at the same-region
+  rate (about $0.01/GB each way).
 
 | # | Question | Decides |
 |---|----------|---------|
-| 1 | Per-node GCS throughput (S3 connector HTTPS + GridFTP TLS) at 6.25 / 12.5 / 25 Gbps on `m8in.xlarge` / `c8in.2xlarge` / `c8in.4xlarge`, with CPU% | Whether node sizes deliver their network limit |
-| 2 | Aggregate throughput of one many-file task vs DTN count (1, 2, 4, 8) at concurrency 4 / 8 / 16 | Horizontal scaling efficiency; per-task fan-out |
-| 3 | Same with many concurrent tasks | Round-robin balance across nodes |
-| 4 | Single large file (≥100 GB) per node size | Value of the coarse tier |
-| 5 | S3 503 rate on large writes into one new prefix vs spread prefixes | Whether prefix layout matters for writes |
-| 6 | Whether the control node carries data channels | Control node sizing, disable-while-DTNs-active |
-| 7 | Endpoint network-use setting vs achieved concurrency | Recommended concurrency policy |
-| 8 | `r8gn.large` on Ubuntu 26.04 arm64 vs `c8in.2xlarge` (if Globus confirms arm64) | Graviton adoption |
-| 9 | Throughput to typical campus destinations | Real-world ceiling vs per-DTN limit |
+| 1 | Per-node throughput and per-core CPU for `m8in.xlarge` / `c8in.2xlarge` / `c8in.4xlarge` | Whether node sizes deliver their network limit |
+| 2 | Intel `c8in` vs AMD `m8azn` vs Graviton `c8gn`/`r8gn`/`c9g` at equal network | Whether fast cores matter; vendor choice |
+| 3 | One many-file task vs DTN count (1/2/4/8) at concurrency 4/8/16 | Horizontal scaling efficiency; per-task fan-out |
+| 4 | Many concurrent tasks | Round-robin balance across nodes |
+| 5 | Single large file (≥100 GB) per node size | Value of the coarse tier |
+| 6 | S3 503 rate on large writes into one new prefix vs spread prefixes | Whether prefix layout matters for writes |
+| 7 | Whether the control node carries data channels | Control node sizing |
+| 8 | Endpoint network-use setting vs achieved concurrency | Concurrency policy (#56) |
+| 9 | A second ENI on one network card | Confirms no gain |
+| 10 | Graviton on Ubuntu 26.04 arm64, if Globus confirms arm64 | Graviton adoption |
+| 11 | Throughput to typical campus destinations | Real-world ceiling |
