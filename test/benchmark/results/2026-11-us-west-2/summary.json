@@ -1,0 +1,103 @@
+{
+  "meta": {
+    "campaign": "2026-11-us-west-2",
+    "dates": "2026-11-12/2026-11-13",
+    "issue": "https://github.com/scttfrdmn/aws-elastic-gcs/issues/58",
+    "gcs_version": "5.4.101",
+    "topology": "Two Elastic GCS deployments in us-west-2 (src, dst). src serves public RODA buckets (anonymous S3 gateway); dst writes to a private same-region bucket (admin-managed S3 credential). Transfers are src->dst, submitted by the src service account with dependent data_access scopes. Traffic between the two deployments crosses the internet gateway (public IPs), so EC2 IGW limits apply.",
+    "dst_sink": "c8in.2xlarge unless noted",
+    "control_nodes": "t3a.large; out of the data path (node disabled) unless noted",
+    "notes": [
+      "wall_gbps = bytes / (completion - submission); includes ~60-100 s of per-task listing/ramp and the checksum tail.",
+      "steady_gbps = sum of DTN NIC tx rates over a 20-80 s window mid-transfer (harness/netsnap.sh + rates.py).",
+      "Globus reports cancelled tasks as FAILED; those runs are marked cancelled here and only their steady-state samples are used."
+    ]
+  },
+  "datasets": {
+    "sentinel_tile_2024": {"path": "sentinel-cogs/sentinel-s2-l2a-cogs/10/T/ET/2024/", "files": 3381, "bytes": 198301559830, "mean_file_mb": 58.65},
+    "sentinel_tile_2024_m6_m7": {"path": "sentinel-cogs/sentinel-s2-l2a-cogs/10/T/ET/2024/{6,7}/", "files": 504, "bytes": 34892170975},
+    "sentinel_8_tiles_2024": {"path": "sentinel-cogs/sentinel-s2-l2a-cogs/10/T/{ET,ES,ER,EQ,DT,DS,DR,DQ}/2024/", "bytes": 1244360316706, "files": 29296},
+    "nrel_single_file": {"path": "nrel-pds-wtk/Mid_Atlantic/2000/Mid_Atlantic_2000_10m.h5", "files": 1, "bytes": 111306235474},
+    "nasa_power_zarr": {"path": "nasa-power/merra2/temporal/power_merra2_annual_temporal_lst.zarr/", "files": 123676, "bytes": 4341430337, "mean_file_kb": 35}
+  },
+  "network_use_1dtn": {
+    "description": "One c8in.2xlarge DTN per side, sentinel_tile_2024, both endpoints at the same network_use setting.",
+    "rows": [
+      {"setting": "normal", "concurrency": 4, "parallelism": 4, "control_in_path": true, "steady_gbps_per_dtn": 0.35, "wall_gbps": null, "status": "cancelled", "run": "t1-c8in2x-1v1-sentinel", "source": "raw/runs-t1-mid1.txt,raw/runs-t1-mid2.txt"},
+      {"setting": "aggressive", "concurrency": 8, "parallelism": 4, "control_in_path": true, "steady_gbps_per_dtn": 1.3, "wall_gbps": 2.129, "status": "succeeded", "run": "t1b-aggressive", "source": "raw/t1b-a.txt,raw/t1b-b.txt"},
+      {"setting": "aggressive", "concurrency": 8, "parallelism": 4, "control_in_path": false, "steady_gbps_per_dtn": 1.1, "wall_gbps": null, "status": "cancelled", "run": "t1c-aggr-noctl", "source": "raw/t1c-a.txt,raw/t1c-b.txt"},
+      {"setting": "custom 32/64", "concurrency": 32, "parallelism": 8, "control_in_path": false, "steady_gbps_per_dtn": 9.2, "wall_gbps": 6.308, "status": "succeeded", "run": "t1d-custom32-noctl", "source": "raw/t1d-c1.txt,raw/t1d-c2.txt"}
+    ]
+  },
+  "dtn_scaling": {
+    "description": "Single task, src and dst at N c8in.2xlarge DTNs each, custom network use (concurrency 32/64 at N=1, 64/128 at N=2, 128/128 at N>=4).",
+    "rows": [
+      {"dtns": 1, "concurrency": 32, "bytes": 198301559830, "wall_gbps": 6.308, "steady_gbps": 9.2, "faults": 0, "run": "t1d-custom32-noctl"},
+      {"dtns": 2, "concurrency": 64, "bytes": 372602519352, "wall_gbps": 11.545, "steady_gbps": 18.1, "faults": 0, "run": "t3-2dtn", "source": "raw/t3a-1.txt,raw/t3a-2.txt"},
+      {"dtns": 4, "concurrency": 128, "bytes": 659139059791, "wall_gbps": 17.42, "steady_gbps": 37.2, "faults": 0, "run": "t3-4dtn", "source": "raw/t3b-1.txt,raw/t3b-2.txt"},
+      {"dtns": 8, "concurrency": 128, "bytes": 1244360316706, "wall_gbps": 12.976, "steady_gbps": null, "faults": 2, "run": "t3-8dtn", "note": "16 processes per node; bursty with a long straggler tail, no reliable steady-state window"}
+    ],
+    "concurrent_tasks_8dtn": {"tasks": 2, "bytes": 1244360316706, "wall_s": 398, "aggregate_wall_gbps": 25.0, "faults": 1, "runs": ["t4-concA", "t4-concB"]}
+  },
+  "cpu_vendor": {
+    "description": "One src DTN of the given type; dst c8in.2xlarge; sentinel_tile_2024; custom 32/64.",
+    "rows": [
+      {"type": "c8in.xlarge", "vendor": "Intel Xeon 6", "vcpu": 4, "cores": 2, "ghz": 3.9, "steady_gbps": 6.25, "binding_limit": "network baseline (*8in IGW = baseline)", "cpu_pct": 77, "vcpu_per_gbps": 0.49, "wall_gbps": 4.979, "usd_hr": 0.272, "run": "t2b-intel-c8in-xl", "source": "raw/t2b-1.txt,raw/t2b-2.txt"},
+      {"type": "m8azn.xlarge", "vendor": "AMD EPYC (8th gen)", "vcpu": 4, "cores": 4, "ghz": 5.0, "steady_gbps": 5.0, "binding_limit": "5 Gbps IGW cap (non-*8in, <32 vCPU)", "cpu_pct": 36, "vcpu_per_gbps": 0.29, "wall_gbps": 4.059, "usd_hr": 0.413, "run": "t2a-amd-m8azn-xl", "source": "raw/t2a-3.txt,raw/t2a-4.txt"},
+      {"type": "c8in.2xlarge", "vendor": "Intel Xeon 6", "vcpu": 8, "cores": 4, "ghz": 3.9, "steady_gbps": 9.2, "binding_limit": "per-process concurrency / GCS per node", "cpu_pct": 46, "vcpu_per_gbps": 0.40, "wall_gbps": 6.308, "usd_hr": 0.544, "run": "t1d-custom32-noctl"}
+    ]
+  },
+  "peer_settings": {
+    "description": "src (ours) at custom 32/64 with 1 or 4 c8in.xlarge DTNs; dst plays the remote peer; sentinel_tile_2024_m6_m7 (35 GB, 504 files).",
+    "rows": [
+      {"label": "Peer normal, our 1 DTN", "peer": "normal", "our_dtns": 1, "tasks": 1, "negotiated": [4, 8], "wall_gbps": 1.153, "run": "p1a-peer-normal-1dtn"},
+      {"label": "Peer normal, our 4 DTNs", "peer": "normal", "our_dtns": 4, "tasks": 1, "negotiated": [4, 8], "wall_gbps": 1.132, "run": "p1b-peer-normal-4dtn"},
+      {"label": "Peer aggressive, our 4 DTNs", "peer": "aggressive", "our_dtns": 4, "tasks": 1, "negotiated": [8, 8], "renegotiated": [24, 8], "wall_gbps": 1.583, "faults": 2, "run": "p2-peer-aggr-4dtn"},
+      {"label": "Peer tuned (matches ours), our 4 DTNs", "peer": "custom 32/64", "our_dtns": 4, "tasks": 1, "negotiated": [32, 8], "wall_gbps": 4.772, "run": "p3a-rtt0-par8"}
+    ],
+    "concurrent_normal_peer": {"label": "Peer normal, our 4 DTNs, 8 concurrent tasks", "tasks": 8, "bytes": 125223078464, "wall_s": 199.0, "aggregate_wall_gbps": 5.034, "per_task_gbps": [1.57, 1.58, 0.60, 0.91, 0.64, 1.07, 1.87, 1.07], "faults": 0, "runs_prefix": "p4-normal-8tasks"}
+  },
+  "rtt": {
+    "description": "tc netem delay on dst DTN traffic toward src DTN IPs only (verified: 128 data connections at 50.2-50.8 ms under +50 ms). sentinel_tile_2024_m6_m7; 4 src c8in.xlarge, 2 dst c8in.2xlarge.",
+    "rows": [
+      {"peer": "custom 32/64", "added_rtt_ms": 0, "parallelism": 8, "negotiated": [32, 8], "wall_gbps": 4.772, "run": "p3a-rtt0-par8"},
+      {"peer": "custom 32/64", "added_rtt_ms": 20, "parallelism": 8, "wall_gbps": 5.247, "run": "p3b-rtt20-par8"},
+      {"peer": "custom 32/64", "added_rtt_ms": 50, "parallelism": 8, "wall_gbps": 4.804, "run": "p3c-rtt50-par8"},
+      {"peer": "custom 32/64", "added_rtt_ms": 50, "parallelism": 1, "negotiated": [32, 1], "wall_gbps": 5.237, "run": "p3d-rtt50-par1"},
+      {"peer": "custom 32/64", "added_rtt_ms": 80, "parallelism": 8, "negotiated": [32, 8], "wall_gbps": 4.772, "run": "p3e-rtt80-par8"},
+      {"peer": "normal", "added_rtt_ms": 0, "negotiated": [4, 8], "wall_gbps": 1.132, "run": "p1b-peer-normal-4dtn"},
+      {"peer": "normal", "added_rtt_ms": 80, "negotiated": [8, 8], "wall_gbps": 1.855, "run": "p3f-normal-rtt80", "note": "Globus raised concurrency 4 -> 8 on the high-latency path"}
+    ]
+  },
+  "data_shape": {
+    "description": "Per-file behaviour on c8in DTNs.",
+    "rows": [
+      {"shape": "tiny objects (35 KB)", "dataset": "nasa_power_zarr", "concurrency": 128, "result": "~50 files/s, then S3 503 SlowDown on dst writes/checksums; task stalled (ENDPOINT_TOO_BUSY)", "run": "t6-tiny"},
+      {"shape": "tiny objects (35 KB)", "dataset": "nasa_power_zarr", "concurrency": 16, "files_per_s": 175, "result": "~175 files/s steady with 0 faults for ~10 min; throttling returned later as the prefix filled", "run": "t6c-tiny-c16"},
+      {"shape": "medium files (59 MB mean)", "dataset": "sentinel_tile_2024", "per_process_gbps": 0.29, "result": "~0.3 Gbps per GridFTP process at every concurrency tested (8, 32, 128)", "runs": ["t1b-aggressive", "t1d-custom32-noctl", "t3-4dtn"]},
+      {"shape": "single very large file (111 GB)", "dataset": "nrel_single_file", "steady_gbps": 0.6, "result": "~75 MB/s regardless of DTN size: one file = one process", "run": "t5-1file"}
+    ]
+  },
+  "checksum": {
+    "description": "verify_checksum on/off, sentinel_tile_2024, 4 src / 2 dst DTNs, custom 64/128, run in both orders.",
+    "rows": [
+      {"order": 1, "verify_checksum": true, "wall_gbps": 11.307, "faults": 0, "run": "p5-cksum1"},
+      {"order": 1, "verify_checksum": false, "wall_gbps": 4.624, "faults": 3, "run": "p5-cksum0", "note": "confounded by 3 CONNECTION_RESET retries"},
+      {"order": 2, "verify_checksum": false, "wall_gbps": 12.194, "faults": 0, "run": "p5b-cksum0"},
+      {"order": 2, "verify_checksum": true, "wall_gbps": 11.777, "faults": 0, "run": "p5b-cksum1"}
+    ]
+  },
+  "scale_out_timing": {
+    "description": "Warm-pool resume, seconds from SetDesiredCapacity. Before #72 'InService' did not wait for DNS; after #72 it does (true readiness).",
+    "rows": [
+      {"step": "0->1", "deployment": "dst", "to_inservice_s": 50, "to_gcs_active_s": 77, "dns_gated": false},
+      {"step": "1->2", "deployment": "src", "to_inservice_s": 39, "to_gcs_active_s": 50, "dns_gated": false},
+      {"step": "2->4", "deployment": "dst", "to_inservice_s": 45, "to_gcs_active_s": 88, "dns_gated": false},
+      {"step": "4->8", "deployment": "src", "to_inservice_s": 54, "to_gcs_active_s": 129, "dns_gated": false},
+      {"step": "0->1", "deployment": "src", "to_inservice_s": 99, "to_gcs_active_s": 111, "dns_gated": true},
+      {"step": "0->1", "deployment": "dst", "to_inservice_s": 105, "to_gcs_active_s": 148, "dns_gated": true},
+      {"step": "1->4", "deployment": "src", "to_inservice_s": 121, "to_gcs_active_s": 132, "dns_gated": true}
+    ]
+  },
+  "spend": {"through": "2026-11-13 (Cost Explorer, partial day)", "usd": 103.11, "regional_data_transfer_usd": 76.93}
+}

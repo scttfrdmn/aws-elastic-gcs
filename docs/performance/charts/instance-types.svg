@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-labelledby="t d">
+<title id="t">Network limits pick the instance; AMD cores are more efficient</title><desc id="d">Two column charts. Sustained Gbps: c8in.xlarge 6.25, m8azn.xlarge 5.0, c8in.2xlarge 9.2. vCPU per Gbps: 0.49, 0.29, 0.40.</desc><style>
+  .surface { fill: #fcfcfb; } .ink1 { fill: #0b0b0b; } .ink2 { fill: #52514e; } .muted { fill: #898781; }
+  .grid { stroke: #e1e0d9; } .axis { stroke: #c3c2b7; }
+  .s1 { fill: #2a78d6; } .s2 { fill: #eb6834; } .s3 { fill: #1baf7a; }
+  .l1 { stroke: #2a78d6; } .l2 { stroke: #eb6834; } .l3 { stroke: #1baf7a; }
+  .ring { stroke: #fcfcfb; }
+  @media (prefers-color-scheme: dark) {
+    .surface { fill: #1a1a19; } .ink1 { fill: #f0efec; } .ink2 { fill: #c3c2b7; }
+    .grid { stroke: #2c2c2a; } .axis { stroke: #383835; }
+    .s1 { fill: #3987e5; } .s2 { fill: #d95926; } .s3 { fill: #199e70; }
+    .l1 { stroke: #3987e5; } .l2 { stroke: #d95926; } .l3 { stroke: #199e70; }
+    .ring { stroke: #1a1a19; }
+  }
+  text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .t-title { font-size: 16px; font-weight: 600; } .t-sub { font-size: 12px; }
+  .t-tick { font-size: 11px; font-variant-numeric: tabular-nums; } .t-label { font-size: 12px; }
+  .t-value { font-size: 12px; font-weight: 600; }
+</style>
+<rect class="surface" x="0" y="0" width="760" height="300" rx="8"/>
+<text x="24.0" y="30.0" class="t-title ink1" text-anchor="start">Network limits pick the instance; AMD cores are more efficient</text>
+<text x="24.0" y="50.0" class="t-sub ink2" text-anchor="start">One DTN per type, 198 GB of Sentinel-2 COGs, concurrency 32. Left: sustained Gbps. Right: vCPUs used per Gbps.</text>
+<text x="70.0" y="76.0" class="t-label ink2" text-anchor="start">Sustained Gbps</text>
+<line x1="70.0" y1="230.0" x2="370.0" y2="230.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="234.0" class="t-tick muted" text-anchor="end">0</text>
+<line x1="70.0" y1="202.0" x2="370.0" y2="202.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="206.0" class="t-tick muted" text-anchor="end">2</text>
+<line x1="70.0" y1="174.0" x2="370.0" y2="174.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="178.0" class="t-tick muted" text-anchor="end">4</text>
+<line x1="70.0" y1="146.0" x2="370.0" y2="146.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="150.0" class="t-tick muted" text-anchor="end">6</text>
+<line x1="70.0" y1="118.0" x2="370.0" y2="118.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="122.0" class="t-tick muted" text-anchor="end">8</text>
+<line x1="70.0" y1="90.0" x2="370.0" y2="90.0" class="grid" stroke-width="1"/>
+<text x="62.0" y="94.0" class="t-tick muted" text-anchor="end">10</text>
+<line x1="70.0" y1="230.0" x2="370.0" y2="230.0" class="axis" stroke-width="1"/>
+<path d="M108.0,230.0 V146.5 Q108.0,142.5 112.0,142.5 H128.0 Q132.0,142.5 132.0,146.5 V230.0 Z" class="s1"><title>c8in.xlarge (Intel Xeon 6, 2 cores @ 3.9 GHz): 6.25; limit: network baseline (*8in IGW = baseline)</title></path>
+<text x="120.0" y="136.5" class="t-value ink1" text-anchor="middle">6.25</text>
+<text x="120.0" y="248.0" class="t-tick muted" text-anchor="middle">c8in.xlarge</text>
+<text x="120.0" y="262.0" class="t-tick muted" text-anchor="middle">Intel</text>
+<path d="M208.0,230.0 V164.0 Q208.0,160.0 212.0,160.0 H228.0 Q232.0,160.0 232.0,164.0 V230.0 Z" class="s1"><title>m8azn.xlarge (AMD EPYC (8th gen), 4 cores @ 5.0 GHz): 5.00; limit: 5 Gbps IGW cap (non-*8in, &lt;32 vCPU)</title></path>
+<text x="220.0" y="154.0" class="t-value ink1" text-anchor="middle">5.00</text>
+<text x="220.0" y="248.0" class="t-tick muted" text-anchor="middle">m8azn.xlarge</text>
+<text x="220.0" y="262.0" class="t-tick muted" text-anchor="middle">AMD</text>
+<path d="M308.0,230.0 V105.2 Q308.0,101.2 312.0,101.2 H328.0 Q332.0,101.2 332.0,105.2 V230.0 Z" class="s1"><title>c8in.2xlarge (Intel Xeon 6, 4 cores @ 3.9 GHz): 9.20; limit: per-process concurrency / GCS per node</title></path>
+<text x="320.0" y="95.2" class="t-value ink1" text-anchor="middle">9.20</text>
+<text x="320.0" y="248.0" class="t-tick muted" text-anchor="middle">c8in.2xlarge</text>
+<text x="320.0" y="262.0" class="t-tick muted" text-anchor="middle">Intel</text>
+<text x="440.0" y="76.0" class="t-label ink2" text-anchor="start">vCPU per Gbps (lower is better)</text>
+<line x1="440.0" y1="230.0" x2="740.0" y2="230.0" class="grid" stroke-width="1"/>
+<text x="432.0" y="234.0" class="t-tick muted" text-anchor="end">0</text>
+<line x1="440.0" y1="183.3" x2="740.0" y2="183.3" class="grid" stroke-width="1"/>
+<text x="432.0" y="187.3" class="t-tick muted" text-anchor="end">0.2</text>
+<line x1="440.0" y1="136.7" x2="740.0" y2="136.7" class="grid" stroke-width="1"/>
+<text x="432.0" y="140.7" class="t-tick muted" text-anchor="end">0.4</text>
+<line x1="440.0" y1="90.0" x2="740.0" y2="90.0" class="grid" stroke-width="1"/>
+<text x="432.0" y="94.0" class="t-tick muted" text-anchor="end">0.6</text>
+<line x1="440.0" y1="230.0" x2="740.0" y2="230.0" class="axis" stroke-width="1"/>
+<path d="M478.0,230.0 V119.7 Q478.0,115.7 482.0,115.7 H498.0 Q502.0,115.7 502.0,119.7 V230.0 Z" class="s1"><title>c8in.xlarge (Intel Xeon 6, 2 cores @ 3.9 GHz): 0.49; limit: network baseline (*8in IGW = baseline)</title></path>
+<text x="490.0" y="109.7" class="t-value ink1" text-anchor="middle">0.49</text>
+<text x="490.0" y="248.0" class="t-tick muted" text-anchor="middle">c8in.xlarge</text>
+<text x="490.0" y="262.0" class="t-tick muted" text-anchor="middle">Intel</text>
+<path d="M578.0,230.0 V166.3 Q578.0,162.3 582.0,162.3 H598.0 Q602.0,162.3 602.0,166.3 V230.0 Z" class="s1"><title>m8azn.xlarge (AMD EPYC (8th gen), 4 cores @ 5.0 GHz): 0.29; limit: 5 Gbps IGW cap (non-*8in, &lt;32 vCPU)</title></path>
+<text x="590.0" y="156.3" class="t-value ink1" text-anchor="middle">0.29</text>
+<text x="590.0" y="248.0" class="t-tick muted" text-anchor="middle">m8azn.xlarge</text>
+<text x="590.0" y="262.0" class="t-tick muted" text-anchor="middle">AMD</text>
+<path d="M678.0,230.0 V140.7 Q678.0,136.7 682.0,136.7 H698.0 Q702.0,136.7 702.0,140.7 V230.0 Z" class="s1"><title>c8in.2xlarge (Intel Xeon 6, 4 cores @ 3.9 GHz): 0.40; limit: per-process concurrency / GCS per node</title></path>
+<text x="690.0" y="130.7" class="t-value ink1" text-anchor="middle">0.40</text>
+<text x="690.0" y="248.0" class="t-tick muted" text-anchor="middle">c8in.2xlarge</text>
+<text x="690.0" y="262.0" class="t-tick muted" text-anchor="middle">Intel</text>
+</svg>
