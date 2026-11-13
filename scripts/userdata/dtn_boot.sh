@@ -48,6 +48,25 @@ get_metadata() {
         "http://169.254.169.254/latest/meta-data/$1"
 }
 
+# --- Helper: wait until the endpoint's DNS name does (present) or doesn't
+# (absent) resolve to an IP. Globus updates DNS asynchronously after a node
+# changes state; acting before it does leaves dead IPs in DNS (#69).
+wait_endpoint_dns() {  # usage: wait_endpoint_dns present|absent IP TIMEOUT_SEC
+    local want=$1 ip=$2 deadline=$(( $(date +%s) + $3 )) domain
+    domain=$(jq -r '.domain_name // empty' /var/lib/globus-connect-server/info.json 2>/dev/null)
+    [ -n "$domain" ] || { echo "WARNING: no endpoint domain in info.json; skipping DNS wait"; return 0; }
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if getent ahostsv4 "$domain" | awk '{print $1}' | grep -qx "$ip"; then
+            [ "$want" = present ] && { echo ">>> $ip is in $domain DNS"; return 0; }
+        else
+            [ "$want" = absent ] && { echo ">>> $ip is out of $domain DNS"; return 0; }
+        fi
+        sleep 5
+    done
+    echo "WARNING: $ip still not $want in $domain DNS after ${3}s"
+    return 1
+}
+
 # --- Helpers: deployment-wide first-boot setup lock (SSM parameter) ---
 SETUP_LOCK="${PARAM_PREFIX}/setup-lock"
 SETUP_LOCK_STALE_SEC=300
@@ -192,10 +211,16 @@ if [ -d "$GCS_STATE_DIR" ] && [ -s "$GCS_STATE_DIR/info.json" ]; then
         echo "WARNING: node-id file missing, falling back to slot $DTN_SLOT_NUMBER node_id"
     fi
 
-    echo ">>> Running: globus-connect-server node update $NODE_ID --ip-address $PUBLIC_IP --enable"
+    # Enable locally first: a disabled node's own GCS Manager refuses API calls,
+    # and going through the endpoint DNS name fails when no other node is
+    # active (e.g. scale-from-zero with the control node out of the data path).
+    # Once enabled, update the IP through this node's own manager.
+    echo ">>> Enabling node $NODE_ID locally and updating its IP to $PUBLIC_IP"
+    globus-connect-server node enable
+    chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
     globus-connect-server node update "$NODE_ID" \
         --ip-address "$PUBLIC_IP" \
-        --enable
+        --use-explicit-host 127.0.0.1
 
     # Fix lock file ownership: GCS CLI runs as root, service runs as gcsweb.
     chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
@@ -279,6 +304,11 @@ aws ec2 create-tags \
     --resources "$INSTANCE_ID" \
     --tags "Key=elastic-gcs:gcs-node-id,Value=${NODE_ID}" \
     --region "$AWS_REGION" 2>/dev/null || true
+
+# --- Wait for DNS before declaring the node ready (#34, #69) ---
+# Globus adds the node to the endpoint's DNS asynchronously; until it does,
+# transfers can't reach this node.
+wait_endpoint_dns present "$PUBLIC_IP" 180 || true
 
 # --- Verify node is healthy ---
 echo ">>> Verifying node health..."
