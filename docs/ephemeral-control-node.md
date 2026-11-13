@@ -353,3 +353,28 @@ deployments.
 
 EBS: control node 30 GB gp3 ≈ $2.40/mo; each DTN 20 GB gp3 ≈ $1.60/mo.
 SM: Secrets Manager secrets at $0.40/mo each (7 node slots + deployment key + credentials + waker token).
+
+## Manual stop/start between sessions
+
+For test or occasional-use deployments, stop the control node by hand when the
+DTN pool is idle. Idle cost drops from ~$55 to ~$6 per month (EBS + the
+unattached Elastic IP).
+
+```bash
+AWS_PROFILE=aws scripts/control_node_power.sh us-west-2 src status
+AWS_PROFILE=aws scripts/control_node_power.sh us-west-2 src stop    # ~1 min
+AWS_PROFILE=aws scripts/control_node_power.sh us-west-2 src start   # ~1 min, until back in endpoint DNS
+```
+
+**stop:**
+- refuses unless the DTN pool is at 0;
+- disables the control node's GCS node locally and waits for its IP to leave
+  endpoint DNS before stopping, so no dead IP is left behind (#69);
+- leaves the endpoint offline: zero active nodes.
+
+**start:** enables the node locally, and returns once the Elastic IP is back in
+endpoint DNS.
+
+**While the control node is stopped:** DTNs can still scale out, because they
+enable themselves locally (#72). Lambdas that target the control node (cache
+eviction, version check) fail until it's started again.
