@@ -190,11 +190,31 @@ else
     mkdir -p /var/lib/elastic-gcs
     echo "$NODE_ID" > /var/lib/elastic-gcs/node-id
 
-    echo ">>> Running: globus-connect-server node setup --import-node (may take several minutes)"
-    globus-connect-server node setup \
-        --deployment-key "$DEPLOY_KEY_FILE" \
-        --import-node "$NODE_IDENTITY_FILE" \
-        --ip-address "$PUBLIC_IP"
+    # node setup updates the endpoint's shared keychain in Globus. A fresh warm
+    # pool boots every instance at once, and concurrent setups fail with
+    # "Unable to save keychain to cloud ... Object KEY_CHAIN has changed" (or
+    # occasionally exit silently, leaving partial local state). Retry with
+    # jittered backoff, cleaning up local state between attempts so a retry
+    # (or the next boot) doesn't take the resume path.
+    MAX_SETUP_ATTEMPTS=6
+    for attempt in $(seq 1 "$MAX_SETUP_ATTEMPTS"); do
+        echo ">>> Running: globus-connect-server node setup --import-node (attempt $attempt/$MAX_SETUP_ATTEMPTS)"
+        if globus-connect-server node setup \
+            --deployment-key "$DEPLOY_KEY_FILE" \
+            --import-node "$NODE_IDENTITY_FILE" \
+            --ip-address "$PUBLIC_IP"; then
+            break
+        fi
+        globus-connect-server node cleanup >/dev/null 2>&1 || true
+        rm -f "$GCS_STATE_DIR/info.json"
+        if [ "$attempt" -eq "$MAX_SETUP_ATTEMPTS" ]; then
+            echo "ERROR: node setup failed after $attempt attempts"
+            exit 1
+        fi
+        DELAY=$(( 10 * attempt + RANDOM % 30 ))
+        echo ">>> node setup failed; retrying in ${DELAY}s"
+        sleep "$DELAY"
+    done
 
     rm -f "$DEPLOY_KEY_FILE" "$NODE_IDENTITY_FILE"
 
