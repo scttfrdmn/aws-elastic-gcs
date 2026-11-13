@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Performance documentation** (#70) from the #58 benchmark campaign:
+  `docs/performance/` (overview, user/admin guide, operator tuning guide,
+  methodology and results), SVG charts generated from
+  `test/benchmark/results/2026-11-us-west-2/summary.json`, and
+  `scripts/throughput_model.py`, a calculator calibrated on the measured runs.
+- Benchmark harness (`test/benchmark/harness/`) and raw results for the
+  `2026-11-us-west-2` campaign.
 - **Multiple deployments per region** (#57). Each `regions.yaml` entry has a
   `deployment` name (default `default`), and `internal/names` derives every
   stack, resource, secret, SSM path and alarm name from `(region, deployment)`.

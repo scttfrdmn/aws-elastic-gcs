@@ -165,13 +165,14 @@ elastic-gcs/
 - [Operator Guide](docs/operator-guide.md) — full deploy-through-destroy lifecycle and day-2 operations
 - [Configuration Reference](docs/configuration.md) — CDK context, Secrets Manager, SSM parameters
 - [Instance Sizing](docs/instance-sizing.md) — DTN and control node types by sustained throughput and cost
+- [Performance](docs/performance/README.md) — measured throughput, user and operator tuning guides, throughput model
 - [Ephemeral Control Node](docs/ephemeral-control-node.md) — idle-shutdown, wake mechanisms, Globus Flow integration, cost model
 - [GlobusWorld Demo Runbook](docs/demo-runbook.md) — live demo script with timing notes and contingency paths
 
 ## Related Projects
 
 - [globus-go-sdk](https://github.com/scttfrdmn/globus-go-sdk) — Go SDK for Globus services (Auth, Transfer, Flows, Search)
-- [aws-globus-connector](https://github.com/scttfrdmn/aws-globus-connector) — High-performance S3 connector for GCS
+- [aws-globus-connector](https://github.com/scttfrdmn/aws-globus-connector) — S3 connector for GCS (dormant: the Globus connector protocol is not public)
 - [globus-gcs-s3-deployment](https://github.com/scttfrdmn/globus-gcs-s3-deployment) — Reference shell-based GCS S3 deployment
 
 ## License

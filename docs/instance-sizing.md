@@ -19,10 +19,17 @@ Gbps of the whole fleet, and the size of each scale-out step.
 
 | Role | Type | vCPU / GiB | Sustained internet throughput | us-east-1 $/hr | Use when |
 |------|------|-----------|-------------------------------|----------------|----------|
-| **DTN (default)** | `c8in.2xlarge` | 8 / 16 | 12.5 Gbps per node | $0.544 | Most deployments. One node matches a 10 GbE campus DTN; scale out in 12.5 Gbps steps. |
-| DTN (fine-grained) | `m8in.xlarge` | 4 / 16 | 6.25 Gbps per node | $0.334 | Mostly small or bursty demand. Half-size steps for 23% more per Gbps. |
-| DTN (coarse) | `c8in.4xlarge` | 16 / 32 | 25 Gbps per node | $1.089 | Very large single files, which Globus can't split across nodes, sent to 100 GbE destinations. |
+| **DTN (default)** | `c8in.2xlarge` | 8 / 16 | 12.5 Gbps per node (**9.2 measured** with GCS at concurrency 32, 46% CPU) | $0.544 | Most deployments. One node matches a 10 GbE campus DTN; scale out in ~9 Gbps steps. |
+| DTN (fine-grained) | `m8in.xlarge` / `c8in.xlarge` | 4 / 16 or 8 | 6.25 Gbps per node (c8in.xlarge **6.25 measured**, at 77% CPU) | $0.334 / $0.272 | Mostly small or bursty demand. c8in.xlarge has only 8 GiB and is near CPU saturation at its network limit. |
 | Control node | `t3a.large` | 2 / 8 | (not a data mover, see below) | $0.0752 | Default. ~$55/month on-demand. |
+
+**Measured (2026-11, [performance results](performance/methodology.md)):**
+- The coarse `c8in.4xlarge` tier (previously "for very large single files") is
+  dropped. One file moves at ~75 MB/s on any instance size, so a bigger node
+  doesn't help.
+- A single Globus task can't fan out beyond ~4 DTNs at Transfer's 128-process
+  cap, so scale out with more nodes, not larger ones.
+- AMD `m8azn.xlarge` measured exactly its 5 Gbps internet cap, at 36% CPU.
 
 Avoid:
 
@@ -250,7 +257,6 @@ multi-DTN alarm never fires:
 |----------|-----------|----------------------------|
 | `m8in.xlarge` | 781 MB/s | 550 |
 | `c8in.2xlarge` | 1,562 MB/s | 1100 |
-| `c8in.4xlarge` | 3,125 MB/s | 2200 |
 
 The old 500 MB/s default was above what `m6i.xlarge` sustains (195 MB/s), so
 under steady load it only fired while burst credits lasted. The alarm adds at
@@ -270,34 +276,14 @@ Cheapest x86-64 options:
 `t3a.large` is fine: the GCS Manager is mostly idle. Because it runs 24/7, a
 1-year Compute Savings Plan is worth buying for it.
 
-**The control node is itself an active GCS node.** If Globus routes data channels
-to it while DTNs are up, those flows run at ≤0.5 Gbps. Verify this in the
-benchmark. If it does carry data, disable the control node as a data node while
-DTNs are active and re-enable it on scale-in to zero.
+**The control node is itself an active GCS node, and it does carry data.**
+Measured in #58: Globus gave it the same share of processes as a DTN. It ran at
+75% CPU on 2 burstable vCPUs and became the bottleneck. Disable it as a data
+node while DTNs are active, and re-enable it before the last DTN leaves; see the
+[operator guide](performance/operator-guide.md). Never let the endpoint reach
+zero active nodes.
 
-## Test matrix
+## Measured results
 
-The figures above are AWS limits and Globus's documented behavior. #58
-measures them using two Elastic GCS deployments in the same region:
-
-- **Source:** collections over RODA (AWS Open Data) buckets with different data
-  shapes: many small objects (NEXRAD), large files (1000 Genomes), and deep vs
-  flat prefixes.
-- **Destination:** a collection over our own same-region S3 bucket.
-- **Why this setup:** both sides are observable, and traffic crosses the
-  internet gateway like real users' traffic, but is billed at the same-region
-  rate (about $0.01/GB each way).
-
-| # | Question | Decides |
-|---|----------|---------|
-| 1 | Per-node throughput and per-core CPU for `m8in.xlarge` / `c8in.2xlarge` / `c8in.4xlarge` | Whether node sizes deliver their network limit |
-| 2 | Intel `c8in` vs AMD `m8azn` vs Graviton `c8gn`/`r8gn`/`c9g` at equal network | Whether fast cores matter; vendor choice |
-| 3 | One many-file task vs DTN count (1/2/4/8) at concurrency 4/8/16 | Horizontal scaling efficiency; per-task fan-out |
-| 4 | Many concurrent tasks | Round-robin balance across nodes |
-| 5 | Single large file (≥100 GB) per node size | Value of the coarse tier |
-| 6 | S3 503 rate on large writes into one new prefix vs spread prefixes | Whether prefix layout matters for writes |
-| 7 | Whether the control node carries data channels | Control node sizing |
-| 8 | Endpoint network-use setting vs achieved concurrency | Concurrency policy (#56) |
-| 9 | A second ENI on one network card | Confirms no gain |
-| 10 | Graviton on Ubuntu 26.04 arm64, if Globus confirms arm64 | Graviton adoption |
-| 11 | Throughput to typical campus destinations | Real-world ceiling |
+The test matrix above was run in November 2026 (#58). Results, charts, guides
+and the throughput model are in [docs/performance/](performance/README.md).
