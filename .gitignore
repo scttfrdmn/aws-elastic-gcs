@@ -25,3 +25,6 @@ config/open_data_buckets.yaml
 deployment-key.json
 *.pem
 *.key
+
+# Benchmark harness local config
+test/benchmark/harness/bench.env
