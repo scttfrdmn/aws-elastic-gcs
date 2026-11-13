@@ -230,8 +230,84 @@ def rtt():
     svg.save("rtt.svg")
 
 
+def network_use():
+    rows = S["network_use_1dtn"]["rows"]
+    # One row per setting: prefer the run with the control node out of the data path.
+    pick = {}
+    for r in rows:
+        if r["setting"] not in pick or not r["control_in_path"]:
+            pick[r["setting"]] = r
+    items = list(pick.values())
+    w, left, right = 760, 230, 70
+    top, band, thick = 92, 44, 24
+    h = top + band * len(items) + 66
+    svg = SVG(w, h, "Concurrency sets per-DTN throughput",
+              "Steady-state Gbps on one c8in.2xlarge DTN per side, 198 GB of Sentinel-2 COGs, both ends at the same setting.",
+              "Horizontal bar chart. Steady-state throughput per DTN: normal (concurrency 4) 0.35 Gbps, aggressive (8) 1.1, custom (32) 9.2.")
+    xmax = 10
+    scale = (w - left - right) / xmax
+    for i in range(0, xmax + 1, 2):
+        x = left + i * scale
+        svg.line(x, top - 6, x, top + band * len(items) - 10, "grid")
+        svg.text(x, top + band * len(items) + 8, f"{i}", "t-tick muted", "middle")
+    svg.text(left + (w - left - right) / 2, top + band * len(items) + 26, "Gbps per DTN (steady state)", "t-tick muted", "middle")
+    for k, r in enumerate(items):
+        y = top + k * band
+        v = r["steady_gbps_per_dtn"]
+        note = " (control node in path)" if r["control_in_path"] else ""
+        svg.text(left - 12, y + thick / 2 - 2, r["setting"], "t-label ink1", "end")
+        svg.text(left - 12, y + thick / 2 + 12, f'concurrency {r["concurrency"]}', "t-tick muted", "end")
+        svg.hbar(left, y, v * scale, thick, "s1", f'{r["setting"]}, concurrency {r["concurrency"]}: {v} Gbps per DTN{note}')
+        svg.text(left + v * scale + 6, y + thick / 2 + 4, f"{v:g}", "t-value ink1")
+    svg.line(left, top - 6, left, top + band * len(items) - 10, "axis")
+    if any(r["control_in_path"] for r in items):
+        svg.text(24, h - 14, "normal was measured with the control node still in the data path; the others without it.", "t-tick muted")
+    svg.save("network-use.svg")
+
+
+def scale_out():
+    rows = S["scale_out_timing"]["rows"]
+    rows = sorted(rows, key=lambda r: (r["dns_gated"], r["deployment"], r["step"]))
+    w, left, right = 760, 170, 70
+    top, band, thick, gap = 112, 32, 18, 28
+    groups = len({r["dns_gated"] for r in rows})
+    bottom_y = top + band * len(rows) + gap * (groups - 1)
+    h = bottom_y + 64
+    svg = SVG(w, h, "A warm DTN serves in about 1-2.5 minutes",
+              ["Seconds from SetDesiredCapacity on the warm pool. Bars: until the ASG reports InService, then until the",
+               "node is active in GCS. Since #72, InService waits for endpoint DNS, so it is true readiness."],
+              "Stacked horizontal bars of warm-pool scale-out time. Before #72: 50-129 s to GCS active. With the DNS gate: 111-148 s.")
+    xmax = nice_max(max(r["to_gcs_active_s"] for r in rows), 30)
+    scale = (w - left - right) / xmax
+    for t in range(0, xmax + 1, 30):
+        x = left + t * scale
+        svg.line(x, top - 6, x, bottom_y - 10, "grid")
+        svg.text(x, bottom_y + 8, f"{t}", "t-tick muted", "middle")
+    svg.text(left + (w - left - right) / 2, bottom_y + 26, "seconds", "t-tick muted", "middle")
+    prev, y = None, top - band
+    for r in rows:
+        y += band
+        if r["dns_gated"] != prev:
+            if prev is not None:
+                y += gap
+            svg.text(24, y - 10, "With DNS gate (#72)" if r["dns_gated"] else "Before DNS gate", "t-label ink2")
+            prev = r["dns_gated"]
+        a, b = r["to_inservice_s"], r["to_gcs_active_s"]
+        svg.text(left - 12, y + thick / 2 + 4, f'{r["deployment"]} {r["step"]}', "t-label ink1", "end")
+        # Segment 1 is square on both ends (it meets segment 2); 2px surface gap between segments.
+        tip = f'{r["deployment"]} {r["step"]}: InService at {a} s'
+        svg.parts.append(f'<rect x="{left:.1f}" y="{y:.1f}" width="{a * scale - 1:.1f}" height="{thick}" class="s1"><title>{escape(tip)}</title></rect>')
+        svg.hbar(left + a * scale + 1, y, (b - a) * scale - 1, thick, "s2", f'{r["deployment"]} {r["step"]}: GCS active at {b} s')
+        svg.text(left + b * scale + 6, y + thick / 2 + 4, f"{b} s", "t-value ink1")
+    svg.line(left, top - 6, left, bottom_y - 10, "axis")
+    svg.legend(left, h - 14, [("s1", "Until ASG InService"), ("s2", "Until node active in GCS")])
+    svg.save("scale-out.svg")
+
+
 if __name__ == "__main__":
     peer_settings()
     dtn_scaling()
     instance_types()
     rtt()
+    network_use()
+    scale_out()
