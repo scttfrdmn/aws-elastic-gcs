@@ -218,6 +218,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		),
 		Resources: jsii.Strings(
 			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s/*", region, dep.ParamPrefix(), names.ParamSlotLock),
+			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s", region, dep.ParamPrefix(), names.ParamSetupLock),
 		),
 	}))
 

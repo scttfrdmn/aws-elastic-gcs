@@ -97,6 +97,7 @@ const (
 	ParamEndpointID    = "endpoint-id"
 	ParamControlNodeID = "control-node-id"
 	ParamSlotLock      = "slot-lock"
+	ParamSetupLock     = "setup-lock"
 
 	TagDeployment = "elastic-gcs:deployment"
 	TagRegion     = "elastic-gcs:region"

@@ -48,6 +48,45 @@ get_metadata() {
         "http://169.254.169.254/latest/meta-data/$1"
 }
 
+# --- Helpers: deployment-wide first-boot setup lock (SSM parameter) ---
+SETUP_LOCK="${PARAM_PREFIX}/setup-lock"
+SETUP_LOCK_STALE_SEC=300
+SETUP_LOCK_HELD=false
+acquire_setup_lock() {
+    local deadline=$(( $(date +%s) + 900 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if aws ssm put-parameter --name "$SETUP_LOCK" --value "$INSTANCE_ID" \
+            --type String --region "$AWS_REGION" >/dev/null 2>&1; then
+            SETUP_LOCK_HELD=true
+            echo ">>> Acquired setup lock"
+            return 0
+        fi
+        local modified age
+        modified=$(aws ssm get-parameter --name "$SETUP_LOCK" --region "$AWS_REGION" \
+            --query 'Parameter.LastModifiedDate' --output text 2>/dev/null || echo "")
+        if [ -n "$modified" ]; then
+            age=$(( $(date +%s) - $(date -d "$modified" +%s 2>/dev/null || date +%s) ))
+            if [ "$age" -gt "$SETUP_LOCK_STALE_SEC" ]; then
+                echo ">>> Setup lock is ${age}s old; treating it as abandoned"
+                aws ssm delete-parameter --name "$SETUP_LOCK" --region "$AWS_REGION" >/dev/null 2>&1 || true
+                continue
+            fi
+        fi
+        sleep $(( 3 + RANDOM % 5 ))
+    done
+    echo "WARNING: setup lock not acquired after 15 min; proceeding without it"
+}
+release_setup_lock() {
+    [ "$SETUP_LOCK_HELD" = true ] || return 0
+    local owner
+    owner=$(aws ssm get-parameter --name "$SETUP_LOCK" --region "$AWS_REGION" \
+        --query Parameter.Value --output text 2>/dev/null || echo "")
+    if [ "$owner" = "$INSTANCE_ID" ]; then
+        aws ssm delete-parameter --name "$SETUP_LOCK" --region "$AWS_REGION" >/dev/null 2>&1 || true
+    fi
+    SETUP_LOCK_HELD=false
+}
+
 INSTANCE_ID=$(get_metadata "instance-id")
 echo "Instance ID: $INSTANCE_ID"
 
@@ -175,8 +214,12 @@ else
     BOOT_TYPE="first_boot"
     SETUP_START=$(date +%s%N)
 
-    DEPLOY_KEY_FILE="/tmp/deployment-key.json"
-    NODE_IDENTITY_FILE="/tmp/node-slot-${DTN_SLOT_NUMBER}.json"
+    # Secrets go in a private temp dir that is removed on any exit, so a
+    # failed setup can't leave the deployment key on disk.
+    SECRETS_DIR=$(umask 077 && mktemp -d /tmp/elastic-gcs.XXXXXX)
+    trap 'rm -rf "$SECRETS_DIR"; release_setup_lock' EXIT
+    DEPLOY_KEY_FILE="$SECRETS_DIR/deployment-key.json"
+    NODE_IDENTITY_FILE="$SECRETS_DIR/node-slot-${DTN_SLOT_NUMBER}.json"
 
     echo ">>> Retrieving deployment key from Secrets Manager..."
     get_secret "${SECRETS_PREFIX}/deployment-key" > "$DEPLOY_KEY_FILE"
@@ -190,13 +233,13 @@ else
     mkdir -p /var/lib/elastic-gcs
     echo "$NODE_ID" > /var/lib/elastic-gcs/node-id
 
-    # node setup updates the endpoint's shared keychain in Globus. A fresh warm
-    # pool boots every instance at once, and concurrent setups fail with
-    # "Unable to save keychain to cloud ... Object KEY_CHAIN has changed" (or
-    # occasionally exit silently, leaving partial local state). Retry with
-    # jittered backoff, cleaning up local state between attempts so a retry
-    # (or the next boot) doesn't take the resume path.
-    MAX_SETUP_ATTEMPTS=6
+    # node setup updates the endpoint's shared keychain in Globus, and
+    # concurrent setups fail with "Unable to save keychain to cloud ... Object
+    # KEY_CHAIN has changed". A fresh warm pool boots every instance at once,
+    # so serialize setups across the deployment with an SSM lock (setup takes
+    # ~7 s). A lock older than SETUP_LOCK_STALE_SEC is treated as abandoned.
+    acquire_setup_lock
+    MAX_SETUP_ATTEMPTS=4
     for attempt in $(seq 1 "$MAX_SETUP_ATTEMPTS"); do
         echo ">>> Running: globus-connect-server node setup --import-node (attempt $attempt/$MAX_SETUP_ATTEMPTS)"
         if globus-connect-server node setup \
@@ -205,18 +248,22 @@ else
             --ip-address "$PUBLIC_IP"; then
             break
         fi
-        globus-connect-server node cleanup >/dev/null 2>&1 || true
-        rm -f "$GCS_STATE_DIR/info.json"
+        # Retry as-is: a failed keychain save leaves no info.json, and a plain
+        # re-run succeeds. Running `node cleanup` without info.json breaks
+        # later attempts (PermissionError on info.json), so only clean up when
+        # setup left partial state behind.
+        if [ -s "$GCS_STATE_DIR/info.json" ]; then
+            globus-connect-server node cleanup || true
+        fi
         if [ "$attempt" -eq "$MAX_SETUP_ATTEMPTS" ]; then
             echo "ERROR: node setup failed after $attempt attempts"
             exit 1
         fi
-        DELAY=$(( 10 * attempt + RANDOM % 30 ))
+        DELAY=$(( 5 * attempt + RANDOM % 10 ))
         echo ">>> node setup failed; retrying in ${DELAY}s"
         sleep "$DELAY"
     done
-
-    rm -f "$DEPLOY_KEY_FILE" "$NODE_IDENTITY_FILE"
+    release_setup_lock
 
     # Fix lock file ownership: GCS CLI runs as root, service runs as gcsweb.
     chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
