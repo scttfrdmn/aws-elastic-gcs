@@ -24,7 +24,7 @@ authorizer = globus_sdk.ClientCredentialsAuthorizer(auth, scope)
 tc = globus_sdk.TransferClient(authorizer=authorizer)
 
 td = globus_sdk.TransferData(src_col, dst_col, label=label, sync_level=None,
-                             verify_checksum=True, notify_on_succeeded=False,
+                             verify_checksum=os.environ.get("VERIFY_CHECKSUM", "1") != "0", notify_on_succeeded=False,
                              notify_on_failed=False, notify_on_inactive=False)
 for it in items:
     rec = it.endswith(":r")
