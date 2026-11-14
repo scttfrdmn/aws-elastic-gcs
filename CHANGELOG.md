@@ -7,14 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-14
+
 ### Added
 - Apache-2.0 `LICENSE`. The repository is public, and the project site at
   https://scttfrdmn.github.io/aws-elastic-gcs/ publishes on every push to `main`.
 - **Project site, blog post and talk outline** (#70). `mkdocs.yml` builds
   `docs/` into a site (Material for MkDocs), with a hook that turns links to files
   outside `docs/` into repository links. `.github/workflows/docs.yml` builds it with
-  `--strict` on every docs change and publishes to GitHub Pages only when run by
-  hand. Also adds `docs/blog/2026-11-its-not-aws.md`,
+  `--strict` on every docs PR and publishes to GitHub Pages on every push to `main`. Also adds `docs/blog/2026-11-its-not-aws.md`,
   `docs/talks/its-not-aws-outline.md`, and two more charts: per-DTN throughput by
   network-use setting, and warm-pool scale-out timing.
 - `scripts/control_node_power.sh`: stop and start a control node between sessions,
@@ -38,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sizing from live EC2 specs and prices, ranked by sustained internet-gateway
   throughput per dollar. Compares Intel, AMD and Graviton, and prices horizontal
   N-node fleets (`--fleet-gbps`) as well as single nodes.
+- **`TransferThroughput` metric and a multi-DTN scale-out alarm.** `demand_monitor`
+  publishes the sum of `effective_bytes_per_second` across active tasks next to
+  `ActiveTransfers` and `QueuedTransfers`. A second alarm scales out once the
+  running DTNs approach saturation, not only when the first transfer arrives.
+- Integration tests `TestAutoScaleOut` and `TestAutoScaleIn` exercise automatic
+  scaling end to end.
 
 ### Changed
 - README: warm scale-out is about two minutes until the node is in endpoint DNS
@@ -74,6 +81,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v1.47, aws-lambda-go v1.55, Go 1.26. CDK CLI ≥ 2.1145 is now required.
 - `config/regions.example.yaml` now uses `t3a.large` for the control node.
   `t4g.medium` is ARM (incompatible with the x86-64 Rocky AMI) and has only 4 GB RAM.
+- **DTN AMI is resolved at deploy time** (#63) from the version-keyed SSM
+  parameter `/elastic-gcs/<region>/dtn-ami/gcs-<version>`, which `build_ami.sh`
+  publishes. Synth no longer fails before an AMI exists, so a fresh deployment can
+  bootstrap. Warm pool sizing was also corrected.
+- Project renamed to `aws-elastic-gcs`. The Go module is
+  `github.com/scttfrdmn/aws-elastic-gcs`, and the CLI is `aws-elastic-gcs-ctl`.
+  AWS resource names were not changed by the rename.
+
+### Fixed
+- **Scale-out never fired for researchers' transfers.** `demand_monitor` called
+  `task_list`, which only returns the caller's own tasks. It now uses the
+  `endpoint_manager` task list, which covers every user's tasks on the endpoint.
+- **Concurrent DTN first boots** (#64, #67). Simultaneous
+  `node setup --import-node` calls raced on the endpoint keychain, and 4 of 8
+  instances failed on a fresh pool. First boots now take turns via an SSM setup
+  lock (~7 s each), retry with jittered backoff, and run `node cleanup` only when
+  setup left partial state.
+- **DTN resume and stop with endpoint DNS** (#72). Resume runs `node enable`
+  locally and updates the IP through the node's own manager, so a DTN can rejoin
+  when no other node is active. The launch hook completes only once the node's IP
+  is in endpoint DNS, and shutdown waits for it to leave, so stopped instances no
+  longer leave dead IPs behind.
+- The scale-in Lambda retries `ScalingActivityInProgress` internally instead of
+  failing while a scale-out lifecycle hook completes.
+- The demand monitor runs every minute: EventBridge `rate()` rules can't run
+  more often, so the 30-second schedule was invalid.
+- Integration tests retry transfer submission for up to 3 minutes after
+  scale-out, to cover DNS propagation.
+- The cost-model test's CloudWatch namespace is now `ElasticGCS`.
+
+### Security
+- **GCS IDs are validated before being put into root SSM commands.**
+  `cache_eviction` built `globus-connect-server node delete <id>` from an EC2 tag
+  that any DTN could write. A compromised DTN could therefore run commands as
+  root on the control node. Node and endpoint IDs are now checked as UUIDs
+  (`internal/gcsid`) in `cache_eviction` and in the CLI's `nodes delete` and
+  `deprovision` paths. The bucket JSON in `collections setup` is base64-encoded.
 
 ## [0.10.0] - 2026-02-27
 
@@ -482,7 +526,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.7.0...v0.8.0
