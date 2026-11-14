@@ -68,6 +68,13 @@ Automating this toggle is part of the slot controller (#65).
   until the node is in DNS; cold launches take longer. A stopped warm instance
   costs ~$1.60/month of EBS.
 
+  ![A warm DTN serves in about 1-2.5 minutes](charts/scale-out.svg)
+
+- **Idle between sessions:** with the pool at 0, `scripts/control_node_power.sh
+  <region> <deployment> stop` takes the control node out of DNS and stops it
+  (~$6/month idle instead of ~$55). `start` brings it back in about a minute.
+  See [ephemeral control node](../ephemeral-control-node.md).
+
 ## 4. Writing to S3
 
 - **Prefixes:** the stock S3 connector writes each file to the key matching its

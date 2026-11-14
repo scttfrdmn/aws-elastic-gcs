@@ -1,0 +1,61 @@
+# Project site, built from docs/ (#70). Preview: pip install -r docs/requirements.txt && mkdocs serve
+site_name: Elastic GCS on AWS
+site_description: Auto-scaling Globus Connect Server v5 on AWS, and what limits a Globus transfer
+repo_url: https://github.com/scttfrdmn/aws-elastic-gcs
+repo_name: scttfrdmn/aws-elastic-gcs
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/brightness-4, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/brightness-7, name: Light mode}
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc: {permalink: true}
+  - pymdownx.superfences
+
+# Links to files outside docs/ (scripts, raw results, the README) become links to the repository.
+hooks:
+  - docs/hooks/repo_links.py
+
+exclude_docs: |
+  hooks/
+  requirements.txt
+  *.py
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+
+nav:
+  - Home: index.md
+  - Performance:
+      - Overview: performance/README.md
+      - Getting maximum performance: performance/user-guide.md
+      - Operator tuning: performance/operator-guide.md
+      - Throughput model: performance/throughput-model.md
+      - Methodology and results: performance/methodology.md
+  - Operating:
+      - Architecture: architecture.md
+      - Configuration: configuration.md
+      - Operator guide: operator-guide.md
+      - Instance sizing: instance-sizing.md
+      - Ephemeral control node: ephemeral-control-node.md
+      - Demo runbook: demo-runbook.md
+  - Writing:
+      - "Blog: It's not the cloud, it's the settings": blog/2026-11-its-not-aws.md
+      - Talk outline: talks/its-not-aws-outline.md

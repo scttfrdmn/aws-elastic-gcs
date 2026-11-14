@@ -61,6 +61,10 @@ of the two endpoints' maximum concurrency:
 | `aggressive` | 8, re-tuned up to 24 mid-task | ~1.6 Gbps |
 | `custom`, max concurrency 32–64 | 32 | ~4.8 Gbps on 35 GB; 6–17 Gbps on larger tasks |
 
+Per DTN, with both ends at the same setting:
+
+![Concurrency sets per-DTN throughput](charts/network-use.svg)
+
 On GCS v5.4:
 
 ```bash

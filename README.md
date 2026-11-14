@@ -1,6 +1,6 @@
 # Elastic GCS on AWS
 
-Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) infrastructure for AWS. Scales from a single control node (~$40/month idle) to multiple high-throughput Data Transfer Nodes in 30–60 seconds, then contracts back when transfers complete.
+Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) infrastructure for AWS. Scales from a single control node (~$40/month idle) to multiple high-throughput Data Transfer Nodes in about two minutes (measured until the node is in endpoint DNS), then contracts back when transfers complete.
 
 **Any Globus subscriber with data in S3 can use this.** The primary use case driving development is fronting the [AWS Open Data Registry](https://registry.opendata.aws/), but the infrastructure is generic.
 
@@ -9,7 +9,7 @@ Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-s
 | | Always-on (2 DTNs) | Elastic GCS |
 |-|-------------------|-------------|
 | Idle cost | ~$400/mo | ~$4–56/mo |
-| Scale-out (warm) | — | ~60s |
+| Scale-out (warm) | — | ~2 min (in DNS) |
 | Scale-out (cold) | — | ~3–5 min |
 | Max throughput | fixed | scales with demand |
 
@@ -26,14 +26,14 @@ See [docs/ephemeral-control-node.md](docs/ephemeral-control-node.md) for the ful
 
 ## How It Works
 
-GCS nodes are pre-registered with unique identities stored in AWS Secrets Manager. DTN instances stay stopped in an ASG warm pool, paying only for EBS storage. When Globus transfer demand is detected, a Lambda resumes a stopped instance, runs `node enable`, and the DTN joins the endpoint within 60 seconds.
+GCS nodes are pre-registered with unique identities stored in AWS Secrets Manager. DTN instances stay stopped in an ASG warm pool, paying only for EBS storage. When Globus transfer demand is detected, a Lambda resumes a stopped instance, runs `node enable`, and the DTN is serving, in endpoint DNS, in about two minutes.
 
 When transfers finish, a lifecycle hook runs `node disable` before the instance stops back to the warm pool.
 
 ```
 COLD (terminated)          WARM (stopped)              HOT (running)
   No EC2 cost               EBS-only cost               Full compute cost
-  3–5 min scale-out         ~60s scale-out              0s (already serving)
+  3–5 min scale-out         ~2 min scale-out            0s (already serving)
        │                         │                            │
        │  Launch from AMI        │  Resume instance           │  Already active
        │  + node setup           │  + node enable             │
@@ -166,6 +166,8 @@ elastic-gcs/
 - [Configuration Reference](docs/configuration.md) — CDK context, Secrets Manager, SSM parameters
 - [Instance Sizing](docs/instance-sizing.md) — DTN and control node types by sustained throughput and cost
 - [Performance](docs/performance/README.md) — measured throughput, user and operator tuning guides, throughput model
+- [Blog post draft](docs/blog/2026-11-its-not-aws.md) and [talk outline](docs/talks/its-not-aws-outline.md) — the performance story for wider audiences
+- Project site: built from `docs/` with `mkdocs.yml` (`pip install -r docs/requirements.txt && mkdocs serve`)
 - [Ephemeral Control Node](docs/ephemeral-control-node.md) — idle-shutdown, wake mechanisms, Globus Flow integration, cost model
 - [GlobusWorld Demo Runbook](docs/demo-runbook.md) — live demo script with timing notes and contingency paths
 

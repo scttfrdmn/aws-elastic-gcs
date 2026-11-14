@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Project site, blog post and talk outline** (#70). `mkdocs.yml` builds
+  `docs/` into a site (Material for MkDocs), with a hook that turns links to files
+  outside `docs/` into repository links. `.github/workflows/docs.yml` builds it with
+  `--strict` on every docs change and publishes to GitHub Pages only when run by
+  hand. Also adds `docs/blog/2026-11-its-not-aws.md`,
+  `docs/talks/its-not-aws-outline.md`, and two more charts: per-DTN throughput by
+  network-use setting, and warm-pool scale-out timing.
+- `scripts/control_node_power.sh`: stop and start a control node between sessions,
+  removing it from endpoint DNS first (~$6/month idle instead of ~$55).
 - **Performance documentation** (#70) from the #58 benchmark campaign:
   `docs/performance/` (overview, user/admin guide, operator tuning guide,
   methodology and results), SVG charts generated from
@@ -29,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   N-node fleets (`--fleet-gbps`) as well as single nodes.
 
 ### Changed
+- README: warm scale-out is about two minutes until the node is in endpoint DNS
+  (measured), not 30–60 s.
 - **Boot scripts are delivered as S3 assets** (#61). UserData downloads them
   from the CDK asset bucket instead of inlining them, which takes DTN UserData from
   14.7 KB to 2.5 KB and control node UserData from ~17 KB (over the 16 KB EC2

@@ -28,3 +28,5 @@ deployment-key.json
 
 # Benchmark harness local config
 test/benchmark/harness/bench.env
+site/
+__pycache__/
