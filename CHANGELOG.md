@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Apache-2.0 `LICENSE`. The repository is public, and the project site at
+  https://scttfrdmn.github.io/aws-elastic-gcs/ publishes on every push to `main`.
 - **Project site, blog post and talk outline** (#70). `mkdocs.yml` builds
   `docs/` into a site (Material for MkDocs), with a hook that turns links to files
   outside `docs/` into repository links. `.github/workflows/docs.yml` builds it with

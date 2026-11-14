@@ -2,6 +2,8 @@
 
 Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) infrastructure for AWS. Scales from a single control node (~$40/month idle) to multiple high-throughput Data Transfer Nodes in about two minutes (measured until the node is in endpoint DNS), then contracts back when transfers complete.
 
+**Project site:** https://scttfrdmn.github.io/aws-elastic-gcs/ (guides, performance results, blog).
+
 **Any Globus subscriber with data in S3 can use this.** The primary use case driving development is fronting the [AWS Open Data Registry](https://registry.opendata.aws/), but the infrastructure is generic.
 
 ## Why
@@ -167,7 +169,7 @@ elastic-gcs/
 - [Instance Sizing](docs/instance-sizing.md) — DTN and control node types by sustained throughput and cost
 - [Performance](docs/performance/README.md) — measured throughput, user and operator tuning guides, throughput model
 - [Blog post draft](docs/blog/2026-11-its-not-aws.md) and [talk outline](docs/talks/its-not-aws-outline.md) — the performance story for wider audiences
-- Project site: built from `docs/` with `mkdocs.yml` (`pip install -r docs/requirements.txt && mkdocs serve`)
+- [Project site](https://scttfrdmn.github.io/aws-elastic-gcs/): built from `docs/` with `mkdocs.yml` and published on every push to `main` (preview locally: `pip install -r docs/requirements.txt && mkdocs serve`)
 - [Ephemeral Control Node](docs/ephemeral-control-node.md) — idle-shutdown, wake mechanisms, Globus Flow integration, cost model
 - [GlobusWorld Demo Runbook](docs/demo-runbook.md) — live demo script with timing notes and contingency paths
 

@@ -1,6 +1,6 @@
-# Project site (#70). Every push and PR that touches the docs builds the site with --strict.
-# Publishing is manual: run this workflow from the Actions tab, after Pages is set to
-# "GitHub Actions" in the repository settings.
+# Project site (#70): https://scttfrdmn.github.io/aws-elastic-gcs/
+# PRs that touch the docs build the site with --strict. Pushes to main (and manual runs)
+# also publish it to GitHub Pages.
 name: docs
 
 on:
@@ -31,12 +31,12 @@ jobs:
         env:
           NO_MKDOCS_2_WARNING: "1"
       - uses: actions/upload-pages-artifact@v5
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'pull_request'
         with:
           path: site
 
   deploy:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:
