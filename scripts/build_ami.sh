@@ -12,6 +12,8 @@ set -euo pipefail
 #   - GCS 5.4 (globus-connect-server54, pinned to $GCS_VERSION)
 #   - SSM Agent (amazon-ssm-agent)
 #   - jq, awscli
+#   - TLS cipher policy (configure_tls.sh) and the GridFTP KillMode=process
+#     drop-in (configure_gridftp.sh, #141)
 #
 # Usage:
 #   AWS_PROFILE=aws ./scripts/build_ami.sh [region] [deployment]
@@ -242,43 +244,48 @@ if echo "$GCS_VER" | grep -q "GCS_NOT_FOUND"; then
 fi
 echo ">>> GCS verified: $GCS_VER"
 
-# --- Configure TLS cipher policy ---
-echo ">>> Applying TLS cipher policy..."
-TLS_SCRIPT=$(cat "$(dirname "$0")/configure_tls.sh" | base64 | tr -d '\n')
-TLS_CMD=$(aws ssm send-command \
-    --instance-ids "$BUILDER_ID" \
-    --document-name AWS-RunShellScript \
-    --timeout-seconds 120 \
-    --parameters "commands=[\"python3 -c \\\"import base64; open('/tmp/configure-tls.sh','wb').write(base64.b64decode('${TLS_SCRIPT}'))\\\"\", \"bash /tmp/configure-tls.sh\"]" \
-    --query 'Command.CommandId' --output text \
-    --region "$REGION" --profile "$AWS_PROFILE")
-
-for i in $(seq 1 12); do
-    sleep 10
-    STATUS=$(aws ssm get-command-invocation \
-        --command-id "$TLS_CMD" \
-        --instance-id "$BUILDER_ID" \
-        --query 'Status' --output text \
-        --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null || echo "Pending")
-    if [ "$STATUS" = "Success" ] || [ "$STATUS" = "Failed" ]; then
-        echo ">>> TLS config status: $STATUS"
-        break
+# --- Node configuration that must be in every DTN AMI ---
+# run_config NAME SCRIPT: run a repo script as root on the builder over SSM. An
+# AMI missing any of these must not be published (#54), so a failure
+# terminates the builder and exits.
+run_config() {
+    local name=$1 script=$2 b64 cmd status=""
+    echo ">>> Applying $name..."
+    b64=$(base64 < "$(dirname "$0")/$script" | tr -d '\n')
+    cmd=$(aws ssm send-command \
+        --instance-ids "$BUILDER_ID" \
+        --document-name AWS-RunShellScript \
+        --timeout-seconds 120 \
+        --parameters "commands=[\"python3 -c \\\"import base64; open('/tmp/$script','wb').write(base64.b64decode('${b64}'))\\\"\", \"bash /tmp/$script\"]" \
+        --query 'Command.CommandId' --output text \
+        --region "$REGION" --profile "$AWS_PROFILE")
+    for i in $(seq 1 12); do
+        sleep 10
+        status=$(aws ssm get-command-invocation \
+            --command-id "$cmd" --instance-id "$BUILDER_ID" \
+            --query 'Status' --output text \
+            --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null || echo "Pending")
+        if [ "$status" = "Success" ] || [ "$status" = "Failed" ]; then
+            echo ">>> $name status: $status"
+            break
+        fi
+        echo "    ($i/12) Status: $status — waiting..."
+    done
+    aws ssm get-command-invocation \
+        --command-id "$cmd" --instance-id "$BUILDER_ID" \
+        --query 'StandardOutputContent' --output text \
+        --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null | tail -10 || true
+    if [ "$status" != "Success" ]; then
+        echo "ERROR: $name did not succeed (status: ${status:-unknown})."
+        echo "Terminating builder without creating AMI."
+        aws ec2 terminate-instances --instance-ids "$BUILDER_ID" \
+            --region "$REGION" --profile "$AWS_PROFILE" > /dev/null
+        exit 1
     fi
-    echo "    ($i/12) Status: $STATUS — waiting..."
-done
-aws ssm get-command-invocation \
-    --command-id "$TLS_CMD" \
-    --instance-id "$BUILDER_ID" \
-    --query 'StandardOutputContent' --output text \
-    --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null | tail -10 || true
-# An AMI without the cipher policy must not be published (#54).
-if [ "$STATUS" != "Success" ]; then
-    echo "ERROR: TLS configuration did not succeed (status: ${STATUS:-unknown})."
-    echo "Terminating builder without creating AMI."
-    aws ec2 terminate-instances --instance-ids "$BUILDER_ID" \
-        --region "$REGION" --profile "$AWS_PROFILE" > /dev/null
-    exit 1
-fi
+}
+run_config "TLS cipher policy" configure_tls.sh
+# Sessions survive GridFTP restarts on node joins/leaves and drains (#141).
+run_config "GridFTP session keep-alive" configure_gridftp.sh
 
 # --- Stop the instance before imaging (ensures filesystem consistency) ---
 echo ">>> Stopping builder instance for AMI creation..."
