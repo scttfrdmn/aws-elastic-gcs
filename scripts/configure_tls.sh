@@ -82,6 +82,13 @@ group = -FFDHE-*
 # Remove CHACHA20-POLY1305 (not in approved list).
 cipher = -CHACHA20-POLY1305
 
+# Remove static RSA key exchange (no forward secrecy) and HMAC-SHA1, which
+# DEFAULT still allows for TLS 1.2 CBC suites (#47). What remains is ECDHE with
+# AES-GCM or AES-CBC/SHA-2: the approved list. TLS 1.3 is unaffected. Note that
+# HMAC-SHA1 removal also applies to SSH (hmac-sha1 MACs), which is intended.
+key_exchange = -RSA
+mac = -HMAC-SHA1
+
 # The DEFAULT policy already sets minimum TLS version to 1.2.
 # To restrict to TLS 1.2 ONLY (disables TLS 1.3), uncomment:
 # protocol = TLS1.2
@@ -157,5 +164,5 @@ echo "Active policy : $(update-crypto-policies --show 2>/dev/null || echo 'N/A (
 echo "GridFTP config: $GSI_CONF"
 echo "Log           : $LOG"
 echo ""
-echo "Removed from DEFAULT: CHACHA20-POLY1305, DHE (FFDHE groups)"
+echo "Removed from DEFAULT: CHACHA20-POLY1305, DHE (FFDHE groups), RSA key exchange, HMAC-SHA1"
 echo "Approved ciphers     : ${APPROVED_CIPHERS//:/ }"

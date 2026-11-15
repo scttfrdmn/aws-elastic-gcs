@@ -288,6 +288,9 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	bootScript := awss3assets.NewAsset(stack, jsii.String("ControlNodeBootScript"),
 		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/control_node_boot.sh")})
 	bootScript.GrantRead(role)
+	tlsScript := awss3assets.NewAsset(stack, jsii.String("ControlNodeTLSScript"),
+		&awss3assets.AssetProps{Path: jsii.String("scripts/configure_tls.sh")})
+	tlsScript.GrantRead(role)
 	bootUnit := awss3assets.NewAsset(stack, jsii.String("ControlNodeBootUnit"),
 		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/elastic-gcs-control.service")})
 	bootUnit.GrantRead(role)
@@ -353,6 +356,12 @@ fi
 		Bucket:    bootScript.Bucket(),
 		BucketKey: bootScript.S3ObjectKey(),
 		LocalFile: jsii.String("/opt/elastic-gcs/scripts/control_node_boot.sh"),
+		Region:    jsii.String(region),
+	})
+	ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
+		Bucket:    tlsScript.Bucket(),
+		BucketKey: tlsScript.S3ObjectKey(),
+		LocalFile: jsii.String("/opt/elastic-gcs/scripts/configure_tls.sh"),
 		Region:    jsii.String(region),
 	})
 	unitPath := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
