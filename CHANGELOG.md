@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **DTN boot fails fast and stays out of DNS when it should** (#34, #69).
+  - Any boot failure completes the launch hook with `ABANDON` right away. The ASG
+    then replaces the instance in seconds instead of after the 15-minute hook
+    timeout.
+  - First boots headed for the warm pool (`Warmed:Pending:Wait`) disable their
+    node and wait for it to leave endpoint DNS before signalling. Before, these
+    nodes were active, and could take transfers, until the instance stopped.
+  - The hook is signalled before self-diagnostics and metrics. Fixed sleeps are
+    replaced by polling, and the lifecycle state is read once.
+  - A failed Globus credential fetch on resume now stops the boot instead of being
+    masked.
 - **Control node lifecycle** (#30, #31).
   - The resume block in `control_node_init.sh` never ran, because cloud-init runs
     UserData once per instance. It is replaced by `elastic-gcs-control.service`,
