@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `internal/slots`: the slot controller's pure decision core (#125, design in
+  #65).
+  - `Plan(observed, desired, cfg)` returns start, revive, drain, stop, restart,
+    rebuild and evict actions over HOT, WARM and COLD slots.
+  - Rules: warm slots start first and in parallel; cold slots revive one at a
+    time; scale-in goes one slot at a time with the fewest data connections
+    first; the last DTN never goes unless the control node is serving; unhealthy
+    slots are restarted, then rebuilt; warm slots beyond `warm_slots` are evicted
+    after `cold_ttl`.
+  - Table-tested.
+
 ### Changed
 - The CLI publishes a Homebrew **cask** (`homebrew_casks`, `Casks/`, macOS and
   Linux). goreleaser deprecated binary-installing formulas (`brews`) in v2.10 and
