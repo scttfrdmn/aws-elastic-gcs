@@ -107,6 +107,7 @@ const (
 	ParamDesiredDTNs    = "desired-dtns"    // written by demand_monitor
 	ParamControllerLock = "controller-lock" // single active controller execution
 	ParamEndpointDomain = "endpoint-domain" // endpoint DNS name, for health checks
+	ParamLastActive     = "last-active"     // last time demand_monitor saw an active transfer
 
 	TagDeployment = "elastic-gcs:deployment"
 	TagRegion     = "elastic-gcs:region"

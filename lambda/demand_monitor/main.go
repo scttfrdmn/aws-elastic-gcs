@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -15,6 +16,7 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/authorizers"
 
@@ -86,7 +88,52 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("PutMetricData failed: %w", err)
 	}
 
+	if os.Getenv("POOL") == "slots" {
+		return setDesired(ctx, cfg, active)
+	}
 	return scaleUp(ctx, cfg, active)
+}
+
+// setDesired drives the slot controller (#129): while transfers are active,
+// desired-dtns only rises (to DesiredDTNs) and last-active is refreshed; after
+// SCALE_IN_IDLE with nothing active it drops to 0. The controller scales in
+// one slot at a time, draining each.
+func setDesired(ctx context.Context, cfg aws.Config, active demand.Stats) error {
+	client := ssm.NewFromConfig(cfg)
+	get := func(leaf string) string {
+		out, err := client.GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(dep.Param(leaf))})
+		if err != nil || out.Parameter == nil {
+			return ""
+		}
+		return aws.ToString(out.Parameter.Value)
+	}
+	put := func(leaf, v string) error {
+		_, err := client.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(dep.Param(leaf)), Value: aws.String(v),
+			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
+		return err
+	}
+	current, _ := strconv.Atoi(get(names.ParamDesiredDTNs))
+	now := time.Now().UTC()
+	maxDTNs, _ := strconv.Atoi(os.Getenv("MAX_DTNS"))
+	perDTN, _ := strconv.ParseInt(os.Getenv("THROUGHPUT_THRESHOLD_BPS"), 10, 64)
+	idle, err := time.ParseDuration(os.Getenv("SCALE_IN_IDLE"))
+	if err != nil {
+		idle = 15 * time.Minute
+	}
+	next := current
+	if active.Count > 0 {
+		if err := put(names.ParamLastActive, now.Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("put last-active: %w", err)
+		}
+		next, _ = scaling.ScaleUp(current, scaling.DesiredDTNs(active.Count, active.TotalBytesPerSec, perDTN, maxDTNs))
+	} else if last, err := time.Parse(time.RFC3339, get(names.ParamLastActive)); err != nil || now.Sub(last) >= idle {
+		next = 0
+	}
+	if next == current && get(names.ParamDesiredDTNs) != "" {
+		return nil
+	}
+	logger.Info("desired-dtns", "from", current, "to", next, "active", active.Count, "throughput_bytes_per_sec", active.TotalBytesPerSec)
+	return put(names.ParamDesiredDTNs, strconv.Itoa(next))
 }
 
 // scaleUp raises the ASG's desired capacity to what the active load needs.

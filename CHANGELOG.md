@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `docs/configuration.md`.
   - Profile defaults never exceed `max_dtns`, and explicit settings beat the
     profile.
+- **`pool: slots` stack** (#128, #129). With `pool: slots` the DTN stack
+  builds no ASG, warm pool or lifecycle hooks. Instead it creates:
+  - a runtime role with no secret access, and a setup role that can read the
+    deployment key and `node-slot-*`, each with its own instance profile;
+  - a launch template whose UserData installs a node boot/shutdown unit;
+  - the durable controller Lambda, with tag-scoped permissions for launch,
+    start/stop/terminate, Elastic IPs, `PassRole`, the profile swap,
+    setup-session revocation, SSM and its parameters;
+  - EventBridge triggers: a 1-minute schedule and changes to `desired-dtns`.
+
+  `demand_monitor` writes `desired-dtns`: it only rises while transfers are
+  active, and drops to 0 after `scale_in_idle`. A synth test checks the shape,
+  including that only the setup role can read secrets. `pool: asg` is unchanged.
 - **Slot controller runtime** (#128, part 1).
   - `internal/slotctl` observes slots: instances and Elastic IPs, health from SSM
     ping plus endpoint DNS, and GridFTP data connections. Controller state is
