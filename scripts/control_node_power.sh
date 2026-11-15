@@ -13,8 +13,9 @@
 #        waits for its Elastic IP to reappear in endpoint DNS.
 #
 # install: put elastic-gcs-control.service (node enable on boot, disable on
-#        shutdown; #30, #31) on a control node created before 0.12. Newer
-#        control nodes get it from UserData. Safe to re-run.
+#        shutdown; #30, #31) and the GridFTP KillMode=process drop-in (#141) on
+#        an existing control node. New control nodes get both from UserData.
+#        Safe to re-run.
 #
 # DTNs can still scale out while the control node is stopped: they enable
 # themselves locally on resume (#72). Lambdas that target the control node
@@ -104,9 +105,12 @@ install)
   [ "$(state)" = running ] || { echo "control node is $(state); start it first"; exit 1; }
   B=$(base64 < "$HERE/userdata/control_node_boot.sh" | tr -d '\n')
   U=$(base64 < "$HERE/userdata/elastic-gcs-control.service" | tr -d '\n')
+  G=$(base64 < "$HERE/configure_gridftp.sh" | tr -d '\n')
   run "set -e; mkdir -p /opt/elastic-gcs/scripts
 echo $B | base64 -d > /opt/elastic-gcs/scripts/control_node_boot.sh; chmod 0755 /opt/elastic-gcs/scripts/control_node_boot.sh
+echo $G | base64 -d > /opt/elastic-gcs/scripts/configure_gridftp.sh; chmod 0755 /opt/elastic-gcs/scripts/configure_gridftp.sh
 echo $U | base64 -d > /etc/systemd/system/elastic-gcs-control.service; chmod 0644 /etc/systemd/system/elastic-gcs-control.service
+bash /opt/elastic-gcs/scripts/configure_gridftp.sh
 systemctl daemon-reload; systemctl enable elastic-gcs-control 2>&1 | tail -1
 systemctl start elastic-gcs-control; systemctl is-active elastic-gcs-control"
   ;;

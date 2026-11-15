@@ -84,6 +84,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Slot health also requires `gcs_manager` and `globus-gridftp-server` to be
     active. A slot's Elastic IP can stay in endpoint DNS after its instance
     dies.
+- **Node joins and leaves no longer reset in-flight transfers (#141).** GCS
+  restarts GridFTP on every node at each node join or leave, and on `node
+  disable`. Its unit's default `KillMode=control-group` killed every session.
+  - `scripts/configure_gridftp.sh` installs a `KillMode=process` drop-in, so
+    only the listener restarts and sessions finish in their own processes.
+  - Drains are now graceful: sessions finish on a disabled node while DNS
+    sends new work elsewhere.
+  - It ships in the DTN AMI (`build_ami.sh`, which now refuses to publish an
+    AMI without it) and in control-node init. `control_node_power.sh install`
+    applies it to existing control nodes.
+  - Measured live: 128 of 128 sessions survived a restart, a disable and an
+    enable with no task faults.
 - `waker` waited for `globus-connect-server-manager`; on GCS 5.4 the unit is
   `gcs_manager`, so the wait always timed out.
 

@@ -80,6 +80,12 @@ esac
 echo ">>> Configuring TLS cipher policy..."
 bash /opt/elastic-gcs/scripts/configure_tls.sh
 
+# --- 1b. Keep GridFTP sessions alive across restarts (#141) ---
+# Shared with the DTN AMI: GCS restarts GridFTP on every node at each node join
+# or leave; KillMode=process lets in-flight sessions finish.
+echo ">>> Configuring GridFTP session keep-alive..."
+bash /opt/elastic-gcs/scripts/configure_gridftp.sh
+
 # --- 2. Retrieve secrets ---
 echo ">>> Retrieving Globus credentials from Secrets Manager..."
 
