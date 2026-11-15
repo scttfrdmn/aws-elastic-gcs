@@ -103,6 +103,10 @@ const (
 	ParamControlNodeID = "control-node-id"
 	ParamSlotLock      = "slot-lock"
 	ParamSetupLock     = "setup-lock"
+	// Slot controller (#128).
+	ParamDesiredDTNs    = "desired-dtns"    // written by demand_monitor
+	ParamControllerLock = "controller-lock" // single active controller execution
+	ParamEndpointDomain = "endpoint-domain" // endpoint DNS name, for health checks
 
 	TagDeployment = "elastic-gcs:deployment"
 	TagRegion     = "elastic-gcs:region"

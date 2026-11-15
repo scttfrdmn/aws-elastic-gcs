@@ -2,6 +2,8 @@ github.com/Masterminds/semver/v3 v3.5.0 h1:kQceYJfbupGfZOKZQg0kou0DgAKhzDg2NZPAw
 github.com/Masterminds/semver/v3 v3.5.0/go.mod h1:4V+yj/TJE1HU9XfppCwVMZq3I84lprf4nC11bSS5beM=
 github.com/aws/aws-cdk-go/awscdk/v2 v2.276.0 h1:GQVOideaCyP8hxazjTR2rRpEtdzZnjy7QI6ggUZ0ViA=
 github.com/aws/aws-cdk-go/awscdk/v2 v2.276.0/go.mod h1:MOrUOIFenBxs/IdzgYZ5NOg3q6XLVtigo0CUoiKw3Fo=
+github.com/aws/aws-durable-execution-sdk-go v1.0.0 h1:FJUnt9Oa2hHfDHEfTepM04uxHhCOfDfhJKhvH8ezVXI=
+github.com/aws/aws-durable-execution-sdk-go v1.0.0/go.mod h1:KLcTFG0uRH4ogxucR50rsvQNKSbVI15uue1Z6ATbe/s=
 github.com/aws/aws-lambda-go v1.55.1 h1:We2cCp4BwqqH/JW+bEEo1FhgG71rslvjfi4y7KmlrR0=
 github.com/aws/aws-lambda-go v1.55.1/go.mod h1:V+NzkHNR6vBC8C1PDloqSLE+7jYWFiPvJJFiCiTm8nE=
 github.com/aws/aws-sdk-go-v2 v1.48.0 h1:tFU7EJVm7MfyaXLsXdYTZ0Vd6vwt9OljCyqq0gqk0Mc=

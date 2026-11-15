@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `docs/configuration.md`.
   - Profile defaults never exceed `max_dtns`, and explicit settings beat the
     profile.
+- **Slot controller runtime** (#128, part 1).
+  - `internal/slotctl` observes slots: instances and Elastic IPs, health from SSM
+    ping plus endpoint DNS, and GridFTP data connections. Controller state is
+    kept in tags only the controller can write.
+  - It executes the reconciler's actions: start, drain (local `node disable`),
+    stop, restart, rebuild, evict (releasing the Elastic IP), revive (launch,
+    attach the slot's Elastic IP, `identity.Setup`, falling back through
+    `instance_types` on capacity errors), and making sure the control node is
+    serving.
+  - Only one controller runs at a time, enforced by an SSM lock.
+  - `lambda/slot_controller` is a Lambda durable function (AWS Durable Execution
+    SDK for Go v1.0.0). Each round observes, plans and executes, with a durable
+    wait in between. An action error is reported and re-planned rather than
+    failing the run. It is tested with `durabletest`.
 - `internal/identity`: one-time identity delivery for slots (#127, part of #42).
   - The instance profile is swapped to a setup role and `node setup` runs over
     SSM; then the profile is swapped back and every setup-role session issued
