@@ -23,6 +23,7 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/warmpool"
 )
 
 // handler polls the Globus Transfer endpoint_manager API for the endpoint's
@@ -121,6 +122,13 @@ func scaleUp(ctx context.Context, cfg aws.Config, active demand.Stats) error {
 	}); err != nil {
 		// ScalingActivityInProgress is common mid-scale-out; the next minute retries.
 		logger.Warn("SetDesiredCapacity failed; will retry next run", "error", err.Error())
+	}
+	// Put the warm pool back if cache eviction removed it (#33).
+	size, _ := strconv.Atoi(os.Getenv("WARM_POOL_SIZE"))
+	if made, err := warmpool.Ensure(ctx, asgClient, asgName, size); err != nil {
+		logger.Warn("could not restore warm pool", "error", err.Error())
+	} else if made {
+		logger.Info("warm pool restored after eviction", "size", size)
 	}
 	return nil
 }

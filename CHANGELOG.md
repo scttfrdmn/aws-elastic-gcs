@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     throughput-alarm entries.
 
 ### Fixed
+- **Cache eviction actually evicts** (#33).
+  - It used to terminate stale warm instances, and the ASG replaced them
+    immediately: no saving, just cold-boot churn.
+  - Now, when nothing is desired and every warm instance has been stopped longer
+    than the TTL, it deletes the warm pool. It still releases slot locks and
+    deletes the nodes.
+  - The next scale-out (scale-out Lambda or `demand_monitor`) restores the warm
+    pool with `internal/warmpool`. That scale-out is a cold launch.
+  - A partially stale pool is left alone.
+  - Re-importing a deleted node identity was tested live and works.
 - **Scaling follows demand** (#26).
   - Scale-in goes to 0 in one step once there have been no active transfers for
     15 minutes. Stepping down by one per alarm left the pool stuck, because the

@@ -43,9 +43,10 @@ When the control node stops, the warm-pool DTN instances remain stopped
 (not terminated). The DTN EBS volumes persist. On the next wake, DTNs can
 resume from the warm pool in ~60s rather than booting cold (~3–5 min).
 
-Cache eviction still applies: warm-pool instances stopped for longer than
-`cacheEvictionHours` (default 72h) are terminated by the existing
-`cache_eviction` Lambda. This is the natural two-stage cost model:
+Cache eviction still applies. When nothing is desired and every warm-pool
+instance has been stopped for longer than `cacheEvictionHours` (default 72h),
+the `cache_eviction` Lambda deletes the warm pool. The next scale-out is a cold
+launch, and it puts the warm pool back (#33). This is the natural two-stage cost model:
 
 | Idle duration | DTN state | DTN scale-out latency | Monthly idle cost |
 |---|---|---|---|

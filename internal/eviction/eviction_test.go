@@ -28,3 +28,25 @@ func TestStale(t *testing.T) {
 		t.Fatal("Stale")
 	}
 }
+
+func TestEvictPool(t *testing.T) {
+	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	old, fresh := now.Add(-80*time.Hour), now.Add(-2*time.Hour)
+	ttl := 72 * time.Hour
+	cases := []struct {
+		name    string
+		entered []time.Time
+		desired int
+		want    bool
+	}{
+		{"all stale, idle", []time.Time{old, old}, 0, true},
+		{"one fresh", []time.Time{old, fresh}, 0, false},
+		{"in use", []time.Time{old, old}, 1, false},
+		{"empty pool", nil, 0, false},
+	}
+	for _, c := range cases {
+		if got := EvictPool(c.entered, c.desired, now, ttl); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}

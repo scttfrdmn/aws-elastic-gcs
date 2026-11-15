@@ -35,3 +35,19 @@ func OrphanNodes(nodes []gcscli.Node, liveNodeIDs, protectedIPs map[string]bool)
 func Stale(entered, now time.Time, ttl time.Duration) bool {
 	return !entered.IsZero() && now.Sub(entered) > ttl
 }
+
+// EvictPool reports whether the warm pool as a whole has gone unused for ttl
+// and should be removed (#33): nothing is desired and every warm instance
+// entered the pool more than ttl ago. Evicting only some instances doesn't
+// save anything: the ASG refills the pool to MaxGroupPreparedCapacity.
+func EvictPool(entered []time.Time, desired int, now time.Time, ttl time.Duration) bool {
+	if desired > 0 || len(entered) == 0 {
+		return false
+	}
+	for _, e := range entered {
+		if !Stale(e, now, ttl) {
+			return false
+		}
+	}
+	return true
+}
