@@ -47,6 +47,19 @@ type RegionConfig struct {
 	// endpoint at Globus's default ("normal", concurrency 4) caps every task.
 	// Zero fields are derived from max_dtns; see config.Resolve.
 	NetworkUse NetworkUse `yaml:"network_use"`
+
+	// Slot controller (#65). See docs/configuration.md for defaults.
+	Pool           string   `yaml:"pool"`            // asg | slots (default asg)
+	CostProfile    string   `yaml:"cost_profile"`    // balanced | minimal (default balanced)
+	WarmSlots      *int     `yaml:"warm_slots"`      // WARM slots kept when idle
+	DrainTimeout   string   `yaml:"drain_timeout"`   // e.g. 10m
+	ColdTTL        string   `yaml:"cold_ttl"`        // e.g. 72h
+	UnhealthyAfter string   `yaml:"unhealthy_after"` // e.g. 5m
+	MaxRestarts    *int     `yaml:"max_restarts"`
+	ScaleInIdle    string   `yaml:"scale_in_idle"`  // no active transfers this long -> scale to 0
+	InstanceTypes  []string `yaml:"instance_types"` // DTN types in fallback order (first wins)
+	ControlNode    string   `yaml:"control_node"`   // always | on_demand | none
+	Dashboard      *bool    `yaml:"dashboard"`
 }
 
 // NetworkUse is the endpoint's custom network-use policy.

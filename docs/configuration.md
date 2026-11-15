@@ -36,6 +36,33 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
 | `useSpot` | bool | `false` | Use Spot instances for DTNs. Saves ~60–80% on compute but disables warm pool (AWS constraint). Spot DTNs cold-start (2–3 min). |
 | `spotMaxPrice` | string | `""` | Maximum Spot price per hour (e.g. `"0.10"`). Empty = up to on-demand price. |
 
+### Slot controller and cost (`regions.yaml`, #65)
+
+The slot controller replaces the Auto Scaling group and warm pool when `pool: slots` is set. Each slot is a persistent node identity, instance and Elastic IP, in one of three tiers:
+
+- **hot:** running and serving;
+- **warm:** stopped, keeps its address, resumes in about 1.5 minutes;
+- **cold:** no instance and no address; reviving it runs `node setup` again.
+
+| Setting | Default | Description |
+|---|---|---|
+| `pool` | `asg` | `asg` (Auto Scaling group + warm pool) or `slots` (slot controller) |
+| `cost_profile` | `balanced` | Preset for the idle-cost settings below. Any setting given explicitly wins |
+| `warm_slots` | profile (`balanced`: 2, `minimal`: 0) | Slots kept warm when idle. The rest go cold after `cold_ttl`. Each warm slot costs about $3.65/month (Elastic IP) plus about $1.60 (EBS) |
+| `cold_ttl` | profile (`balanced`: 72h, `minimal`: 24h) | How long an extra warm slot stays stopped before going cold. The legacy `elastic-gcs:cacheEvictionHours` context value also sets it |
+| `drain_timeout` | `10m` | Scale-in: maximum wait for a disabled node's GridFTP data connections before stopping it. Globus retries interrupted files on other nodes |
+| `scale_in_idle` | `15m` | No active transfers for this long scales the pool to 0 |
+| `unhealthy_after` | `5m` | A running slot that isn't active in GCS (or not answering SSM) this long is restarted |
+| `max_restarts` | `2` | Restarts before an unhealthy slot is rebuilt (cold, then revived) |
+| `instance_types` | `[dtn_instance]` | DTN types in fallback order, used when EC2 reports no capacity for the first. `dtn_instance` is always first |
+| `control_node` | profile (`balanced`: `always`, `minimal`: `none`) | `always`, `on_demand` (started for management, stopped when idle) or `none` (management runs through an active DTN) |
+| `dashboard` | profile (`balanced`: `true`, `minimal`: `false`) | The CloudWatch dashboard costs $3/month beyond the account's three free ones |
+
+**Cost profiles:**
+
+- **`balanced`:** two warm slots and an always-on control node. The first transfer is served by the control node at once, and DTNs join within about 1.5 minutes.
+- **`minimal`:** scales to about $0–1/month idle. The trade-off is that the first transfer after an idle period waits for a cold revival (a few minutes of `node setup`), and the endpoint shows as offline until then.
+
 ### Network use (`regions.yaml` `network_use`)
 
 | Field | Default | Description |
