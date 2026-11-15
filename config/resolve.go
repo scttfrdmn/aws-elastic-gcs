@@ -48,6 +48,8 @@ type Resolved struct {
 	GCSVersion  string
 	AdminCIDR   string
 	KeyPairName string
+
+	NetworkUse NetworkUse
 }
 
 // Default values (docs/instance-sizing.md, docs/configuration.md).
@@ -59,6 +61,8 @@ const (
 	DefaultMinUptimeMinutes   = 30
 	DefaultGCSVersion         = "5.4.101"
 	fallbackThresholdBps      = 500_000_000
+	// MaxTransferConcurrency is the most concurrent files Transfer allows per task.
+	MaxTransferConcurrency = 128
 )
 
 // DTNSustainedBytesPerSec is the sustained multi-flow internet-gateway
@@ -135,6 +139,32 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 			r.ThroughputThresholdBps = fallbackThresholdBps
 			r.ThroughputDerivedFallback = true
 		}
+	}
+
+	// Network use (#56). Measured in #58: one c8in.2xlarge DTN sustains ~9.2 Gbps
+	// at concurrency 32 (~0.3 Gbps per file in flight), so derive 32 preferred /
+	// 64 max per DTN, capped at Transfer's 128 per task; parallelism 8/16.
+	nu := rc.NetworkUse
+	if nu.MaxConcurrency == 0 {
+		nu.MaxConcurrency = min(MaxTransferConcurrency, 64*r.MaxDTNs)
+	}
+	if nu.PreferredConcurrency == 0 {
+		nu.PreferredConcurrency = min(nu.MaxConcurrency, 32*r.MaxDTNs)
+	}
+	if nu.MaxParallelism == 0 {
+		nu.MaxParallelism = 16
+	}
+	if nu.PreferredParallelism == 0 {
+		nu.PreferredParallelism = min(8, nu.MaxParallelism)
+	}
+	r.NetworkUse = nu
+	switch {
+	case nu.MaxConcurrency > MaxTransferConcurrency:
+		bad("network_use.max_concurrency %d exceeds Transfer's limit of %d", nu.MaxConcurrency, MaxTransferConcurrency)
+	case nu.PreferredConcurrency > nu.MaxConcurrency || nu.PreferredParallelism > nu.MaxParallelism:
+		bad("network_use preferred values must not exceed the max values")
+	case nu.PreferredConcurrency < 0 || nu.PreferredParallelism < 0 || nu.MaxParallelism < 0:
+		bad("network_use values must be >= 0")
 	}
 
 	if !gcsVersionRe.MatchString(r.GCSVersion) {

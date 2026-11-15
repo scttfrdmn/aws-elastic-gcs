@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -40,6 +41,26 @@ type RegionConfig struct {
 	// been running for at least this long before idle shutdown is eligible.
 	// Default 30 minutes when IdleShutdownMinutes > 0.
 	MinUptimeMinutes int `yaml:"min_uptime_minutes"`
+
+	// NetworkUse sets the endpoint's Globus network use (#56). A transfer's
+	// concurrency is the lower of the two endpoints' maximums, so leaving this
+	// endpoint at Globus's default ("normal", concurrency 4) caps every task.
+	// Zero fields are derived from max_dtns; see config.Resolve.
+	NetworkUse NetworkUse `yaml:"network_use"`
+}
+
+// NetworkUse is the endpoint's custom network-use policy.
+type NetworkUse struct {
+	PreferredConcurrency int `yaml:"preferred_concurrency"`
+	MaxConcurrency       int `yaml:"max_concurrency"`
+	PreferredParallelism int `yaml:"preferred_parallelism"`
+	MaxParallelism       int `yaml:"max_parallelism"`
+}
+
+// Args are the `globus-connect-server endpoint update` flags for n.
+func (n NetworkUse) Args() string {
+	return fmt.Sprintf("--network-use custom --preferred-concurrency %d --max-concurrency %d --preferred-parallelism %d --max-parallelism %d",
+		n.PreferredConcurrency, n.MaxConcurrency, n.PreferredParallelism, n.MaxParallelism)
 }
 
 // RegionsConfig is the top-level regions configuration

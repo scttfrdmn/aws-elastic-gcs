@@ -6,9 +6,21 @@ the [throughput model](throughput-model.md) for estimates.
 
 ## 1. Set network use explicitly
 
-Nothing in the deployment sets the endpoint's network-use policy (#56), so a new
-endpoint runs at Globus's `normal` preset: concurrency 4. That limited one
-c8in.2xlarge DTN to about 0.35 Gbps.
+Left alone, an endpoint runs at Globus's `normal` preset: concurrency 4. That
+limited one c8in.2xlarge DTN to about 0.35 Gbps. Since 0.13 the deployment sets
+custom network use from `regions.yaml` (#56):
+- the control node's first setup applies it when the service account already has
+  its role;
+- otherwise, and for existing endpoints, run it yourself:
+
+```bash
+aws-elastic-gcs-ctl endpoint network-use --region us-west-2 --deployment src          # show
+aws-elastic-gcs-ctl endpoint network-use --region us-west-2 --deployment src --apply  # set
+```
+
+When `network_use` isn't set, the defaults are 32 preferred / 64 max concurrency
+per DTN in `max_dtns`, capped at 128, with parallelism 8/16. That matches the
+measured setups below.
 
 | Setting (both ends) | Negotiated concurrency | Per-DTN steady state |
 |---|---|---|
