@@ -653,9 +653,11 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	si := scoped("ScaleIn")
+	grant(scaleInFn, si.runShell()...) // re-enable the control node before the last DTN goes (#71)
 	grant(scaleInFn,
 		si.onASG("autoscaling:SetDesiredCapacity"),
-		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData"),
+		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData",
+			"ssm:GetParameter", "ec2:DescribeInstances"),
 	)
 
 	cacheEvictionFn := awslambda.NewFunction(stack, jsii.String("CacheEvictionFn"), &awslambda.FunctionProps{
