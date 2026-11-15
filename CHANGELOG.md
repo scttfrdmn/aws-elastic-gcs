@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-15
+
+Validated live on the us-west-2 `src` and `dst` deployments. Upgrade notes:
+- **Refresh the warm pool after deploying** so DTNs get the `elastic-gcs:role=dtn`
+  tag; role-scoped Lambdas require it.
+- **Rebuild the DTN AMI** with `make ami`, to pick up verified installs and the
+  TLS policy.
+- **Apply network use** to existing endpoints with
+  `aws-elastic-gcs-ctl endpoint network-use --apply`.
+- **Retained log group:** if a DTN stack deploy fails and rolls back, it leaves
+  `/elastic-gcs/<deployment>/ssm-commands` behind, and the next deploy fails until
+  that (empty) log group is deleted.
+
 ### Added
 - **Endpoint network use from config** (#56). `regions.yaml` `network_use`
   sets preferred and max concurrency and parallelism.
@@ -785,7 +798,8 @@ Validated live on the us-west-2 `src` and `dst` deployments.
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.9.0...v0.10.0
