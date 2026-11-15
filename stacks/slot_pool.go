@@ -27,7 +27,7 @@ func (p *dtnPool) buildSlots() {
 	setupProfile := awsiam.NewInstanceProfile(p.stack, jsii.String("SlotSetupProfile"), &awsiam.InstanceProfileProps{
 		Role: setupRole, InstanceProfileName: jsii.String(p.dep.Resource("dtn-setup")),
 	})
-	lt := p.dtnLaunchTemplate(runtimeRole, p.slotUserData(runtimeRole))
+	lt := p.dtnLaunchTemplate(runtimeRole, runtimeProfile, p.slotUserData(runtimeRole))
 
 	ssmLogs := awslogs.NewLogGroup(p.stack, jsii.String("SSMCommandLogs"), &awslogs.LogGroupProps{
 		LogGroupName:  jsii.String("/elastic-gcs/" + p.dep.ID() + "/ssm-commands"),
@@ -38,10 +38,16 @@ func (p *dtnPool) buildSlots() {
 	demand := p.demandMonitorFn(ssmLogs)
 
 	// Converge every minute, and as soon as demand_monitor changes desired-dtns.
+	// Durable functions can only be invoked by a qualified ARN. Target a "live"
+	// alias on the published version: CDK grants invoke on it (it doesn't for
+	// $LATEST), and in-flight executions keep the code version they started on.
+	live := awslambda.NewAlias(p.stack, jsii.String("SlotControllerLive"), &awslambda.AliasProps{
+		AliasName: jsii.String("live"), Version: ctl.CurrentVersion(),
+	})
 	awsevents.NewRule(p.stack, jsii.String("SlotControllerSchedule"), &awsevents.RuleProps{
 		RuleName: jsii.String(p.dep.Resource("slot-controller")),
 		Schedule: awsevents.Schedule_Rate(minutes(1)),
-		Targets:  &[]awsevents.IRuleTarget{awseventstargets.NewLambdaFunction(ctl, nil)},
+		Targets:  &[]awsevents.IRuleTarget{awseventstargets.NewLambdaFunction(live, nil)},
 	})
 	awsevents.NewRule(p.stack, jsii.String("SlotControllerOnDesired"), &awsevents.RuleProps{
 		RuleName: jsii.String(p.dep.Resource("slot-desired")),
@@ -50,7 +56,7 @@ func (p *dtnPool) buildSlots() {
 			DetailType: jsii.Strings("Parameter Store Change"),
 			Detail:     &map[string]interface{}{"name": []string{p.dep.Param(names.ParamDesiredDTNs)}},
 		},
-		Targets: &[]awsevents.IRuleTarget{awseventstargets.NewLambdaFunction(ctl, nil)},
+		Targets: &[]awsevents.IRuleTarget{awseventstargets.NewLambdaFunction(live, nil)},
 	})
 	awsevents.NewRule(p.stack, jsii.String("DemandMonitorSchedule"), &awsevents.RuleProps{
 		RuleName: jsii.String(p.dep.Resource("demand-monitor")),
@@ -59,7 +65,7 @@ func (p *dtnPool) buildSlots() {
 	})
 
 	awscdk.NewCfnOutput(p.stack, jsii.String("SlotControllerFunction"), &awscdk.CfnOutputProps{
-		Value: ctl.FunctionName(), Description: jsii.String("Slot controller (Lambda durable function)"),
+		Value: live.FunctionArn(), Description: jsii.String("Slot controller (Lambda durable function); invoke this qualified ARN"),
 	})
 }
 
@@ -182,6 +188,7 @@ func (p *dtnPool) slotControllerFn(lt awsec2.LaunchTemplate, runtime, setup awsi
 			"MAX_RESTARTS":       itoa(cfg.MaxRestarts),
 			"LAUNCH_TEMPLATE_ID": lt.LaunchTemplateId(),
 			"INSTANCE_TYPES":     jsii.String(types),
+			"SUBNET_IDS":         awscdk.Fn_Join(jsii.String(","), p.props.ControlStack.Vpc.SelectSubnets(&awsec2.SubnetSelection{SubnetType: awsec2.SubnetType_PUBLIC}).SubnetIds),
 			"RUNTIME_PROFILE":    runtimeProfile.InstanceProfileName(),
 			"SETUP_PROFILE":      setupProfile.InstanceProfileName(),
 			"SETUP_ROLE":         setup.RoleName(),

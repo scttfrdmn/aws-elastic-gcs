@@ -16,7 +16,9 @@ import (
 // dtnLaunchTemplate creates the DTN launch template.
 // Instance type from config (default c8in.2xlarge; see docs/instance-sizing.md).
 // Uses the same security group as the control node (GCS requires same ports).
-func (p *dtnPool) dtnLaunchTemplate(role awsiam.Role, ud awsec2.UserData) awsec2.LaunchTemplate {
+// With a profile it is used as is (the slot controller swaps instances between
+// named profiles); otherwise CDK creates one for role.
+func (p *dtnPool) dtnLaunchTemplate(role awsiam.Role, profile awsiam.IInstanceProfile, ud awsec2.UserData) awsec2.LaunchTemplate {
 	// Use the DTN AMI that scripts/build_ami.sh built for this exact GCS version.
 	// It is resolved from a version-keyed SSM parameter at deploy time, not
 	// looked up at synth time, so the app synthesizes before any AMI exists (the
@@ -30,7 +32,6 @@ func (p *dtnPool) dtnLaunchTemplate(role awsiam.Role, ud awsec2.UserData) awsec2
 		InstanceType:       awsec2.NewInstanceType(jsii.String(p.cfg.DTNInstance)),
 		MachineImage:       dtnAMI,
 		SecurityGroup:      p.props.ControlStack.SecurityGroup,
-		Role:               role,
 		UserData:           ud,
 		RequireImdsv2:      jsii.Bool(true),
 		// One hop: containers or anything else forwarding through the DTN can't
@@ -47,6 +48,11 @@ func (p *dtnPool) dtnLaunchTemplate(role awsiam.Role, ud awsec2.UserData) awsec2
 				}),
 			},
 		},
+	}
+	if profile != nil {
+		ltProps.InstanceProfile = profile
+	} else {
+		ltProps.Role = role
 	}
 	if p.cfg.KeyPairName != "" {
 		ltProps.KeyPair = awsec2.KeyPair_FromKeyPairName(

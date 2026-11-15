@@ -158,9 +158,19 @@ func Plan(obs Observed, desired int, cfg Config) []Action {
 		}
 	}
 
-	// 2. Health.
+	// 2. Health. A Starting slot that never turns healthy is restarted like a
+	// Stable one. A Reviving slot observed unhealthy means its revive returned
+	// or was abandoned (revives run inside one controller step) without node
+	// setup finishing; a restart can't redo setup, so it is rebuilt.
 	for _, s := range slots {
-		if s.Tier != Hot || s.Phase != Stable || s.Healthy || s.UnhealthyFor < cfg.UnhealthyAfter {
+		if s.Tier != Hot || s.Healthy || s.UnhealthyFor < cfg.UnhealthyAfter {
+			continue
+		}
+		if s.Phase == Reviving {
+			acts = append(acts, Action{Rebuild, s.N, fmt.Sprintf("revive unhealthy for %s", s.UnhealthyFor.Round(time.Second))})
+			continue
+		}
+		if s.Phase != Stable && s.Phase != Starting {
 			continue
 		}
 		if s.RestartAttempts < cfg.MaxRestarts {

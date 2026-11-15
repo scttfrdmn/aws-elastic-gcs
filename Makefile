@@ -14,6 +14,7 @@ build-lambdas:
 	GOOS=linux GOARCH=arm64 go build -o lambda/version_check/bootstrap ./lambda/version_check/
 	GOOS=linux GOARCH=arm64 go build -o lambda/waker/bootstrap ./lambda/waker/
 	GOOS=linux GOARCH=arm64 go build -o lambda/idle_shutdown/bootstrap ./lambda/idle_shutdown/
+	GOOS=linux GOARCH=arm64 go build -o lambda/slot_controller/bootstrap ./lambda/slot_controller/
 
 build-ctl:
 	@echo "Building CLI tool..."

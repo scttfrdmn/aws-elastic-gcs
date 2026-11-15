@@ -98,7 +98,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 
 	role := p.dtnRole()
 	ud := p.dtnUserData(role)
-	asg := p.dtnASG(p.dtnLaunchTemplate(role, ud))
+	asg := p.dtnASG(p.dtnLaunchTemplate(role, nil, ud))
 	fns := p.lambdas(asg)
 	p.eventRules(fns)
 	alarms := p.alarms(fns)

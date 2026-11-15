@@ -251,12 +251,12 @@ func waitForSSMAgent(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 	return fmt.Errorf("timed out waiting for SSM agent on %s", instanceID)
 }
 
-// waitForGCSManager polls via SSM RunCommand until globus-connect-server-manager is active.
+// waitForGCSManager polls via SSM RunCommand until gcs_manager (the GCS 5.4 manager unit) is active.
 // Timeout: 2 minutes.
 func waitForGCSManager(ctx context.Context, ssmClient *ssm.Client, instanceID string) error {
 	// One command that waits on the node itself, instead of one SSM round trip
 	// per check.
-	const script = `for i in $(seq 1 24); do systemctl is-active --quiet globus-connect-server-manager && exit 0; sleep 5; done; exit 1`
+	const script = `for i in $(seq 1 24); do systemctl is-active --quiet gcs_manager && exit 0; sleep 5; done; exit 1`
 	if _, err := ssmexec.RunOK(ctx, ssmClient, instanceID, script,
 		ssmexec.Options{Wait: 150 * time.Second, Comment: "elastic-gcs: wait for GCS Manager"}); err != nil {
 		return fmt.Errorf("GCS Manager not active on %s: %w", instanceID, err)

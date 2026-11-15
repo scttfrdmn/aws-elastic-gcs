@@ -25,7 +25,7 @@ func inst(id, slot, state string, tags ...string) ec2types.Instance {
 func ago(d time.Duration) string { return now.Add(-d).Format(time.RFC3339) }
 
 func TestSlotFromInstance(t *testing.T) {
-	healthy := Probe{SSMOnline: true, InDNS: true, DataConns: 4}
+	healthy := Probe{SSMOnline: true, InDNS: true, GCSActive: true, DataConns: 4}
 	cases := []struct {
 		name string
 		in   ec2types.Instance
@@ -43,6 +43,8 @@ func TestSlotFromInstance(t *testing.T) {
 			slots.Slot{N: 3, Tier: slots.Warm, StoppedFor: 80 * time.Hour}, true},
 		{"a finished stop clears the phase", inst("i-1", "3", "stopped", TagPhase, "stopping"), Probe{}, slots.Slot{N: 3, Tier: slots.Warm}, true},
 		{"stopping is warm, in flight", inst("i-1", "3", "stopping"), Probe{}, slots.Slot{N: 3, Tier: slots.Warm, Phase: slots.Stopping}, true},
+		{"in DNS but GCS not running is unhealthy", inst("i-1", "1", "running"), Probe{SSMOnline: true, InDNS: true},
+			slots.Slot{N: 1, Tier: slots.Hot}, true},
 		{"terminated is ignored", inst("i-1", "4", "terminated"), Probe{}, slots.Slot{}, false},
 		{"no slot tag is ignored", ec2types.Instance{InstanceId: aws.String("i-9"), State: &ec2types.InstanceState{Name: "running"}}, Probe{}, slots.Slot{}, false},
 		{"future timestamps count as zero", inst("i-1", "1", "running", TagUnhealthySince, now.Add(time.Hour).Format(time.RFC3339)), Probe{},
@@ -69,5 +71,18 @@ func TestObservedAddsColdSlots(t *testing.T) {
 	}
 	if tiers[1] != slots.Cold || tiers[2] != slots.Warm || tiers[3] != slots.Cold {
 		t.Fatalf("tiers %v", tiers)
+	}
+}
+
+func TestParseNodeProbe(t *testing.T) {
+	for in, want := range map[string]Probe{
+		"12\nup\n":  {DataConns: 12, GCSActive: true},
+		"0\ndown\n": {},
+		"3\n":       {DataConns: 3},
+		"":          {},
+	} {
+		if got := parseNodeProbe(in); got != want {
+			t.Errorf("parseNodeProbe(%q) = %+v, want %+v", in, got, want)
+		}
 	}
 }
