@@ -28,65 +28,21 @@ exec > >(tee -a "$LOG") 2>&1
 echo "=== Elastic GCS Control Node Setup - $(date -u) ==="
 
 # --- Idempotency guard ---
-# cloud-init re-runs UserData on every stop/start (e.g. after a CDK deploy that
-# changes UserData). If GCS is already configured, skip the full setup and just
-# update the node's registered IP to the current public IP. This prevents
-# duplicate endpoint/node creation and avoids destroying existing state.
+# cloud-init runs UserData once per instance, so this script normally runs only
+# on a new instance. After a stop/start, elastic-gcs-control.service (installed
+# by UserData) re-enables the node (#31). If GCS is somehow already set up here,
+# do nothing rather than risk a second endpoint or node.
 GCS_INFO="/var/lib/globus-connect-server/info.json"
 if [ -s "$GCS_INFO" ]; then
-    echo "=== GCS already configured — skipping full setup (resume after stop/start) ==="
-
-    get_secret_resume() {
-        aws secretsmanager get-secret-value \
-            --secret-id "$1" --query SecretString --output text --region "$AWS_REGION"
-    }
-
-    # Get current public IP via IMDSv2
-    IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
-        -H "X-aws-ec2-metadata-token-ttl-seconds: 3600")
-    PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-        http://169.254.169.254/latest/meta-data/public-ipv4)
-    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
-        http://169.254.169.254/latest/meta-data/instance-id)
-    DOMAIN_NAME=$(jq -r '.domain_name' "$GCS_INFO")
-    ENDPOINT_ID=$(jq -r '.endpoint_id' "$GCS_INFO")
-
-    echo ">>> Public IP: $PUBLIC_IP  Instance: $INSTANCE_ID  Domain: $DOMAIN_NAME"
-
-    # GCS CLI contacts the GCS Manager via the endpoint domain, which still
-    # resolves to the OLD IP. Route it through localhost so node update succeeds.
-    echo "127.0.0.1 ${DOMAIN_NAME}" >> /etc/hosts
-
-    export GCS_CLI_CLIENT_ID=$(get_secret_resume "${SECRETS_PREFIX}/globus-client-id")
-    export GCS_CLI_CLIENT_SECRET=$(get_secret_resume "${SECRETS_PREFIX}/globus-client-secret")
-    export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
-
-    # node show returns this node's details without needing to know the node ID up front.
-    CONTROL_NODE_ID=$(globus-connect-server node show -F json 2>/dev/null | jq -r '.id' || echo "")
-    if [ -n "$CONTROL_NODE_ID" ] && [ "$CONTROL_NODE_ID" != "null" ]; then
-        echo ">>> Updating control node $CONTROL_NODE_ID IP → $PUBLIC_IP"
-        globus-connect-server node update "$CONTROL_NODE_ID" \
-            --ip-address "$PUBLIC_IP" \
-            --enable
-        chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
-        echo ">>> Node IP updated and enabled."
-    else
-        echo "WARNING: Could not determine control node ID — IP not updated."
-    fi
-
-    # Remove the temporary hosts entry
-    sed -i "/${DOMAIN_NAME}/d" /etc/hosts
-
-    # Update SSM with current instance ID (in case instance was replaced)
-    aws ssm put-parameter \
-        --name "${PARAM_PREFIX}/control-node-id" \
-        --type String --value "$INSTANCE_ID" \
-        --overwrite --region "$AWS_REGION" \
-        && echo ">>> SSM control-node-id updated." || true
-
-    echo "=== Resume complete: IP=$PUBLIC_IP Endpoint=$ENDPOINT_ID ==="
+    echo "=== GCS already configured on this instance; boot is handled by elastic-gcs-control.service ==="
     exit 0
 fi
+
+# Secrets on disk (#32): deployment key and slot identities live only in this
+# 0700 directory, which is removed when the script exits, however it exits.
+umask 077
+SECRETS_DIR=$(mktemp -d /run/elastic-gcs-init.XXXXXX)
+trap 'rm -rf "$SECRETS_DIR"' EXIT
 
 # --- 1. Install prerequisites ---
 echo ">>> Installing prerequisites..."
@@ -201,9 +157,10 @@ export GCS_CLI_CLIENT_SECRET="$GLOBUS_CLIENT_SECRET"
 # --- 3. Set up endpoint ---
 echo ">>> Setting up GCS endpoint..."
 
-# deployment-key.json is created in CWD by endpoint setup.
-# UserData CWD is /, so the file lands at /deployment-key.json.
-DEPLOY_KEY_PATH="/deployment-key.json"
+# endpoint setup writes deployment-key.json to its working directory, so it
+# runs inside SECRETS_DIR.
+DEPLOY_KEY_PATH="$SECRETS_DIR/deployment-key.json"
+NEW_ENDPOINT=false
 
 # Idempotency: check Secrets Manager first.
 # If an existing deployment key is stored (from a prior deploy), retrieve it
@@ -216,15 +173,28 @@ if aws secretsmanager get-secret-value \
     echo ">>> Deployment key retrieved from Secrets Manager — reusing existing endpoint."
 else
     rm -f "$DEPLOY_KEY_PATH"
-    globus-connect-server endpoint setup \
+    (cd "$SECRETS_DIR" && globus-connect-server endpoint setup \
         "$ENDPOINT_DISPLAY_NAME" \
         --organization "$ORGANIZATION_NAME" \
         --owner "$GLOBUS_OWNER_IDENTITY" \
         --contact-email "$GLOBUS_OWNER_IDENTITY" \
         --dont-set-advertised-owner \
-        --agree-to-letsencrypt-tos
-    # deployment-key.json is created in CWD (/)
+        --agree-to-letsencrypt-tos)
+    NEW_ENDPOINT=true
     echo ">>> Endpoint setup complete."
+
+    # Store the deployment key immediately (#32). If a later step fails, a
+    # replacement control node must find it and reuse this endpoint rather than
+    # create a second one.
+    aws secretsmanager create-secret \
+        --name "${SECRETS_PREFIX}/deployment-key" \
+        --secret-string "file://${DEPLOY_KEY_PATH}" \
+        --region "$AWS_REGION" >/dev/null 2>&1 \
+    || aws secretsmanager put-secret-value \
+        --secret-id "${SECRETS_PREFIX}/deployment-key" \
+        --secret-string "file://${DEPLOY_KEY_PATH}" \
+        --region "$AWS_REGION" >/dev/null
+    echo ">>> Deployment key stored in Secrets Manager."
 fi
 
 # --- 4. Set up this node ---
@@ -251,40 +221,50 @@ echo ">>> Configuring endpoint..."
 ENDPOINT_ID=$(jq -r '.endpoint_id' /var/lib/globus-connect-server/info.json)
 export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
 
-# Grant the client app admin rights so it can manage storage gateways and
-# collections. endpoint setup automatically grants admin to the caller, but
-# we do this explicitly as a safeguard.
-globus-connect-server endpoint role create administrator "$GLOBUS_CLIENT_ID" || true
-echo ">>> Client app admin role ensured."
-
-# Subscription association requires the endpoint owner's personal identity —
-# the client app cannot set it. Attempt it here in case a future GCS version
-# allows it, but don't fail the script if it's denied.
-if [ -n "$GLOBUS_SUBSCRIPTION_ID" ]; then
-    globus-connect-server endpoint set-subscription-id "$GLOBUS_SUBSCRIPTION_ID" 2>/dev/null \
-        && echo ">>> Endpoint set as managed under subscription." \
-        || echo ">>> NOTE: Subscription must be set manually by the endpoint owner:"
+# The service account needs the administrator role on its own endpoint
+# (collections setup, demand_monitor's endpoint_manager task list, node cleanup,
+# version check). Role creation requires a subscription, and only the endpoint
+# owner can attach one, after setup (#66). Try both; if either is refused, print
+# the owner's post-deploy steps instead of claiming success.
+OWNER_STEPS=false
+if [ -n "$GLOBUS_SUBSCRIPTION_ID" ] && \
+   globus-connect-server endpoint set-subscription-id "$GLOBUS_SUBSCRIPTION_ID" >/dev/null 2>&1; then
+    echo ">>> Endpoint set as managed under subscription $GLOBUS_SUBSCRIPTION_ID."
+else
+    OWNER_STEPS=true
+fi
+if globus-connect-server endpoint role create administrator "$GLOBUS_CLIENT_ID" >/dev/null 2>&1; then
+    echo ">>> Service account granted the administrator role."
+else
+    OWNER_STEPS=true
+fi
+if [ "$OWNER_STEPS" = true ]; then
+    echo ">>> ACTION REQUIRED (endpoint owner, $GLOBUS_OWNER_IDENTITY):"
     echo ">>>   globus login --gcs $ENDPOINT_ID"
-    echo ">>>   globus gcs endpoint set-subscription-id $ENDPOINT_ID $GLOBUS_SUBSCRIPTION_ID"
+    echo ">>>   globus gcs endpoint set-subscription-id $ENDPOINT_ID ${GLOBUS_SUBSCRIPTION_ID:-<subscription-id>}"
+    echo ">>>   globus gcs endpoint role create $ENDPOINT_ID administrator $GLOBUS_CLIENT_ID"
+    echo ">>> Until then the service account has no role: collections setup and scaling won't work."
 fi
 
 # --- 6. Pre-create DTN node identities ---
 # (Storage gateway and collection setup is a post-deploy step.
 #  Run: aws-elastic-gcs-ctl collections setup --config config/open_data_buckets.yaml)
 # TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible slot needs an identity.
-# Idempotency: if a slot secret already exists AND its node_id is registered on this
-# endpoint, reuse it rather than creating an orphaned node on every control node replacement.
-echo ">>> Ensuring $TOTAL_SLOTS DTN node identities..."
+# Idempotency: when the endpoint was reused, an existing slot secret with a
+# node_id belongs to it and is kept, rather than orphaning a node on every
+# control node replacement. When this run created a new endpoint, every existing
+# slot secret belongs to an old endpoint and is replaced (#32).
+echo ">>> Ensuring $TOTAL_SLOTS DTN node identities (new endpoint: $NEW_ENDPOINT)..."
 
 for i in $(seq 1 "$TOTAL_SLOTS"); do
-    NODE_FILE="/tmp/dtn-slot-${i}.json"
+    NODE_FILE="$SECRETS_DIR/dtn-slot-${i}.json"
 
     # Check if the slot secret already exists with a valid node_id for this endpoint.
     EXISTING_SECRET=$(aws secretsmanager get-secret-value \
         --secret-id "${SECRETS_PREFIX}/node-slot-${i}" \
         --query SecretString --output text --region "$AWS_REGION" 2>/dev/null || true)
 
-    if [ -n "$EXISTING_SECRET" ]; then
+    if [ -n "$EXISTING_SECRET" ] && [ "$NEW_ENDPOINT" = false ]; then
         EXISTING_NODE_ID=$(echo "$EXISTING_SECRET" | jq -r '.node_id // empty' 2>/dev/null || true)
         if [ -n "$EXISTING_NODE_ID" ]; then
             echo ">>> Node identity for slot $i already exists (node_id: $EXISTING_NODE_ID) — skipping."
@@ -311,17 +291,6 @@ for i in $(seq 1 "$TOTAL_SLOTS"); do
     echo ">>> Node identity for slot $i stored in Secrets Manager."
     rm -f "$NODE_FILE"
 done
-
-# Also store the deployment key in Secrets Manager (upsert)
-aws secretsmanager create-secret \
-    --name "${SECRETS_PREFIX}/deployment-key" \
-    --secret-string "file://${DEPLOY_KEY_PATH}" \
-    --region "$AWS_REGION" \
-    2>/dev/null \
-|| aws secretsmanager put-secret-value \
-    --secret-id "${SECRETS_PREFIX}/deployment-key" \
-    --secret-string "file://${DEPLOY_KEY_PATH}" \
-    --region "$AWS_REGION"
 
 # --- 7. Store endpoint metadata in SSM ---
 echo ">>> Storing endpoint metadata in SSM Parameter Store..."

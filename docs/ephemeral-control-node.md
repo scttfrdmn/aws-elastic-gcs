@@ -24,7 +24,20 @@ Stops the control node only when all of the following are true:
 2. ASG desired capacity is 0 (no DTNs requested)
 3. No DTN instance is InService
 4. All warm-pool instances are `Warmed:Stopped`
-5. `ElasticGCS/ActiveTransfers` has been 0 for the full `idle_shutdown_minutes` window
+5. `ElasticGCS/ActiveTransfers` has been 0 for the full `idle_shutdown_minutes` window.
+   Missing data counts as "not idle": if the demand monitor isn't reporting, the
+   control node stays up.
+
+Before stopping, it disables the control node's GCS node via SSM and waits for its
+IP to leave endpoint DNS. If the disable fails, it doesn't stop the node, and the
+next run tries again.
+
+**`elastic-gcs-control.service`**, on the control node, enables the GCS node on
+every boot and disables it on every shutdown. cloud-init runs UserData only once
+per instance, so this unit is what brings the node back after a stop/start,
+whether from the waker, `control_node_power.sh` or a manual stop. Control nodes
+created before 0.12 don't have it. Install it once with
+`scripts/control_node_power.sh <region> <deployment> install`.
 
 When the control node stops, the warm-pool DTN instances remain stopped
 (not terminated). The DTN EBS volumes persist. On the next wake, DTNs can

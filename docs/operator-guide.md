@@ -62,6 +62,23 @@ The control node UserData (~10 min) will:
 3. Pre-create N node identities (`node create --export-node`), store in Secrets Manager as `node-slot-1` through `node-slot-N`
 4. Configure S3 storage gateway and mapped collection (if configured)
 5. Write control node instance ID and endpoint UUID to SSM Parameters
+6. Install `elastic-gcs-control.service`, which enables the node on every boot and disables it on shutdown
+
+The deployment key goes to Secrets Manager immediately after `endpoint setup`.
+It exists on disk only in a 0700 directory that is removed when setup ends.
+
+**Owner step (required, once per endpoint).** The service account can't be given
+a role until the endpoint has a subscription, and only the owner can attach one
+(#66). The setup log (`/var/log/elastic-gcs-setup.log`) prints these commands
+with the IDs filled in:
+
+```bash
+globus login --gcs <endpoint-id>          # as the endpoint owner
+globus gcs endpoint set-subscription-id <endpoint-id> <subscription-id>
+globus gcs endpoint role create <endpoint-id> administrator <service-account-client-id>
+```
+
+Until then, collections setup, the demand monitor and scaling don't work.
 
 **Validation:**
 ```bash

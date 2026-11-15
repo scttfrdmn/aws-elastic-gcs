@@ -1,0 +1,18 @@
+# Control node GCS node lifecycle (#30, #31): enable on boot, disable on
+# shutdown. Installed by the control node UserData; on control nodes created
+# before 0.12, install it with: scripts/control_node_power.sh <region> <deployment> install
+[Unit]
+Description=Elastic GCS control node lifecycle (node enable on boot, disable on shutdown)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/elastic-gcs/scripts/control_node_boot.sh start
+ExecStop=/opt/elastic-gcs/scripts/control_node_boot.sh stop
+TimeoutStartSec=300
+TimeoutStopSec=240
+
+[Install]
+WantedBy=multi-user.target
