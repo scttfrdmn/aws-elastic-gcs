@@ -34,3 +34,5 @@ dist/
 node-slot*.json
 dtn-slot*.json
 .claude/worktrees/
+/aws-elastic-gcs-ctl
+bin/
