@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Control node lifecycle** (#30, #31).
+  - The resume block in `control_node_init.sh` never ran, because cloud-init runs
+    UserData once per instance. It is replaced by `elastic-gcs-control.service`,
+    which enables the GCS node on every boot and disables it on shutdown. Both
+    steps wait for endpoint DNS.
+  - Install the unit on existing control nodes with
+    `scripts/control_node_power.sh <region> <deployment> install`.
+  - `idle_shutdown` now disables the node via SSM before stopping it, and doesn't
+    stop when the disable fails or when `ActiveTransfers` has no data.
+- **Deployment key handling** (#32).
+  - The key is stored in Secrets Manager right after `endpoint setup`, not at the
+    end of setup, so a failed setup can't lead a replacement control node to
+    create a second endpoint.
+  - The key and slot identities live only in a 0700 temporary directory that is
+    removed on exit. Previously they stayed in `/deployment-key.json` and `/tmp`.
+  - When setup creates a new endpoint, existing slot secrets are replaced instead
+    of being reused for the wrong endpoint.
+- **Service-account role** (#66). Setup no longer reports "admin role ensured"
+  when role creation fails. It prints the owner's `set-subscription-id` and
+  `role create` commands, which are also documented in the operator guide.
 - **`cdk deploy` no longer resets the DTN pool** (#71). The ASG template no
   longer sets `DesiredCapacity`, which CloudFormation re-applied on every deploy:
   live DTNs were stopped mid-transfer.

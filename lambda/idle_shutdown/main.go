@@ -15,6 +15,7 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
@@ -145,21 +146,72 @@ func handler(ctx context.Context) error {
 		logger.Warn("GetMetricStatistics failed, skipping", "error", err.Error())
 		return nil
 	}
-	if len(stats.Datapoints) > 0 && aws.ToFloat64(stats.Datapoints[0].Maximum) > 0 {
+	// No datapoint means demand_monitor isn't reporting, not that the endpoint
+	// is idle (#30): don't stop on missing data.
+	if len(stats.Datapoints) == 0 {
+		logger.Warn("no ActiveTransfers data in idle window (demand monitor down?), skipping")
+		return nil
+	}
+	if aws.ToFloat64(stats.Datapoints[0].Maximum) > 0 {
 		logger.Info("active transfers in idle window, skipping",
 			"transfers", aws.ToFloat64(stats.Datapoints[0].Maximum))
 		return nil
 	}
 
 	// All conditions met — stop the control node.
-	logger.Info("idle conditions met, stopping control node",
+	logger.Info("idle conditions met, disabling control node before stop",
 		"instance", instanceID, "idle_minutes", idleMinutes)
+
+	// Disable the GCS node first (#30), so a stopped control node doesn't leave
+	// a dead IP in endpoint DNS. The node's elastic-gcs-control.service does the
+	// same on shutdown; this makes it explicit and observable. If the disable
+	// fails, don't stop: the next run retries.
+	if err := disableNode(ctx, ssmClient, instanceID); err != nil {
+		logger.Warn("node disable failed, not stopping", "instance", instanceID, "error", err.Error())
+		return nil
+	}
+
 	if _, err := ec2Client.StopInstances(ctx,
 		&ec2.StopInstancesInput{InstanceIds: []string{instanceID}}); err != nil {
 		return fmt.Errorf("StopInstances: %w", err)
 	}
 	logger.Info("control node stop initiated", "instance", instanceID)
 	return nil
+}
+
+// disableNode runs `node disable` on the control node via SSM, waits for its IP
+// to leave endpoint DNS (bounded), and waits for the command to finish.
+func disableNode(ctx context.Context, client *ssm.Client, instanceID string) error {
+	const script = `/opt/elastic-gcs/scripts/control_node_boot.sh stop`
+	out, err := client.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:    []string{instanceID},
+		DocumentName:   aws.String("AWS-RunShellScript"),
+		Parameters:     map[string][]string{"commands": {script}, "executionTimeout": {"300"}},
+		TimeoutSeconds: aws.Int32(60),
+	})
+	if err != nil {
+		return fmt.Errorf("SendCommand: %w", err)
+	}
+	cmdID := aws.ToString(out.Command.CommandId)
+	deadline := time.Now().Add(4 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		inv, err := client.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId: aws.String(cmdID), InstanceId: aws.String(instanceID),
+		})
+		if err != nil {
+			continue // invocation not registered yet
+		}
+		switch inv.Status {
+		case ssmtypes.CommandInvocationStatusSuccess:
+			logger.Info("control node disabled", "output", aws.ToString(inv.StandardOutputContent))
+			return nil
+		case ssmtypes.CommandInvocationStatusFailed, ssmtypes.CommandInvocationStatusTimedOut,
+			ssmtypes.CommandInvocationStatusCancelled:
+			return fmt.Errorf("command %s: %s", inv.Status, aws.ToString(inv.StandardErrorContent))
+		}
+	}
+	return fmt.Errorf("command %s did not finish in time", cmdID)
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.

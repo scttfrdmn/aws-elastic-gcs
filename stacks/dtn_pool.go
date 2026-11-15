@@ -1240,7 +1240,7 @@ WantedBy=elastic-gcs-dtn.service
 			Architecture: awslambda.Architecture_ARM_64(),
 			Handler:      jsii.String("bootstrap"),
 			Code:         awslambda.Code_FromAsset(jsii.String("lambda/idle_shutdown"), nil),
-			Timeout:      awscdk.Duration_Minutes(jsii.Number(2)),
+			Timeout:      awscdk.Duration_Minutes(jsii.Number(6)), // up to ~4 min waiting for node disable + DNS
 			MemorySize:   jsii.Number(128),
 			Environment: &map[string]*string{
 				"ASG_NAME":              asg.AutoScalingGroupName(),
@@ -1254,6 +1254,7 @@ WantedBy=elastic-gcs-dtn.service
 		})
 		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
 		is := scoped("IdleShutdown")
+		grant(idleShutdownFn, is.runShell()...) // node disable before stop (#30)
 		grant(idleShutdownFn,
 			is.onInstances("StopInstances", "ec2:StopInstances"),
 			is.unscoped(

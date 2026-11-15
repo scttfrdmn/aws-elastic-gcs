@@ -2,7 +2,7 @@
 # =============================================================================
 # Stop or start a deployment's control node to cut idle cost (~$55 -> ~$6/month).
 #
-# usage: AWS_PROFILE=aws scripts/control_node_power.sh <region> <deployment> stop|start|status
+# usage: AWS_PROFILE=aws scripts/control_node_power.sh <region> <deployment> stop|start|status|install
 #
 # stop:  refuses unless the DTN pool is at 0 (desired 0, nothing InService);
 #        disables the control node's GCS node locally, waits for its IP to leave
@@ -11,12 +11,17 @@
 # start: starts the instance, waits for SSM, enables the GCS node locally and
 #        waits for its Elastic IP to reappear in endpoint DNS.
 #
+# install: put elastic-gcs-control.service (node enable on boot, disable on
+#        shutdown; #30, #31) on a control node created before 0.12. Newer
+#        control nodes get it from UserData. Safe to re-run.
+#
 # DTNs can still scale out while the control node is stopped: they enable
 # themselves locally on resume (#72). Lambdas that target the control node
 # (cache eviction, version check) fail until it is started again.
 # =============================================================================
 set -euo pipefail
-REGION=${1:?region}; DEP=${2:?deployment}; ACTION=${3:?stop|start|status}
+HERE=$(cd "$(dirname "$0")" && pwd)
+REGION=${1:?region}; DEP=${2:?deployment}; ACTION=${3:?stop|start|status|install}
 P="/elastic-gcs/$REGION/$DEP"; ASG="elastic-gcs-dtn-$REGION-$DEP"
 aws_() { aws --region "$REGION" "$@"; }
 
@@ -84,6 +89,16 @@ start)
   D=$(domain); echo "enabling control node GCS node ($EIP) on $D"
   run "globus-connect-server node enable 2>&1 | tail -1; chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null; true"
   wait_dns present "$D" "$EIP" 300 && echo "endpoint $EP online via $EIP"
+  ;;
+install)
+  [ "$(state)" = running ] || { echo "control node is $(state); start it first"; exit 1; }
+  B=$(base64 < "$HERE/userdata/control_node_boot.sh" | tr -d '\n')
+  U=$(base64 < "$HERE/userdata/elastic-gcs-control.service" | tr -d '\n')
+  run "set -e; mkdir -p /opt/elastic-gcs/scripts
+echo $B | base64 -d > /opt/elastic-gcs/scripts/control_node_boot.sh; chmod 0755 /opt/elastic-gcs/scripts/control_node_boot.sh
+echo $U | base64 -d > /etc/systemd/system/elastic-gcs-control.service; chmod 0644 /etc/systemd/system/elastic-gcs-control.service
+systemctl daemon-reload; systemctl enable elastic-gcs-control 2>&1 | tail -1
+systemctl start elastic-gcs-control; systemctl is-active elastic-gcs-control"
   ;;
 *) echo "unknown action $ACTION"; exit 2;;
 esac

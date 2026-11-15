@@ -273,6 +273,14 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	initScript := awss3assets.NewAsset(stack, jsii.String("ControlNodeInitScript"),
 		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/control_node_init.sh")})
 	initScript.GrantRead(role)
+	// Boot/shutdown hook + its systemd unit (#30, #31): cloud-init runs UserData
+	// once per instance, so re-enabling the node after a stop/start is the unit's job.
+	bootScript := awss3assets.NewAsset(stack, jsii.String("ControlNodeBootScript"),
+		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/control_node_boot.sh")})
+	bootScript.GrantRead(role)
+	bootUnit := awss3assets.NewAsset(stack, jsii.String("ControlNodeBootUnit"),
+		&awss3assets.AssetProps{Path: jsii.String("scripts/userdata/elastic-gcs-control.service")})
+	bootUnit.GrantRead(role)
 
 	bucketsJSON, err := json.Marshal(props.OpenDataBuckets)
 	if err != nil {
@@ -329,7 +337,28 @@ fi
 		LocalFile: jsii.String("/opt/elastic-gcs/scripts/control_node_init.sh"),
 		Region:    jsii.String(region),
 	})
-	ud.AddCommands(jsii.String("bash " + *initPath))
+	bootPath := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
+		Bucket:    bootScript.Bucket(),
+		BucketKey: bootScript.S3ObjectKey(),
+		LocalFile: jsii.String("/opt/elastic-gcs/scripts/control_node_boot.sh"),
+		Region:    jsii.String(region),
+	})
+	unitPath := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
+		Bucket:    bootUnit.Bucket(),
+		BucketKey: bootUnit.S3ObjectKey(),
+		LocalFile: jsii.String("/etc/systemd/system/elastic-gcs-control.service"),
+		Region:    jsii.String(region),
+	})
+	ud.AddCommands(
+		jsii.String("chmod 0755 "+*bootPath),
+		jsii.String("chmod 0644 "+*unitPath),
+		jsii.String("systemctl daemon-reload"),
+		jsii.String("systemctl enable elastic-gcs-control"),
+		jsii.String("bash "+*initPath),
+		// Start the unit once setup is done, so its ExecStop (node disable) runs
+		// on the first shutdown too. Its start action is an idempotent node enable.
+		jsii.String("systemctl start elastic-gcs-control"),
+	)
 
 	// -------------------------------------------------------------------------
 	// EC2 Instance for control node.
