@@ -232,8 +232,20 @@ func (p *dtnPool) demandMonitorFn(ssmLogs awslogs.LogGroup) awslambda.Function {
 			"MAX_DTNS":                 itoa(p.cfg.MaxDTNs),
 			"THROUGHPUT_THRESHOLD_BPS": itoa(p.cfg.ThroughputThresholdBps),
 			"WARM_POOL_SIZE":           itoa(p.cfg.WarmPoolSize),
+			"POOL":                     jsii.String(p.cfg.Pool),
+			"SCALE_IN_IDLE":            jsii.String(p.cfg.ScaleInIdle.String()),
 		},
 	}, ssmLogs)
+	if p.cfg.Pool == "slots" { // writes desired-dtns and last-active (#129)
+		fn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid: jsii.String("DemandMonitorDesired"), Effect: awsiam.Effect_ALLOW,
+			Actions: jsii.Strings("ssm:PutParameter"),
+			Resources: jsii.Strings(
+				fmt.Sprintf("arn:aws:ssm:%s:%s:parameter%s", dep.Region, *p.stack.Account(), dep.Param(names.ParamDesiredDTNs)),
+				fmt.Sprintf("arn:aws:ssm:%s:%s:parameter%s", dep.Region, *p.stack.Account(), dep.Param(names.ParamLastActive)),
+			),
+		}))
+	}
 	fn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:    jsii.String("DemandMonitorLambdaPerms"),
 		Effect: awsiam.Effect_ALLOW,

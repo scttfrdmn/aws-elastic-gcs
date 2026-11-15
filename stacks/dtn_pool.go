@@ -91,6 +91,11 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 				"(see docs/instance-sizing.md).", p.cfg.DTNInstance)), nil)
 	}
 
+	if p.cfg.Pool == "slots" {
+		p.buildSlots() // slot controller instead of ASG + warm pool (#65)
+		return stack
+	}
+
 	role := p.dtnRole()
 	ud := p.dtnUserData(role)
 	asg := p.dtnASG(p.dtnLaunchTemplate(role, ud))
