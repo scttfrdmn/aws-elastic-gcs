@@ -24,8 +24,9 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
-	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
+	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/authorizers"
+	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/core"
+	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/services/transfer"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
@@ -50,8 +51,8 @@ type testEnv struct {
 	// GCS CLI credentials (same as Globus client creds) used when running
 	// globus-connect-server commands on the control node via SSM. These are
 	// passed as GCS_CLI_CLIENT_ID/SECRET/ENDPOINT_ID env vars.
-	gcsCLIClientID     string
-	gcsEndpointID      string
+	gcsCLIClientID string
+	gcsEndpointID  string
 
 	cfg           aws.Config
 	asgClient     *autoscaling.Client
@@ -63,13 +64,6 @@ type testEnv struct {
 	// transferClient uses client credentials for task monitoring (GetTask).
 	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
 	transferClient *transfer.Client
-}
-
-// staticBearerToken satisfies the Globus transfer.Authorizer interface.
-type staticBearerToken struct{ token string }
-
-func (a *staticBearerToken) GetAuthorizationHeader(_ ...context.Context) (string, error) {
-	return "Bearer " + a.token, nil
 }
 
 // newTestEnv initialises shared clients from environment variables.
@@ -113,41 +107,34 @@ func newTestEnv(t *testing.T) *testEnv {
 		gcsEndpointID = aws.ToString(epParam.Parameter.Value)
 	}
 
-	// Build a transfer client using client credentials for task monitoring.
-	// Transfer submission goes through the `globus` CLI (user-authenticated).
-	authClient, err := sdkauth.NewClient(
-		sdkauth.WithClientID(clientID),
-		sdkauth.WithClientSecret(clientSecret),
-	)
-	if err != nil {
-		t.Fatalf("Globus auth client: %v", err)
-	}
-	tok, err := authClient.GetClientCredentialsToken(context.Background(),
-		"urn:globus:auth:scope:transfer.api.globus.org:all")
-	if err != nil {
-		t.Fatalf("GetClientCredentialsToken: %v", err)
-	}
-	tc, err := transfer.NewClient(transfer.WithAuthorizer(&staticBearerToken{token: tok.AccessToken}))
+	// Transfer client for task monitoring, with an auto-refreshing
+	// client-credentials authorizer (globus-go-sdk v4). Transfer submission
+	// goes through the `globus` CLI (user-authenticated).
+	transferScope := "urn:globus:auth:scope:transfer.api.globus.org:all"
+	tc, err := transfer.NewClient(context.Background(), &core.Config{
+		Authorizer: authorizers.NewClientCredentialsAuthorizer(clientID, clientSecret, []string{transferScope}),
+		Scopes:     []string{transferScope},
+	})
 	if err != nil {
 		t.Fatalf("transfer client: %v", err)
 	}
 
 	return &testEnv{
-		region:             region,
-		dep:                dep,
-		asgName:            asgName,
-		secretsPrefix:      secretsPrefix,
-		controlNodeParam:   controlNodeParam,
-		endpointIDParam:    endpointIDParam,
-		gcsCLIClientID:     clientID,
-		gcsEndpointID:      gcsEndpointID,
-		cfg:                cfg,
-		asgClient:          autoscaling.NewFromConfig(cfg),
-		ssmClient:          ssmClient,
-		cwClient:           cloudwatch.NewFromConfig(cfg),
-		scaleOutAlarm:      dep.Resource("scaleout"),
-		scaleInAlarm:       dep.Resource("scalein"),
-		transferClient:     tc,
+		region:           region,
+		dep:              dep,
+		asgName:          asgName,
+		secretsPrefix:    secretsPrefix,
+		controlNodeParam: controlNodeParam,
+		endpointIDParam:  endpointIDParam,
+		gcsCLIClientID:   clientID,
+		gcsEndpointID:    gcsEndpointID,
+		cfg:              cfg,
+		asgClient:        autoscaling.NewFromConfig(cfg),
+		ssmClient:        ssmClient,
+		cwClient:         cloudwatch.NewFromConfig(cfg),
+		scaleOutAlarm:    dep.Resource("scaleout"),
+		scaleInAlarm:     dep.Resource("scalein"),
+		transferClient:   tc,
 	}
 }
 

@@ -39,7 +39,12 @@ type Lister struct {
 	BaseURL string       // default https://transfer.api.globus.org/v0.10
 	HTTP    *http.Client // default: 20 s timeout
 	Token   string       // Transfer access token with endpoint activity-monitor rights
-	Limit   int          // page size (default and max 1000)
+	// Authorizer, if set, supplies the Authorization header instead of Token
+	// (e.g. a globus-go-sdk v4 ClientCredentialsAuthorizer, which refreshes).
+	Authorizer interface {
+		GetAuthorizationHeader(ctx context.Context) (string, error)
+	}
+	Limit int // page size (default and max 1000)
 }
 
 type page struct {
@@ -78,7 +83,13 @@ func (l Lister) List(ctx context.Context, endpointID, status string) ([]Task, er
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+l.Token)
+		auth := "Bearer " + l.Token
+		if l.Authorizer != nil {
+			if auth, err = l.Authorizer.GetAuthorizationHeader(ctx); err != nil {
+				return nil, fmt.Errorf("authorization: %w", err)
+			}
+		}
+		req.Header.Set("Authorization", auth)
 		resp, err := client.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("endpoint_manager/task_list: %w", err)

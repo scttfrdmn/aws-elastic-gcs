@@ -69,7 +69,7 @@ status:
 	./bin/aws-elastic-gcs-ctl status --region $(REGION) --deployment $(DEPLOYMENT)
 
 clean:
-	rm -rf cdk.out/
+	rm -rf .cdk.out/ cdk.out/
 	rm -f lambda/*/bootstrap
 	rm -f bin/*
 

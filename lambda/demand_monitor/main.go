@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
-	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
+	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/authorizers"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/demand"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
@@ -52,14 +51,13 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	endpointID, token, err := credentials(ctx, cfg)
+	endpointID, authz, err := credentials(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	lister := demand.Lister{Token: token}
+	lister := demand.Lister{Authorizer: authz}
 	activeTasks, err := lister.List(ctx, endpointID, "ACTIVE")
 	if err != nil {
-		resetToken() // an expired or revoked token shows up here first
 		return fmt.Errorf("list ACTIVE tasks: %w", err)
 	}
 	active := demand.Aggregate(activeTasks)
@@ -133,64 +131,39 @@ func scaleUp(ctx context.Context, cfg aws.Config, active demand.Stats) error {
 	return nil
 }
 
-// Warm-invocation cache (#28): the endpoint ID, client credentials and access
-// token are fetched once per container, and the token is renewed before expiry.
+// Warm-invocation cache (#28): the endpoint ID and an auto-refreshing
+// client-credentials authorizer (globus-go-sdk v4) live for the container.
 var (
-	credMu      sync.Mutex
-	cachedEP    string
-	cachedID    string
-	cachedSec   string
-	cachedTok   string
-	tokenExpiry time.Time
+	credMu   sync.Mutex
+	cachedEP string
+	authz    *authorizers.ClientCredentialsAuthorizer
 )
 
-func resetToken() {
-	credMu.Lock()
-	cachedTok = ""
-	credMu.Unlock()
-}
-
-func credentials(ctx context.Context, cfg aws.Config) (endpointID, token string, err error) {
+func credentials(ctx context.Context, cfg aws.Config) (string, *authorizers.ClientCredentialsAuthorizer, error) {
 	credMu.Lock()
 	defer credMu.Unlock()
 	if cachedEP == "" {
 		p, err := ssm.NewFromConfig(cfg).GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(os.Getenv("ENDPOINT_ID_PARAM"))})
 		if err != nil {
-			return "", "", fmt.Errorf("get endpoint ID: %w", err)
+			return "", nil, fmt.Errorf("get endpoint ID: %w", err)
 		}
 		cachedEP = aws.ToString(p.Parameter.Value)
 	}
-	if cachedID == "" || cachedSec == "" {
+	if authz == nil {
 		sm := secretsmanager.NewFromConfig(cfg)
 		prefix := os.Getenv("SECRETS_PREFIX")
-		for _, s := range []struct {
-			name string
-			dst  *string
-		}{{"globus-client-id", &cachedID}, {"globus-client-secret", &cachedSec}} {
-			out, err := sm.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(prefix + "/" + s.name)})
+		var vals [2]string
+		for i, name := range []string{"globus-client-id", "globus-client-secret"} {
+			out, err := sm.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(prefix + "/" + name)})
 			if err != nil {
-				return "", "", fmt.Errorf("get %s: %w", s.name, err)
+				return "", nil, fmt.Errorf("get %s: %w", name, err)
 			}
-			*s.dst = aws.ToString(out.SecretString)
+			vals[i] = aws.ToString(out.SecretString)
 		}
+		authz = authorizers.NewClientCredentialsAuthorizer(vals[0], vals[1],
+			[]string{"urn:globus:auth:scope:transfer.api.globus.org:all"})
 	}
-	if cachedTok == "" || time.Now().After(tokenExpiry) {
-		auth, err := sdkauth.NewClient(sdkauth.WithClientID(cachedID), sdkauth.WithClientSecret(cachedSec))
-		if err != nil {
-			return "", "", fmt.Errorf("globus auth client: %w", err)
-		}
-		tok, err := auth.GetClientCredentialsToken(ctx, "urn:globus:auth:scope:transfer.api.globus.org:all")
-		if err != nil {
-			return "", "", fmt.Errorf("client credentials token: %w", err)
-		}
-		cachedTok = tok.AccessToken
-		life := time.Duration(tok.ExpiresIn) * time.Second
-		if life <= 0 {
-			life = time.Hour
-		}
-		tokenExpiry = time.Now().Add(life - 5*time.Minute)
-	}
-	return cachedEP, cachedTok, nil
+	return cachedEP, authz, nil
 }
 
 func envOr(k, def string) string {

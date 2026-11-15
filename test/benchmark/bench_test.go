@@ -54,7 +54,7 @@ type benchEnv struct {
 }
 
 // newBenchEnv initialises clients from environment variables.
-// Required: GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
+// Required: GLOBUS_CLIENT_ID (the GCS CLI credentials are read on the node).
 // Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_DEPLOYMENT
 // (default "default"), ELASTIC_GCS_ASG_NAME.
 func newBenchEnv(t *testing.T) *benchEnv {
@@ -62,7 +62,6 @@ func newBenchEnv(t *testing.T) *benchEnv {
 
 	region := getEnvOrDefault("ELASTIC_GCS_REGION", "us-east-1")
 	clientID := requireEnv(t, "GLOBUS_CLIENT_ID")
-	clientSecret := requireEnv(t, "GLOBUS_CLIENT_SECRET")
 
 	dep, err := names.New(region, os.Getenv("ELASTIC_GCS_DEPLOYMENT"))
 	if err != nil {
