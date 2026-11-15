@@ -25,10 +25,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 // versionRe extracts the semver string from globus-connect-server --version output.
@@ -152,49 +152,16 @@ func handler(ctx context.Context, _ interface{}) error {
 // getGCSVersion runs `globus-connect-server --version` on the given instance
 // via SSM and returns the parsed version string (e.g. "5.4.92").
 func getGCSVersion(ctx context.Context, ssmClient *ssm.Client, instanceID string) (string, error) {
-	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{instanceID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {"globus-connect-server --version 2>&1"},
-			"executionTimeout": {"30"},
-		},
-		Comment: aws.String("elastic-gcs: GCS version check"),
-	})
+	// `--version` output is parsed whatever the exit status.
+	res, err := ssmexec.Run(ctx, ssmClient, instanceID, "globus-connect-server --version 2>&1",
+		ssmexec.Options{Wait: 60 * time.Second, Comment: "elastic-gcs: GCS version check"})
 	if err != nil {
-		return "", fmt.Errorf("SendCommand: %w", err)
+		return "", err
 	}
-
-	commandID := aws.ToString(cmdOut.Command.CommandId)
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
-
-		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(commandID),
-			InstanceId: aws.String(instanceID),
-		})
-		if err != nil {
-			continue
-		}
-
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess,
-			ssmtypes.CommandInvocationStatusFailed:
-			output := aws.ToString(inv.StandardOutputContent)
-			if m := versionRe.FindString(output); m != "" {
-				return m, nil
-			}
-			return "unknown", nil
-
-		case ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled,
-			ssmtypes.CommandInvocationStatusCancelling:
-			return "", fmt.Errorf("SSM command in terminal state: %s", inv.Status)
-		}
-		// Pending / InProgress — keep polling
+	if m := versionRe.FindString(res.Stdout); m != "" {
+		return m, nil
 	}
-	return "", fmt.Errorf("timed out waiting for version command on %s", instanceID)
+	return "unknown", nil
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.

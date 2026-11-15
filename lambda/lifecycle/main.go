@@ -15,10 +15,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 // LifecycleEvent is the detail payload from EventBridge ASG lifecycle hook events.
@@ -96,79 +97,22 @@ func handler(ctx context.Context, event events.CloudWatchEvent) error {
 func handleScaleIn(ctx context.Context, ssmClient *ssm.Client, asgClient *autoscaling.Client, ec2Client *ec2.Client, event LifecycleEvent, region string) error {
 	logger.Info("scale-in: disabling GCS node", "instance", event.EC2InstanceID)
 
-	// Send node disable command via SSM Run Command.
-	// Use || true so exit code is always 0 — node may already be disabled
-	// or GCS may not be configured on this instance.
-	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{event.EC2InstanceID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {"globus-connect-server node disable 2>&1 || true"},
-			"executionTimeout": {"60"},
-		},
-		Comment: aws.String("elastic-gcs: disable node before scale-in"),
-	})
+	// Disable the node via SSM. `|| true`: the node may already be disabled,
+	// or GCS may not be set up on this instance. Whatever happens, the instance
+	// leaves service: the systemd ExecStop (dtn_shutdown.sh) disables again.
+	res, err := ssmexec.Run(ctx, ssmClient, event.EC2InstanceID,
+		"globus-connect-server node disable 2>&1 || true; "+gcscli.LockFix,
+		ssmexec.Options{Wait: 90 * time.Second, Poll: 5 * time.Second, Comment: "elastic-gcs: disable node before scale-in"})
 	if err != nil {
-		// SSM may fail if agent isn't running (e.g. already stopping).
-		// The systemd ExecStop will run dtn_shutdown.sh when the instance stops.
-		logger.Warn("SSM SendCommand failed, relying on systemd ExecStop for node disable",
-			"instance", event.EC2InstanceID,
-			"error", err.Error(),
-		)
-		finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
-		return completeLifecycle(ctx, asgClient, event, "CONTINUE")
-	}
-
-	commandID := aws.ToString(cmdOut.Command.CommandId)
-	logger.Info("SSM node-disable command sent, polling for completion",
-		"command_id", commandID,
-		"instance", event.EC2InstanceID,
-	)
-
-	// Poll for SSM command completion (up to 90 seconds).
-	// Lambda timeout is 6 minutes; lifecycle hook heartbeat is 5 minutes.
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-
-		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(commandID),
-			InstanceId: aws.String(event.EC2InstanceID),
-		})
-		if err != nil {
-			logger.Warn("GetCommandInvocation error, retrying", "error", err.Error())
-			continue
+		logger.Warn("node disable via SSM did not complete; relying on systemd ExecStop",
+			"instance", event.EC2InstanceID, "error", err.Error())
+	} else {
+		out := res.Stdout
+		if len(out) > 200 {
+			out = out[:200] + "..."
 		}
-
-		logger.Info("SSM command status", "status", string(inv.Status), "command_id", commandID)
-
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess,
-			ssmtypes.CommandInvocationStatusFailed:
-			// Success or failed (e.g. GCS not configured) — node is not serving.
-			output := aws.ToString(inv.StandardOutputContent)
-			if len(output) > 200 {
-				output = output[:200] + "..."
-			}
-			logger.Info("node disable output", "output", output, "instance", event.EC2InstanceID)
-			finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
-			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
-
-		case ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled,
-			ssmtypes.CommandInvocationStatusCancelling:
-			logger.Warn("SSM command in terminal error state, proceeding with CONTINUE",
-				"status", string(inv.Status),
-			)
-			finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
-			return completeLifecycle(ctx, asgClient, event, "CONTINUE")
-		}
-		// InProgress / Pending — keep polling
+		logger.Info("node disable output", "status", string(res.Status), "output", out, "instance", event.EC2InstanceID)
 	}
-
-	logger.Warn("timed out waiting for SSM node disable, proceeding with CONTINUE",
-		"instance", event.EC2InstanceID,
-	)
 	finalizeScaleIn(ctx, ec2Client, ssmClient, event.EC2InstanceID, region, event.Destination)
 	return completeLifecycle(ctx, asgClient, event, "CONTINUE")
 }

@@ -34,12 +34,12 @@ import (
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/fatih/color"
 	gcs "github.com/scttfrdmn/globus-gcs-go"
 	"github.com/spf13/cobra"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/config"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
@@ -149,56 +149,12 @@ func endpointIDParamPath() string    { return dep.Param(names.ParamEndpointID) }
 // runGCSCLIOnControlNode sends an SSM command to the control node that sets
 // up GCS CLI auth from Secrets Manager and runs the given GCS command.
 func runGCSCLIOnControlNode(ctx context.Context, ssmClient *ssm.Client, controlNodeID, gcsCmd string) (string, error) {
-	pfx := secretsPrefix()
-	region := regionFlag
-	script := fmt.Sprintf(`
-export GCS_CLI_CLIENT_ID=$(aws secretsmanager get-secret-value \
-    --secret-id %s/globus-client-id \
-    --query SecretString --output text --region %s 2>/dev/null)
-export GCS_CLI_CLIENT_SECRET=$(aws secretsmanager get-secret-value \
-    --secret-id %s/globus-client-secret \
-    --query SecretString --output text --region %s 2>/dev/null)
-export GCS_CLI_ENDPOINT_ID=$(aws ssm get-parameter \
-    --name %s \
-    --query Parameter.Value --output text --region %s 2>/dev/null)
-%s`, pfx, region, pfx, region, endpointIDParamPath(), region, gcsCmd)
+	return gcscli.Run(ctx, ssmClient, controlNodeID, dep, gcsCmd, 90*time.Second)
+}
 
-	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{controlNodeID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {script},
-			"executionTimeout": {"60"},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("SSM SendCommand: %w", err)
-	}
-
-	commandID := aws.ToString(cmdOut.Command.CommandId)
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
-		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(commandID),
-			InstanceId: aws.String(controlNodeID),
-		})
-		if err != nil {
-			continue
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			return aws.ToString(inv.StandardOutputContent), nil
-		case ssmtypes.CommandInvocationStatusFailed:
-			return aws.ToString(inv.StandardOutputContent),
-				fmt.Errorf("command failed: %s", aws.ToString(inv.StandardErrorContent))
-		case ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled,
-			ssmtypes.CommandInvocationStatusCancelling:
-			return "", fmt.Errorf("SSM command in terminal state: %s", inv.Status)
-		}
-	}
-	return "", fmt.Errorf("timed out waiting for SSM command")
+// listGCSNodes lists the endpoint's nodes via the control node.
+func listGCSNodes(ctx context.Context, ssmClient *ssm.Client, controlNodeID string) ([]gcscli.Node, error) {
+	return gcscli.ListNodes(ctx, ssmClient, controlNodeID, dep)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,15 +167,6 @@ func statusCmd() *cobra.Command {
 		Short: "Show system status (control node, DTN pool, GCS nodes, metrics, alarms)",
 		RunE:  runStatus,
 	}
-}
-
-type gcsNodeResult struct {
-	Data []gcsNode `json:"data"`
-}
-type gcsNode struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	IPAddress string `json:"ip_address"`
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -310,16 +257,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// GCS node list — only available when control node is running.
-	var gcsNodes []gcsNode
+	var gcsNodes []gcscli.Node
 	if controlState == "running" {
-		nodeJSON, ssmErr := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
-			"globus-connect-server node list -F json 2>/dev/null")
-		if ssmErr == nil {
-			var results []gcsNodeResult
-			if json.Unmarshal([]byte(nodeJSON), &results) == nil && len(results) > 0 {
-				gcsNodes = results[0].Data
-			}
-		}
+		gcsNodes, _ = listGCSNodes(ctx, ssmClient, controlNodeID)
 	}
 
 	// Active transfers (last 5 min)
@@ -403,11 +343,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			shortID = shortID[:8]
 		}
 		label := ""
-		if n.IPAddress == controlIP {
+		if n.IP() == controlIP {
 			label = "(control)"
 		}
 		nc.Printf("  %s  ", sym)
-		fmt.Printf("%-10s  %-18s  %-8s  %s\n", shortID, n.IPAddress, n.Status, label)
+		fmt.Printf("%-10s  %-18s  %-8s  %s\n", shortID, n.IP(), n.Status, label)
 	}
 
 	fmt.Println()
@@ -686,25 +626,18 @@ func runNodesList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot get control node ID: %w", err)
 	}
 
-	nodeJSON, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
-		"globus-connect-server node list -F json 2>/dev/null")
+	nodes, err := listGCSNodes(ctx, ssmClient, controlNodeID)
 	if err != nil {
 		return fmt.Errorf("node list failed: %w", err)
 	}
 
-	var results []gcsNodeResult
-	if err := json.Unmarshal([]byte(nodeJSON), &results); err != nil || len(results) == 0 {
-		return fmt.Errorf("failed to parse node list (output: %.300s)", nodeJSON)
-	}
-
-	nodes := results[0].Data
 	fmt.Printf("%-36s  %-18s  %-10s\n", "NODE ID", "IP ADDRESS", "STATUS")
 	fmt.Println(strings.Repeat("─", 68))
 	for _, n := range nodes {
 		if n.Status == "active" {
-			color.Green("%-36s  %-18s  %s\n", n.ID, n.IPAddress, n.Status)
+			color.Green("%-36s  %-18s  %s\n", n.ID, n.IP(), n.Status)
 		} else {
-			color.New(color.Faint).Printf("%-36s  %-18s  %s\n", n.ID, n.IPAddress, n.Status)
+			color.New(color.Faint).Printf("%-36s  %-18s  %s\n", n.ID, n.IP(), n.Status)
 		}
 	}
 	fmt.Printf("\n%d nodes total\n", len(nodes))
@@ -744,18 +677,14 @@ func runNodesDelete(cmd *cobra.Command, args []string) error {
 	// Resolve a prefix (e.g. "12ba8822") to a full UUID by listing all nodes.
 	fullID := nodeID
 	if len(nodeID) < 36 {
-		nodeJSON, err := runGCSCLIOnControlNode(ctx, ssmClient, controlNodeID,
-			"globus-connect-server node list -F json 2>/dev/null")
+		nodes, err := listGCSNodes(ctx, ssmClient, controlNodeID)
 		if err != nil {
 			return fmt.Errorf("node list for ID resolution: %w", err)
 		}
-		var results []gcsNodeResult
-		if json.Unmarshal([]byte(nodeJSON), &results) == nil && len(results) > 0 {
-			for _, n := range results[0].Data {
-				if strings.HasPrefix(n.ID, nodeID) {
-					fullID = n.ID
-					break
-				}
+		for _, n := range nodes {
+			if strings.HasPrefix(n.ID, nodeID) {
+				fullID = n.ID
+				break
 			}
 		}
 		if fullID == nodeID {
@@ -1780,13 +1709,9 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 		inv.gcsInitErr = gcsErr.Error()
 		// Fallback: if control node is running, try SSM RunCommand.
 		if inv.controlState == "running" {
-			nodeJSON, _ := runGCSCLIOnControlNode(ctx, ssmClient, inv.controlNodeID,
-				"globus-connect-server node list -F json 2>/dev/null")
-			var pages []gcsNodeResult
-			if json.Unmarshal([]byte(nodeJSON), &pages) == nil && len(pages) > 0 {
-				for _, n := range pages[0].Data {
-					inv.gcsNodeIDs = append(inv.gcsNodeIDs, n.ID)
-				}
+			nodes, _ := listGCSNodes(ctx, ssmClient, inv.controlNodeID)
+			for _, n := range nodes {
+				inv.gcsNodeIDs = append(inv.gcsNodeIDs, n.ID)
 			}
 			colJSON, _ := runGCSCLIOnControlNode(ctx, ssmClient, inv.controlNodeID,
 				"globus-connect-server collection list -F json 2>/dev/null")

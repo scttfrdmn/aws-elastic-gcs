@@ -16,10 +16,10 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 // snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.
@@ -187,35 +187,13 @@ func ensureControlNodeServing(ctx context.Context, cfg aws.Config) error {
 	// nodes fall back to a plain local enable.
 	const script = `if [ -x /opt/elastic-gcs/scripts/control_node_boot.sh ]; then /opt/elastic-gcs/scripts/control_node_boot.sh start; ` +
 		`else globus-connect-server node enable; chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null; true; fi`
-	out, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:    []string{instanceID},
-		DocumentName:   aws.String("AWS-RunShellScript"),
-		Parameters:     map[string][]string{"commands": {script}, "executionTimeout": {"300"}},
-		TimeoutSeconds: aws.Int32(60),
-	})
+	res, err := ssmexec.RunOK(ctx, ssmClient, instanceID, script,
+		ssmexec.Options{Wait: 4 * time.Minute, Poll: 5 * time.Second, Comment: "elastic-gcs: keep control node serving"})
 	if err != nil {
-		return fmt.Errorf("SendCommand: %w", err)
+		return fmt.Errorf("enable on %s: %w", instanceID, err)
 	}
-	cmdID := aws.ToString(out.Command.CommandId)
-	deadline := time.Now().Add(4 * time.Minute)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId: aws.String(cmdID), InstanceId: aws.String(instanceID),
-		})
-		if err != nil {
-			continue // invocation not registered yet
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			logger.Info("control node serving", "instance", instanceID, "output", aws.ToString(inv.StandardOutputContent))
-			return nil
-		case ssmtypes.CommandInvocationStatusFailed, ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled:
-			return fmt.Errorf("enable on %s: %s %s", instanceID, inv.Status, aws.ToString(inv.StandardErrorContent))
-		}
-	}
-	return fmt.Errorf("enable on %s did not finish in time", instanceID)
+	logger.Info("control node serving", "instance", instanceID, "output", res.Stdout)
+	return nil
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.

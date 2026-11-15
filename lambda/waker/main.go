@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -19,6 +18,7 @@ import (
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 // WakeRequest is the body for both direct Lambda invocations and HTTP Function URL calls.
@@ -253,49 +253,15 @@ func waitForSSMAgent(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 // waitForGCSManager polls via SSM RunCommand until globus-connect-server-manager is active.
 // Timeout: 2 minutes.
 func waitForGCSManager(ctx context.Context, ssmClient *ssm.Client, instanceID string) error {
-	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-
-		out, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-			InstanceIds:  []string{instanceID},
-			DocumentName: aws.String("AWS-RunShellScript"),
-			Parameters: map[string][]string{
-				"commands":         {"systemctl is-active globus-connect-server-manager"},
-				"executionTimeout": {"10"},
-			},
-		})
-		if err != nil {
-			continue
-		}
-
-		cmdID := aws.ToString(out.Command.CommandId)
-		// Poll for command result (up to ~12s).
-		for i := 0; i < 6; i++ {
-			time.Sleep(2 * time.Second)
-			inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-				CommandId:  aws.String(cmdID),
-				InstanceId: aws.String(instanceID),
-			})
-			if err != nil {
-				break
-			}
-			switch inv.Status {
-			case ssmtypes.CommandInvocationStatusSuccess:
-				if strings.TrimSpace(aws.ToString(inv.StandardOutputContent)) == "active" {
-					logger.Info("GCS Manager active", "instance", instanceID)
-					return nil
-				}
-				goto nextAttempt
-			case ssmtypes.CommandInvocationStatusFailed,
-				ssmtypes.CommandInvocationStatusTimedOut,
-				ssmtypes.CommandInvocationStatusCancelled:
-				goto nextAttempt
-			}
-		}
-	nextAttempt:
+	// One command that waits on the node itself, instead of one SSM round trip
+	// per check.
+	const script = `for i in $(seq 1 24); do systemctl is-active --quiet globus-connect-server-manager && exit 0; sleep 5; done; exit 1`
+	if _, err := ssmexec.RunOK(ctx, ssmClient, instanceID, script,
+		ssmexec.Options{Wait: 150 * time.Second, Comment: "elastic-gcs: wait for GCS Manager"}); err != nil {
+		return fmt.Errorf("GCS Manager not active on %s: %w", instanceID, err)
 	}
-	return fmt.Errorf("timed out waiting for GCS Manager on %s", instanceID)
+	logger.Info("GCS Manager active", "instance", instanceID)
+	return nil
 }
 
 func main() {
