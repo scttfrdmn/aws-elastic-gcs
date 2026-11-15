@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	gcs "github.com/scttfrdmn/globus-gcs-go"
+	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/authorizers"
 )
 
 // httpClient bounds Globus API calls (#48).
@@ -29,40 +29,16 @@ func getSecretValue(ctx context.Context, smClient *secretsmanager.Client, secret
 	return aws.ToString(out.SecretString), nil
 }
 
-// globusClientCredentialsToken obtains a Globus access token using the
-// OAuth2 client credentials grant.
-func globusClientCredentialsToken(clientID, clientSecret, scope string) (string, error) {
-	form := url.Values{
-		"grant_type": {"client_credentials"},
-		"scope":      {scope},
-	}
-	req, err := http.NewRequest(http.MethodPost,
-		"https://auth.globus.org/v2/oauth2/token",
-		strings.NewReader(form.Encode()))
+// globusClientCredentialsToken obtains a Globus access token with the OAuth2
+// client credentials grant (globus-go-sdk v4 authorizer).
+func globusClientCredentialsToken(ctx context.Context, clientID, clientSecret, scope string) (string, error) {
+	a := authorizers.NewClientCredentialsAuthorizer(clientID, clientSecret, []string{scope},
+		authorizers.WithClientCredentialsHTTPClient(httpClient))
+	h, err := a.GetAuthorizationHeader(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("globus auth: %w", err)
 	}
-	req.SetBasicAuth(clientID, clientSecret)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("token request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var tok struct {
-		AccessToken string `json:"access_token"`
-		Error       string `json:"error"`
-		ErrorDesc   string `json:"error_description"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		return "", fmt.Errorf("parse token response: %w", err)
-	}
-	if tok.Error != "" {
-		return "", fmt.Errorf("globus auth: %s: %s", tok.Error, tok.ErrorDesc)
-	}
-	return tok.AccessToken, nil
+	return strings.TrimPrefix(h, "Bearer "), nil
 }
 
 // gcsBaseURLFromTransfer looks up the GCS Manager API base URL for an endpoint
@@ -114,7 +90,7 @@ func newGCSClient(ctx context.Context, smClient *secretsmanager.Client, ssmClien
 	}
 
 	// Discover the GCS Manager domain via the Transfer API.
-	transferToken, err := globusClientCredentialsToken(clientID, clientSecret,
+	transferToken, err := globusClientCredentialsToken(ctx, clientID, clientSecret,
 		"urn:globus:auth:scope:transfer.api.globus.org:all")
 	if err != nil {
 		return nil, fmt.Errorf("get transfer token: %w", err)
@@ -125,7 +101,7 @@ func newGCSClient(ctx context.Context, smClient *secretsmanager.Client, ssmClien
 	}
 
 	// Get a manage_collections-scoped token for the GCS Manager API.
-	gcsToken, err := globusClientCredentialsToken(clientID, clientSecret,
+	gcsToken, err := globusClientCredentialsToken(ctx, clientID, clientSecret,
 		gcs.ManageCollectionsScope(endpointID))
 	if err != nil {
 		return nil, fmt.Errorf("get GCS token: %w", err)

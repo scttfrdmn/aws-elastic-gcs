@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version` reports the tag; it used to print a hard-coded `v0.6.0`.
 
 ### Changed
+- **globus-go-sdk v4** (#68). The project moves to `v4.10.0-3` and v3 is
+  dropped.
+  - `demand_monitor`, the CLI and the integration tests use the SDK's
+    auto-refreshing `ClientCredentialsAuthorizer`.
+  - This replaces `demand_monitor`'s hand-rolled token cache and the CLI's
+    hand-rolled OAuth request (part of #55).
+  - `internal/demand.Lister` accepts an authorizer.
+- CDK writes to `.cdk.out/` instead of `cdk.out/`. Go ignores dot-directories,
+  so `go list ./...` and `go mod tidy` no longer pick up stale Lambda copies
+  from synth output.
 - **Pure decision logic with unit tests** (#52): `internal/scaling`
   (`DesiredDTNs`, `ScaleUp`, `AnyPositive`), `internal/idle` (`ShouldStop`),
   `internal/eviction` (`OrphanNodes`, `Stale`) and `internal/demand` (paginated

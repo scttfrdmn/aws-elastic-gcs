@@ -22,7 +22,7 @@ require (
 	github.com/aws/jsii-runtime-go v1.142.0
 	github.com/fatih/color v1.19.0
 	github.com/scttfrdmn/globus-gcs-go v0.1.0
-	github.com/scttfrdmn/globus-go-sdk/v3 v3.65.0
+	github.com/scttfrdmn/globus-go-sdk/v4 v4.10.0-3
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
