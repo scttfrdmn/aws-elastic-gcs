@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `config/open_data_buckets.example.yaml`: `sentinel-cogs` is public, not
+  requester-pays. The retired `landsat-pds` is replaced by the requester-pays
+  `usgs-landsat`.
 - **Scale-in never leaves a running endpoint with zero active nodes** (#71).
   Before removing the last DTN, the scale-in Lambda re-enables a running control
   node and waits for it to be in endpoint DNS. If that fails, it keeps the DTN. A

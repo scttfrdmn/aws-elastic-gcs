@@ -35,18 +35,18 @@ buckets:
     requester_pays: false
     read_only: true
 
-  - name: "Landsat 8"
-    bucket: "landsat-pds"
+  - name: "Landsat Collection 2"
+    bucket: "usgs-landsat"
     region: us-west-2
-    description: "Landsat 8 satellite imagery"
-    requester_pays: false
+    description: "USGS Landsat Collection 2 (replaces the retired landsat-pds bucket)"
+    requester_pays: true
     read_only: true
 
   - name: "Sentinel-2 L2A COGs"
     bucket: "sentinel-cogs"
     region: us-west-2
     description: "Sentinel-2 L2A data in Cloud Optimized GeoTIFF format"
-    requester_pays: true
+    requester_pays: false   # public; read anonymously in the #58 benchmarks
     read_only: true
 
   # === eu-west-1 ===
