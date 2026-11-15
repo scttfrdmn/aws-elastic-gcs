@@ -36,6 +36,13 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
 | `useSpot` | bool | `false` | Use Spot instances for DTNs. Saves ~60–80% on compute but disables warm pool (AWS constraint). Spot DTNs cold-start (2–3 min). |
 | `spotMaxPrice` | string | `""` | Maximum Spot price per hour (e.g. `"0.10"`). Empty = up to on-demand price. |
 
+### Access and alerts
+
+| Context key | Default | Description |
+|---|---|---|
+| `adminCIDR` | `""` | Opens SSH (22) to this CIDR on the control node and DTNs. Empty means no SSH ingress; use SSM Session Manager (`aws ssm start-session --target <instance-id>`). |
+| `elastic-gcs:operatorEmail` | `""` | Subscribes this address to the deployment's operator alert topic (`elastic-gcs-operator-<region>-<deployment>`), which receives the GCS version-drift alarm. Confirm the subscription from the email AWS sends. The topic ARN is a stack output either way. |
+
 ### DTN Instance Type Selection
 
 | Use case | Recommended type | Sustained internet throughput | us-east-1 on-demand |

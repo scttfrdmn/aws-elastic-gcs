@@ -38,6 +38,7 @@ func main() {
 	endpointDisplayName := ctxString(app, "globus:endpointDisplayName")
 	orgName := ctxString(app, "globus:organizationName")
 	adminCIDR := ctxString(app, "adminCIDR")
+	operatorEmail := ctxString(app, "elastic-gcs:operatorEmail")
 	// GCS package version pinned on every node. All nodes in an endpoint must
 	// run the same GCS version, so the control node, DTN UserData, and DTN AMI
 	// (scripts/build_ami.sh) all key off this one value.
@@ -136,6 +137,7 @@ func main() {
 			IdleShutdownMinutes:         region.IdleShutdownMinutes,
 			MinUptimeMinutes:            region.MinUptimeMinutes,
 			GCSVersion:                  gcsVersion,
+			OperatorEmail:               operatorEmail,
 		})
 	}
 

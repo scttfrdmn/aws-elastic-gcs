@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,6 +21,16 @@ type ScaleOutEvent struct {
 	Source    string `json:"source"`     // "cloudwatch", "globus_webhook", "manual"
 	Reason    string `json:"reason"`     // Human-readable reason
 	TargetDTN int    `json:"target_dtn"` // Specific DTN count to target (0 = auto +1)
+
+	// Ignore is set for CloudWatch alarm notifications that must not scale out:
+	// alarms other than the deployment's scale-out alarms, or OK transitions (#27).
+	Ignore bool `json:"-"`
+}
+
+// alarmMessage is the subset of a CloudWatch alarm SNS notification we check.
+type alarmMessage struct {
+	AlarmName     string `json:"AlarmName"`
+	NewStateValue string `json:"NewStateValue"`
 }
 
 // snsEnvelope wraps an event when CloudWatch alarm triggers through SNS.
@@ -33,19 +44,28 @@ type snsEnvelope struct {
 
 // parseEvent unwraps SNS envelope if present, then parses ScaleOutEvent.
 // CloudWatch alarms route through SNS, wrapping the inner message as a JSON
-// string in Records[0].Sns.Message.
-func parseEvent(rawEvent json.RawMessage) ScaleOutEvent {
+// string in Records[0].Sns.Message. allowedAlarms lists the alarm names that
+// may scale out; any other alarm, or a non-ALARM state, is ignored.
+func parseEvent(rawEvent json.RawMessage, allowedAlarms map[string]bool) ScaleOutEvent {
 	var event ScaleOutEvent
 
 	// Try SNS envelope first
 	var env snsEnvelope
 	if err := json.Unmarshal(rawEvent, &env); err == nil &&
 		len(env.Records) > 0 && env.Records[0].SNS.Message != "" {
-		// Inner message is another JSON string — parse it
-		if err := json.Unmarshal([]byte(env.Records[0].SNS.Message), &event); err != nil {
-			// CloudWatch alarm SNS payloads don't have our fields — that's OK
+		msg := []byte(env.Records[0].SNS.Message)
+		var alarm alarmMessage
+		if json.Unmarshal(msg, &alarm) == nil && alarm.AlarmName != "" {
 			event.Source = "cloudwatch"
-			event.Reason = "alarm triggered"
+			event.Reason = "alarm " + alarm.AlarmName + " -> " + alarm.NewStateValue
+			event.Ignore = !allowedAlarms[alarm.AlarmName] || alarm.NewStateValue != "ALARM"
+			return event
+		}
+		// Inner message is another JSON string — parse it
+		if err := json.Unmarshal(msg, &event); err != nil {
+			event.Source = "sns"
+			event.Reason = "unparseable message"
+			event.Ignore = true
 		}
 		return event
 	}
@@ -73,7 +93,11 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		maxDTNs = 3
 	}
 
-	event := parseEvent(rawEvent)
+	event := parseEvent(rawEvent, alarmSet(os.Getenv("SCALE_OUT_ALARMS")))
+	if event.Ignore {
+		logger.Info("ignoring notification", "source", event.Source, "reason", event.Reason)
+		return nil
+	}
 	logger.Info("scale-out triggered",
 		"source", event.Source,
 		"reason", event.Reason,
@@ -140,4 +164,15 @@ func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-scaleout", region)
 	lambda.Start(handler)
+}
+
+// alarmSet parses a comma-separated list of alarm names.
+func alarmSet(csv string) map[string]bool {
+	set := map[string]bool{}
+	for _, n := range strings.Split(csv, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			set[n] = true
+		}
+	}
+	return set
 }
