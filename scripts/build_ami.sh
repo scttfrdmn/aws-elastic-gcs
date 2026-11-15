@@ -271,6 +271,14 @@ aws ssm get-command-invocation \
     --instance-id "$BUILDER_ID" \
     --query 'StandardOutputContent' --output text \
     --region "$REGION" --profile "$AWS_PROFILE" 2>/dev/null | tail -10 || true
+# An AMI without the cipher policy must not be published (#54).
+if [ "$STATUS" != "Success" ]; then
+    echo "ERROR: TLS configuration did not succeed (status: ${STATUS:-unknown})."
+    echo "Terminating builder without creating AMI."
+    aws ec2 terminate-instances --instance-ids "$BUILDER_ID" \
+        --region "$REGION" --profile "$AWS_PROFILE" > /dev/null
+    exit 1
+fi
 
 # --- Stop the instance before imaging (ensures filesystem consistency) ---
 echo ">>> Stopping builder instance for AMI creation..."

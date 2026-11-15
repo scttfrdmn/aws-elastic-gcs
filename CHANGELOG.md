@@ -64,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     throughput-alarm entries.
 
 ### Fixed
+- `build_ami.sh` no longer publishes an AMI when the TLS policy step fails or
+  times out (#54). It also removes the stale, unused
+  `scripts/systemd/elastic-gcs-dtn.service` (the stack generates the unit).
 - **Cache eviction actually evicts** (#33).
   - It used to terminate stale warm instances, and the ASG replaced them
     immediately: no saving, just cold-boot churn.
