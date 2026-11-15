@@ -116,6 +116,9 @@ func init() {
 	})
 }
 
+// httpClient bounds Globus API calls (#48).
+var httpClient = &http.Client{Timeout: 30 * time.Second}
+
 // loadAWSConfig creates an AWS SDK config with the --region and --profile flags.
 func loadAWSConfig(ctx context.Context) (aws.Config, error) {
 	opts := []func(*awsconfig.LoadOptions) error{
@@ -1517,7 +1520,7 @@ func globusClientCredentialsToken(clientID, clientSecret, scope string) (string,
 	req.SetBasicAuth(clientID, clientSecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("token request: %w", err)
 	}
@@ -1547,7 +1550,7 @@ func gcsBaseURLFromTransfer(ctx context.Context, endpointID, transferToken strin
 	}
 	req.Header.Set("Authorization", "Bearer "+transferToken)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("transfer API: %w", err)
 	}

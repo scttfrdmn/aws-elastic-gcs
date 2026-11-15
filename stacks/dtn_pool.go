@@ -331,6 +331,9 @@ WantedBy=elastic-gcs-dtn.service
 		Role:               dtnRole,
 		UserData:           ud,
 		RequireImdsv2:      jsii.Bool(true),
+		// One hop: containers or anything else forwarding through the DTN can't
+		// reach the instance role credentials (#48).
+		HttpPutResponseHopLimit: jsii.Number(1),
 		// 20GB gp3 root volume — DTNs need less storage than control node
 		BlockDevices: &[]*awsec2.BlockDevice{
 			{
@@ -553,7 +556,7 @@ WantedBy=elastic-gcs-dtn.service
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(6)), // > terminate hook heartbeat
 		MemorySize:   jsii.Number(128),
 		Environment:  commonLambdaEnv,
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	// Lifecycle Lambda needs SSM (node disable + slot lock release), ASG (complete hook), EC2 (describe + CreateTags)
 	lc := scoped("Lifecycle")
@@ -591,7 +594,7 @@ WantedBy=elastic-gcs-dtn.service
 			// Only these alarms may scale out; anything else on the topic is ignored (#27).
 			"SCALE_OUT_ALARMS": jsii.String(dep.Resource("scaleout") + "," + dep.Resource("scaleout-throughput")),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	so := scoped("ScaleOut")
 	grant(scaleOutFn,
@@ -612,7 +615,7 @@ WantedBy=elastic-gcs-dtn.service
 			"SECRETS_PREFIX":   jsii.String(secretsPrefix),
 			"METRIC_NAMESPACE": jsii.String(names.MetricNamespace),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	si := scoped("ScaleIn")
 	grant(scaleInFn, si.readParams(dep.ParamPrefix()))
@@ -636,7 +639,7 @@ WantedBy=elastic-gcs-dtn.service
 			"CACHE_EVICTION_HOURS":  jsii.String(fmt.Sprintf("%d", cacheEvictionHours)),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	ce := scoped("CacheEviction")
 	grant(cacheEvictionFn, ce.readParams(dep.ParamPrefix()))
@@ -681,7 +684,7 @@ WantedBy=elastic-gcs-dtn.service
 			"THROUGHPUT_THRESHOLD_BPS": jsii.String(fmt.Sprintf("%d", throughputThreshold)),
 			"WARM_POOL_SIZE":           jsii.String(fmt.Sprintf("%d", warmPoolSize)),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	demandMonitorFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:    jsii.String("DemandMonitorLambdaPerms"),
@@ -724,7 +727,7 @@ WantedBy=elastic-gcs-dtn.service
 			"ASG_NAME":              asg.AutoScalingGroupName(),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	vc := scoped("VersionCheck")
 	grant(versionCheckFn, vc.readParams(dep.ParamPrefix()))
@@ -1155,7 +1158,7 @@ WantedBy=elastic-gcs-dtn.service
 			"ASG_NAME":              asg.AutoScalingGroupName(),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
-		LogRetention: awslogs.RetentionDays_ONE_WEEK,
+		LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 	})
 	wk := scoped("Waker")
 	grant(wakerFn, wk.readParams(dep.ParamPrefix()))
@@ -1173,9 +1176,18 @@ WantedBy=elastic-gcs-dtn.service
 
 	// Every Lambda derives its names, SSM paths and metric dimensions from
 	// AWS_REGION (set by the runtime) and DEPLOYMENT via names.FromEnv.
+	// SSM Run Command output from the Lambdas goes to this log group, so every
+	// command run on an instance is auditable (#48). Instances write it with
+	// CloudWatchAgentServerPolicy.
+	ssmLogs := awslogs.NewLogGroup(stack, jsii.String("SSMCommandLogs"), &awslogs.LogGroupProps{
+		LogGroupName:  jsii.String("/elastic-gcs/" + dep.ID() + "/ssm-commands"),
+		Retention:     awslogs.RetentionDays_THREE_MONTHS,
+		RemovalPolicy: awscdk.RemovalPolicy_RETAIN,
+	})
 	for _, fn := range []awslambda.Function{lifecycleFn, scaleOutFn, scaleInFn,
 		cacheEvictionFn, demandMonitorFn, versionCheckFn, wakerFn} {
 		fn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
+		fn.AddEnvironment(jsii.String("SSM_LOG_GROUP"), ssmLogs.LogGroupName(), nil)
 	}
 
 	// Lambda Function URL with AWS_IAM auth — enforced by the Lambda service
@@ -1213,9 +1225,10 @@ WantedBy=elastic-gcs-dtn.service
 				"MIN_UPTIME_MINUTES":    jsii.String(fmt.Sprintf("%d", minUptime)),
 				"METRIC_NAMESPACE":      jsii.String(names.MetricNamespace),
 			},
-			LogRetention: awslogs.RetentionDays_ONE_WEEK,
+			LogRetention: awslogs.RetentionDays_THREE_MONTHS,
 		})
 		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
+		idleShutdownFn.AddEnvironment(jsii.String("SSM_LOG_GROUP"), ssmLogs.LogGroupName(), nil)
 		is := scoped("IdleShutdown")
 		grant(idleShutdownFn, is.readParams(dep.ParamPrefix()))
 		grant(idleShutdownFn, is.runShellOnRole(names.RoleControl)...) // node disable before stop (#30)

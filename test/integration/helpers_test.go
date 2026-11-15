@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
+
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -49,7 +51,6 @@ type testEnv struct {
 	// globus-connect-server commands on the control node via SSM. These are
 	// passed as GCS_CLI_CLIENT_ID/SECRET/ENDPOINT_ID env vars.
 	gcsCLIClientID     string
-	gcsCLIClientSecret string
 	gcsEndpointID      string
 
 	cfg           aws.Config
@@ -139,7 +140,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		controlNodeParam:   controlNodeParam,
 		endpointIDParam:    endpointIDParam,
 		gcsCLIClientID:     clientID,
-		gcsCLIClientSecret: clientSecret,
 		gcsEndpointID:      gcsEndpointID,
 		cfg:                cfg,
 		asgClient:          autoscaling.NewFromConfig(cfg),
@@ -315,11 +315,9 @@ func (e *testEnv) listGCSNodes(ctx context.Context, t *testing.T) []gcsNodeStatu
 	controlID := e.controlNodeID(ctx, t)
 
 	// Build the SSM command with GCS CLI auth env vars.
-	cmd := fmt.Sprintf(
-		"export GCS_CLI_CLIENT_ID=%s; export GCS_CLI_CLIENT_SECRET=%s; export GCS_CLI_ENDPOINT_ID=%s; "+
-			"sudo -E globus-connect-server node list -F json 2>&1",
-		e.gcsCLIClientID, e.gcsCLIClientSecret, e.gcsEndpointID,
-	)
+	// Credentials are read on the node (gcscli.Preamble), never placed in the
+	// SSM command text, which SSM keeps in its history (#48).
+	cmd := gcscli.Script(e.dep, "globus-connect-server node list -F json 2>&1")
 	raw := e.runSSMCommand(ctx, t, controlID, cmd)
 
 	// Parse the result#1.x.x wrapper array: [ { "code": "success", "data": [...] } ]

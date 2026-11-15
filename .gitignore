@@ -31,3 +31,5 @@ test/benchmark/harness/bench.env
 site/
 __pycache__/
 dist/
+node-slot*.json
+dtn-slot*.json

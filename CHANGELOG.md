@@ -118,6 +118,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The warm-pool and Spot custom resources are scoped to the deployment's ASG.
   - **Upgrade:** refresh the warm pool after deploying, so existing DTNs get the
     role tag.
+- **Hardening** (#48).
+  - SSM Run Command output from the Lambdas goes to a 90-day log group
+    (`/elastic-gcs/<deployment>/ssm-commands`), so commands run on instances are
+    auditable. Lambda logs are kept for 90 days, up from 7.
+  - The DTN launch template sets the IMDS hop limit to 1.
+  - The waker no longer returns raw error text to Function URL callers.
+  - The CLI's Globus HTTP calls have a 30 s timeout.
+  - Benchmark and integration tests read Globus credentials on the node instead
+    of putting them in the SSM command text, which SSM keeps in its history.
+  - The README stores the client secret from stdin.
+  - `go.mod` pins `toolchain go1.27.4` (GO-2026-6859), and `.gitignore` covers
+    slot identity files.
 - **No instance can read every SSM parameter** (#45).
   `AmazonSSMManagedInstanceCore` is replaced by the same permissions minus
   `ssm:GetParameter(s)` on `*`. The control node, DTNs and AMI builder read only

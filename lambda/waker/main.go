@@ -66,7 +66,8 @@ func handler(ctx context.Context, rawEvent json.RawMessage) (interface{}, error)
 	if err != nil {
 		logger.Error("wake failed", "error", err.Error())
 		if isHTTP {
-			body, _ := json.Marshal(map[string]string{"error": err.Error()})
+			// Details go to the log only, not to Function URL callers (#48).
+			body, _ := json.Marshal(map[string]string{"error": "wake failed; see the waker Lambda logs"})
 			return events.LambdaFunctionURLResponse{
 				StatusCode: 500,
 				Body:       string(body),
