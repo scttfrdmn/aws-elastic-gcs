@@ -137,8 +137,18 @@ func (s iamScope) onASG(actions ...string) awsiam.PolicyStatement {
 	})
 }
 
+// readParams allows ssm:GetParameter on this deployment's parameters only.
+func (s iamScope) readParams(prefix string) awsiam.PolicyStatement {
+	return awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:       jsii.String(s.sid + "ReadParams"),
+		Effect:    awsiam.Effect_ALLOW,
+		Actions:   jsii.Strings("ssm:GetParameter"),
+		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:%s:parameter%s/*", s.region, s.account, prefix)),
+	})
+}
+
 // unscoped is for actions without resource-level permissions (Describe*,
-// CloudWatch metrics) or still to be scoped (SSM parameters, #44).
+// CloudWatch metrics).
 func (s iamScope) unscoped(actions ...string) awsiam.PolicyStatement {
 	return awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:       jsii.String(s.sid + "Unscoped"),
