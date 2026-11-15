@@ -587,6 +587,7 @@ WantedBy=elastic-gcs-dtn.service
 			"ASG_NAME":       asg.AutoScalingGroupName(),
 			"MAX_DTNS":       jsii.String(fmt.Sprintf("%d", maxDTNs)),
 			"SECRETS_PREFIX": jsii.String(secretsPrefix),
+			"WARM_POOL_SIZE": jsii.String(fmt.Sprintf("%d", warmPoolSize)),
 			// Only these alarms may scale out; anything else on the topic is ignored (#27).
 			"SCALE_OUT_ALARMS": jsii.String(dep.Resource("scaleout") + "," + dep.Resource("scaleout-throughput")),
 		},
@@ -594,7 +595,7 @@ WantedBy=elastic-gcs-dtn.service
 	})
 	so := scoped("ScaleOut")
 	grant(scaleOutFn,
-		so.onASG("autoscaling:SetDesiredCapacity"),
+		so.onASG("autoscaling:SetDesiredCapacity", "autoscaling:PutWarmPool"),
 		so.unscoped("autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeWarmPool", "cloudwatch:PutMetricData"),
 	)
 
@@ -641,8 +642,9 @@ WantedBy=elastic-gcs-dtn.service
 	grant(cacheEvictionFn, ce.readParams(dep.ParamPrefix()))
 	grant(cacheEvictionFn, ce.runShellOnRole(names.RoleControl)...)
 	grant(cacheEvictionFn,
-		ce.onRoleInstances("TerminateInstances", names.RoleDTN, "ec2:TerminateInstances"),
+		ce.onASG("autoscaling:DeleteWarmPool"), // eviction to the cold tier (#33)
 		ce.unscoped(
+			"autoscaling:DescribeAutoScalingGroups",
 			"autoscaling:DescribeWarmPool",
 			"autoscaling:DescribeAutoScalingInstances",
 			"ec2:DescribeInstances",
@@ -677,6 +679,7 @@ WantedBy=elastic-gcs-dtn.service
 			"ASG_NAME":                 jsii.String(asgName),
 			"MAX_DTNS":                 jsii.String(fmt.Sprintf("%d", maxDTNs)),
 			"THROUGHPUT_THRESHOLD_BPS": jsii.String(fmt.Sprintf("%d", throughputThreshold)),
+			"WARM_POOL_SIZE":           jsii.String(fmt.Sprintf("%d", warmPoolSize)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -689,7 +692,8 @@ WantedBy=elastic-gcs-dtn.service
 		),
 		Resources: jsii.Strings("*"),
 	}))
-	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").onASG("autoscaling:SetDesiredCapacity"))
+	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").onASG("autoscaling:SetDesiredCapacity", "autoscaling:PutWarmPool"))
+	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitorWarm").unscoped("autoscaling:DescribeWarmPool"))
 	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").readParams(dep.ParamPrefix()))
 	// Globus client credentials: this deployment's secrets only, not every
 	// secret in the account (part of #44).

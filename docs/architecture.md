@@ -50,7 +50,7 @@ COLD (terminated)          WARM (stopped)              HOT (running)
 │  │  • scaleout      — increments ASG desired                 │  │
 │  │  • scalein       — decrements ASG desired when idle       │  │
 │  │  • lifecycle     — node disable before instance stops     │  │
-│  │  • cache_eviction — terminates warm pool instances > 72h  │  │
+│  │  • cache_eviction — removes the warm pool after 72h idle  │  │
 │  │  • demand_monitor — publishes ActiveTransfers metric       │  │
 │  │  • version_check — detects GCS version drift every 6h     │  │
 │  └──────────────────────────────────────────────────────────┘  │
@@ -101,7 +101,7 @@ Slot locks are held for the full instance lifetime and released by the lifecycle
 | `scalein` | SNS (CloudWatch alarm) | `SetDesiredCapacity -= 1`, guarded by `ActiveTransfers == 0` |
 | `lifecycle` | ASG lifecycle hook | SSM `node disable` before stop; releases slot lock on termination |
 | `demand_monitor` | EventBridge (1 min) | Polls Globus Transfer API, publishes `ElasticGCS/ActiveTransfers` |
-| `cache_eviction` | EventBridge (1 h) | Terminates warm pool instances stopped > 72 h; sweeps orphaned GCS nodes |
+| `cache_eviction` | EventBridge (1 h) | When nothing is desired and every warm instance has been stopped > 72 h, deletes the warm pool (WARM → COLD); the next scale-out restores it. Sweeps orphaned GCS nodes |
 | `version_check` | EventBridge (6 h) | Runs `globus-connect-server --version` on all nodes via SSM, publishes `ElasticGCS/GCSVersionDrift` |
 
 ### Scaling Triggers

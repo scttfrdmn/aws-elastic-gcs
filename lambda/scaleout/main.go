@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/warmpool"
 )
 
 // ScaleOutEvent is the payload for manual or alarm-triggered scale-out.
@@ -157,6 +158,7 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	}
 
 	logger.Info("scale-out complete", "asg", asgName, "desired", newDesired)
+	restoreWarmPool(ctx, asgClient, asgName)
 	return nil
 }
 
@@ -164,6 +166,17 @@ func main() {
 	region := os.Getenv("AWS_REGION")
 	logger.Init("elastic-gcs-scaleout", region)
 	lambda.Start(handler)
+}
+
+// restoreWarmPool puts the warm pool back if cache eviction removed it (#33).
+// This scale-out is a cold launch; later ones resume from the restored pool.
+func restoreWarmPool(ctx context.Context, api warmpool.API, asgName string) {
+	size, _ := strconv.Atoi(os.Getenv("WARM_POOL_SIZE"))
+	if made, err := warmpool.Ensure(ctx, api, asgName, size); err != nil {
+		logger.Warn("could not restore warm pool", "error", err.Error())
+	} else if made {
+		logger.Info("warm pool restored after eviction", "size", size)
+	}
 }
 
 // alarmSet parses a comma-separated list of alarm names.

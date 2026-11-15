@@ -96,15 +96,14 @@ func handler(ctx context.Context, _ interface{}) error {
 		}
 	}
 
-	if len(stoppedIDs) == 0 {
+	switch {
+	case len(stoppedIDs) == 0:
 		logger.Info("no Warmed:Stopped instances to check")
-	} else {
-		logger.Info("checking stopped warm pool instances for eviction",
-			"count", len(stoppedIDs),
-			"ttl_hours", evictionHours,
-		)
-		if err := evictStaleInstances(ctx, ec2Client, ssmClient, stoppedIDs,
-			evictionHours, region, secretsPrefix, controlNodeID); err != nil {
+	case len(stoppedIDs) < len(warmPool.Instances):
+		logger.Info("warm pool has instances that aren't stopped; not evicting")
+	default:
+		if err := evictWarmPool(ctx, asgClient, ec2Client, ssmClient, asgName, stoppedIDs,
+			evictionHours, controlNodeID); err != nil {
 			logger.Warn("eviction step failed", "error", err.Error())
 		}
 	}
@@ -125,94 +124,65 @@ func handler(ctx context.Context, _ interface{}) error {
 	return nil
 }
 
-// evictStaleInstances terminates warm pool instances past their TTL and
-// deletes their GCS node registrations.
-func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.Client,
-	instanceIDs []string, evictionHours int, region, secretsPrefix, controlNodeID string) error {
+// evictWarmPool moves the deployment from WARM to COLD (#33). When nothing is
+// desired and every warm instance has been stopped for longer than the TTL, it
+// deletes the warm pool (which terminates those instances), releases their slot
+// locks and deletes their GCS nodes. Terminating instances one by one doesn't
+// work: the ASG refills the pool to MaxGroupPreparedCapacity. The next
+// scale-out (scaleout or demand_monitor) puts the warm pool back.
+func evictWarmPool(ctx context.Context, asgClient *autoscaling.Client, ec2Client *ec2.Client, ssmClient *ssm.Client,
+	asgName string, instanceIDs []string, evictionHours int, controlNodeID string) error {
 
-	ec2Instances, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-		InstanceIds: instanceIDs,
-	})
+	groups, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{asgName}})
+	if err != nil || len(groups.AutoScalingGroups) == 0 {
+		return fmt.Errorf("describe ASG %s: %v", asgName, err)
+	}
+	desired := int(aws.ToInt32(groups.AutoScalingGroups[0].DesiredCapacity))
+
+	out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: instanceIDs})
 	if err != nil {
 		return fmt.Errorf("DescribeInstances failed: %w", err)
 	}
+	var instances []ec2types.Instance
+	var entered []time.Time
+	for _, r := range out.Reservations {
+		for _, inst := range r.Instances {
+			instances = append(instances, inst)
+			entered = append(entered, warmPoolEntryTime(inst.Tags, aws.ToTime(inst.LaunchTime)))
+		}
+	}
+	ttl := time.Duration(evictionHours) * time.Hour
+	if !eviction.EvictPool(entered, desired, time.Now(), ttl) {
+		logger.Info("warm pool not evictable yet", "instances", len(instances), "desired", desired, "ttl_hours", evictionHours)
+		return nil
+	}
 
-	evictionCutoff := time.Now().Add(-time.Duration(evictionHours) * time.Hour)
-	var evicted int
-
-	for _, reservation := range ec2Instances.Reservations {
-		for _, inst := range reservation.Instances {
-			instanceID := aws.ToString(inst.InstanceId)
-			entryTime := warmPoolEntryTime(inst.Tags, aws.ToTime(inst.LaunchTime))
-			age := time.Since(entryTime)
-			logger.Info("checking instance age",
-				"instance", instanceID,
-				"warm_pool_entry", entryTime.Format(time.RFC3339),
-				"age", age.Round(time.Minute).String(),
-			)
-
-			if !entryTime.Before(evictionCutoff) {
-				continue
-			}
-
-			logger.Info("evicting stale instance",
-				"instance", instanceID,
-				"age", age.Round(time.Hour).String(),
-				"ttl_hours", evictionHours,
-			)
-			_, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
-				InstanceIds: []string{instanceID},
-			})
+	logger.Info("evicting warm pool: idle past TTL", "instances", len(instances), "ttl_hours", evictionHours)
+	if _, err := asgClient.DeleteWarmPool(ctx, &autoscaling.DeleteWarmPoolInput{
+		AutoScalingGroupName: aws.String(asgName),
+		ForceDelete:          aws.Bool(true),
+	}); err != nil {
+		return fmt.Errorf("DeleteWarmPool: %w", err)
+	}
+	for _, inst := range instances {
+		instanceID := aws.ToString(inst.InstanceId)
+		if slotNum := slotNumber(inst.Tags); slotNum != "" {
+			outcome, err := slotlock.Release(ctx, ssmClient, dep, slotNum, instanceID)
 			if err != nil {
-				logger.Warn("failed to terminate instance",
-					"instance", instanceID,
-					"error", err.Error(),
-				)
-				continue
-			}
-			logger.Info("terminated warm pool instance", "instance", instanceID)
-			evicted++
-
-			// Release SSM slot lock (may be orphaned if shutdown script didn't run).
-			if slotNum := slotNumber(inst.Tags); slotNum != "" {
-				// Only if this instance still owns it (#50).
-				outcome, ssmErr := slotlock.Release(ctx, ssmClient, dep, slotNum, instanceID)
-				if ssmErr != nil {
-					logger.Warn("could not release slot lock", "slot", slotNum, "error", ssmErr.Error())
-				} else {
-					logger.Info("slot lock release", "slot", slotNum, "instance", instanceID, "outcome", string(outcome))
-				}
+				logger.Warn("could not release slot lock", "slot", slotNum, "error", err.Error())
 			} else {
-				logger.Warn("no elastic-gcs:slot tag on instance, slot lock not released",
-					"instance", instanceID,
-				)
+				logger.Info("slot lock release", "slot", slotNum, "instance", instanceID, "outcome", string(outcome))
 			}
-
-			// Delete the GCS node registration for the terminated instance.
-			if controlNodeID != "" {
-				nodeID := gcsNodeIDTag(inst.Tags)
-				if nodeID != "" {
-					logger.Info("deleting GCS node for evicted instance",
-						"node", nodeID,
-						"instance", instanceID,
-					)
-					if err := deleteGCSNode(ctx, ssmClient, controlNodeID, nodeID); err != nil {
-						logger.Warn("GCS node delete failed, will be caught by orphan sweep",
-							"node", nodeID,
-							"error", err.Error(),
-						)
-					}
-				} else {
-					logger.Warn("no gcs-node-id tag on instance, GCS node not deleted; will be caught by orphan sweep",
-						"tag", gcsNodeIDTagKey,
-						"instance", instanceID,
-					)
-				}
+		}
+		// The slot's identity stays in Secrets Manager; --import-node of a
+		// deleted node ID re-registers it (tested live, see #33).
+		if nodeID := gcsNodeIDTag(inst.Tags); nodeID != "" && controlNodeID != "" {
+			if err := deleteGCSNode(ctx, ssmClient, controlNodeID, nodeID); err != nil {
+				logger.Warn("GCS node delete failed; the orphan sweep will retry", "node", nodeID, "error", err.Error())
 			}
 		}
 	}
-
-	logger.Info("eviction complete", "checked", len(instanceIDs), "evicted", evicted)
+	logger.Info("warm pool evicted", "instances", len(instances))
 	return nil
 }
 
