@@ -62,11 +62,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unconditionally.
   - The CLI's `logs` and status lists include the waker, idle-shutdown and
     throughput-alarm entries.
+- **CLI split into one file per command** (#55). `cmd/aws-elastic-gcs-ctl/main.go`
+  keeps the root command, flags and shared helpers; each command lives in its
+  own file. Commands, flags and output are unchanged.
 
 ### Fixed
 - `build_ami.sh` no longer publishes an AMI when the TLS policy step fails or
   times out (#54). It also removes the stale, unused
   `scripts/systemd/elastic-gcs-dtn.service` (the stack generates the unit).
+- **CLI nil-dereference panics** (#55). `status` no longer panics when
+  `DescribeInstances` (warm-pool tags) or `DescribeAlarms` fails, or when EC2
+  omits an instance's `State` (also in `deprovision`). `getSSMParam` checks for
+  a missing `Parameter`, and the alarm label no longer indexes past the end of
+  an unexpected name.
 - **Cache eviction actually evicts** (#33).
   - It used to terminate stale warm instances, and the ASG replaced them
     immediately: no saving, just cold-boot churn.
