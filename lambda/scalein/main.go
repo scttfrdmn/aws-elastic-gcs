@@ -14,6 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
@@ -107,6 +110,18 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	}
 
 	newDesired := currentDesired - 1
+
+	// Never leave a running endpoint with zero active nodes (#71). Before the
+	// last DTN goes, make sure a running control node is serving: if it was
+	// taken out of the data path, re-enable it. A stopped control node means
+	// the endpoint is meant to be offline, so scale-in proceeds.
+	if newDesired == 0 {
+		if err := ensureControlNodeServing(ctx, cfg); err != nil {
+			logger.Warn("control node not serving; keeping the last DTN", "error", err.Error())
+			return nil
+		}
+	}
+
 	logger.Info("scaling in", "from", currentDesired, "to", newDesired)
 
 	// SetDesiredCapacity with retry on ScalingActivityInProgress.
@@ -144,6 +159,63 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 
 	logger.Info("scale-in complete", "asg", asgName, "from", currentDesired, "to", newDesired)
 	return nil
+}
+
+// ensureControlNodeServing enables the control node's GCS node (and waits for
+// it to appear in endpoint DNS) if the control node is running. It returns nil
+// if the control node is stopped: then there is nothing to keep serving.
+func ensureControlNodeServing(ctx context.Context, cfg aws.Config) error {
+	ssmClient := ssm.NewFromConfig(cfg)
+	param, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
+		Name: aws.String(dep.Param(names.ParamControlNodeID)),
+	})
+	if err != nil {
+		return fmt.Errorf("get control node ID: %w", err)
+	}
+	instanceID := aws.ToString(param.Parameter.Value)
+
+	desc, err := ec2.NewFromConfig(cfg).DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{instanceID}})
+	if err != nil || len(desc.Reservations) == 0 || len(desc.Reservations[0].Instances) == 0 {
+		return fmt.Errorf("describe control node %s: %v", instanceID, err)
+	}
+	if state := string(desc.Reservations[0].Instances[0].State.Name); state != "running" {
+		logger.Info("control node not running; endpoint goes offline with the pool", "state", state)
+		return nil
+	}
+
+	// control_node_boot.sh (0.12+) enables and waits for DNS; older control
+	// nodes fall back to a plain local enable.
+	const script = `if [ -x /opt/elastic-gcs/scripts/control_node_boot.sh ]; then /opt/elastic-gcs/scripts/control_node_boot.sh start; ` +
+		`else globus-connect-server node enable; chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null; true; fi`
+	out, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
+		InstanceIds:    []string{instanceID},
+		DocumentName:   aws.String("AWS-RunShellScript"),
+		Parameters:     map[string][]string{"commands": {script}, "executionTimeout": {"300"}},
+		TimeoutSeconds: aws.Int32(60),
+	})
+	if err != nil {
+		return fmt.Errorf("SendCommand: %w", err)
+	}
+	cmdID := aws.ToString(out.Command.CommandId)
+	deadline := time.Now().Add(4 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
+			CommandId: aws.String(cmdID), InstanceId: aws.String(instanceID),
+		})
+		if err != nil {
+			continue // invocation not registered yet
+		}
+		switch inv.Status {
+		case ssmtypes.CommandInvocationStatusSuccess:
+			logger.Info("control node serving", "instance", instanceID, "output", aws.ToString(inv.StandardOutputContent))
+			return nil
+		case ssmtypes.CommandInvocationStatusFailed, ssmtypes.CommandInvocationStatusTimedOut,
+			ssmtypes.CommandInvocationStatusCancelled:
+			return fmt.Errorf("enable on %s: %s %s", instanceID, inv.Status, aws.ToString(inv.StandardErrorContent))
+		}
+	}
+	return fmt.Errorf("enable on %s did not finish in time", instanceID)
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.

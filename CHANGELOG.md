@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Scale-in never leaves a running endpoint with zero active nodes** (#71).
+  Before removing the last DTN, the scale-in Lambda re-enables a running control
+  node and waits for it to be in endpoint DNS. If that fails, it keeps the DTN. A
+  stopped control node means the endpoint is meant to be offline, and scale-in
+  goes ahead.
 - **DTN boot fails fast and stays out of DNS when it should** (#34, #69).
   - Any boot failure completes the launch hook with `ABANDON` right away. The ASG
     then replaces the instance in seconds instead of after the 15-minute hook
