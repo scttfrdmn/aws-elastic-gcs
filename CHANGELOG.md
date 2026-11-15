@@ -90,6 +90,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scale-in, idle shutdown and the CLI read every CloudWatch datapoint, not just
   `Datapoints[0]` (CloudWatch doesn't order them).
 
+### Security
+- **DTNs can no longer tamper with scaling or other DTNs** (#43).
+  - DTNs publish metrics only to a namespace of their own, `ElasticGCS/DTN`
+    (boot latency), so they can't forge the demand metrics that drive scaling.
+  - `ec2:CreateTags` applies to the requesting instance only.
+  - Slot and setup locks can be created but not overwritten. DTNs can delete the
+    setup lock only; slot locks are released by the Lambdas, which check the
+    owner.
+- **Lambdas act only on the instance role they expect** (#44).
+  - DTNs are tagged `elastic-gcs:role=dtn`, and the control node is
+    `elastic-gcs:role=control`.
+  - Lambdas that target the control node (waker, idle shutdown, scale-in, cache
+    eviction's GCS CLI) require `role=control`. Those that target DTNs (lifecycle,
+    eviction terminate) require `role=dtn`. A tampered `control-node-id`
+    parameter can't redirect them to another instance.
+  - The warm-pool and Spot custom resources are scoped to the deployment's ASG.
+  - **Upgrade:** refresh the warm pool after deploying, so existing DTNs get the
+    role tag.
+
 ## [0.12.0] - 2026-11-15
 
 Validated live on the us-west-2 `src` and `dst` deployments.
