@@ -27,7 +27,7 @@ func handler(ctx context.Context) error {
 	controlNodeIDParam := os.Getenv("CONTROL_NODE_ID_PARAM")
 	metricNamespace := os.Getenv("METRIC_NAMESPACE")
 	if metricNamespace == "" {
-		metricNamespace = "ElasticGCS"
+		metricNamespace = names.MetricNamespace
 	}
 
 	idleMinutes := 30

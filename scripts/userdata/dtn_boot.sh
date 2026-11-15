@@ -26,6 +26,7 @@ set -euo pipefail
 #   SECRETS_PREFIX  — Secrets Manager prefix (e.g. elastic-gcs/us-west-2/src)
 #   PARAM_PREFIX    — SSM Parameter Store prefix (e.g. /elastic-gcs/us-west-2/src)
 #   TOTAL_SLOTS     — number of pre-created node identity slots
+#   ASG_NAME, LIFECYCLE_HOOK, METRIC_NAMESPACE — from internal/names (defaults match)
 # =============================================================================
 
 LOG="/var/log/elastic-gcs-dtn.log"
@@ -119,7 +120,9 @@ echo "Instance ID: $INSTANCE_ID"
 # "Pending:Wait" = launching or resuming into service; "Warmed:Pending:Wait" =
 # first boot of an instance headed for the warm pool. Anything else (e.g. a
 # service restart on a running DTN) means there is no hook to signal.
-ASG_NAME="elastic-gcs-dtn-${AWS_REGION}-${DEPLOYMENT}"
+ASG_NAME="${ASG_NAME:-elastic-gcs-dtn-${AWS_REGION}-${DEPLOYMENT}}"
+LIFECYCLE_HOOK="${LIFECYCLE_HOOK:-dtn-ready-hook}"
+METRIC_NAMESPACE="${METRIC_NAMESPACE:-ElasticGCS}"
 LIFECYCLE_STATE=$(aws autoscaling describe-auto-scaling-instances \
     --instance-ids "$INSTANCE_ID" --region "$AWS_REGION" \
     --query 'AutoScalingInstances[0].LifecycleState' --output text 2>/dev/null || echo unknown)
@@ -130,7 +133,7 @@ complete_hook() {  # CONTINUE|ABANDON
     [ "$HOOK_DONE" = true ] && return 0
     echo ">>> Completing lifecycle action $1"
     aws autoscaling complete-lifecycle-action \
-        --lifecycle-hook-name dtn-ready-hook \
+        --lifecycle-hook-name "$LIFECYCLE_HOOK" \
         --auto-scaling-group-name "$ASG_NAME" \
         --instance-id "$INSTANCE_ID" \
         --lifecycle-action-result "$1" \
@@ -359,7 +362,7 @@ publish_boot_metric() {
     if [ "$BOOT_TYPE" = "resume" ]; then name=DTNResumeLatencyMs; value=$RESUME_MS
     else name=DTNFirstBootLatencyMs; value=$SETUP_MS; fi
     aws cloudwatch put-metric-data \
-        --namespace "ElasticGCS" \
+        --namespace "$METRIC_NAMESPACE" \
         --metric-name "$name" \
         --value "$value" \
         --unit Milliseconds \

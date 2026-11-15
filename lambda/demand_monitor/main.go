@@ -51,7 +51,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	metricNamespace := os.Getenv("METRIC_NAMESPACE")
 	wakerFunctionName := os.Getenv("WAKER_FUNCTION_NAME")
 	if metricNamespace == "" {
-		metricNamespace = "ElasticGCS"
+		metricNamespace = names.MetricNamespace
 	}
 
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
