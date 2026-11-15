@@ -118,6 +118,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The warm-pool and Spot custom resources are scoped to the deployment's ASG.
   - **Upgrade:** refresh the warm pool after deploying, so existing DTNs get the
     role tag.
+- **TLS policy enforces the approved list** (#47). The RHEL 9 crypto-policy
+  module also removes static RSA key exchange (no forward secrecy) and
+  HMAC-SHA1, which DEFAULT still allowed for TLS 1.2 CBC suites. The control
+  node now runs the same `configure_tls.sh` as the DTN AMI. That script merges
+  GCS's `gsi.conf` instead of overwriting it.
 - **Hardening** (#48).
   - SSM Run Command output from the Lambdas goes to a 90-day log group
     (`/elastic-gcs/<deployment>/ssm-commands`), so commands run on instances are

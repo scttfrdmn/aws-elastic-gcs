@@ -86,55 +86,11 @@ case "$OS_ID" in
 esac
 
 # --- 1a. Configure TLS cipher policy ---
-# GCS regenerates its Apache VirtualHost-level SSLCipherSuite on every
-# collection change and marks those files "DO NOT EDIT". To enforce the
-# approved cipher list regardless of GCS regeneration, we use the RHEL 9
-# system crypto-policy (a hard OpenSSL constraint) plus explicit gsi.conf
-# settings for GridFTP data channels.
+# One source for the approved policy, shared with the DTN AMI (#47):
+# configure_tls.sh sets the RHEL 9 crypto-policy module and merges (rather
+# than overwrites) the GridFTP settings in /etc/grid-security/gsi.conf.
 echo ">>> Configuring TLS cipher policy..."
-APPROVED_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384"
-
-case "$OS_ID" in
-    amzn|rhel|rocky|almalinux)
-        # RHEL 9 crypto-policy: removes CHACHA20-POLY1305 and DHE (FFDHE)
-        # key exchange groups from the DEFAULT policy. Apache and GridFTP
-        # inherit this constraint from OpenSSL; GCS config regeneration cannot
-        # re-enable ciphers that the policy has removed.
-        mkdir -p /etc/crypto-policies/policies/modules
-        cat > /etc/crypto-policies/policies/modules/ELASTIC-GCS.pmod <<'PMOD'
-# Elastic GCS approved cipher policy — do not edit manually
-# key_exchange = ECDHE ECDHE-PSK is omitted: breaks auth.globus.org (close_notify)
-# group = -FFDHE-* achieves DHE removal without affecting Globus connectivity
-group = -FFDHE-*
-cipher = -CHACHA20-POLY1305
-# To restrict to TLS 1.2 only, uncomment: protocol = TLS1.2
-PMOD
-        update-crypto-policies --set DEFAULT:ELASTIC-GCS
-        echo ">>> Crypto policy applied: $(update-crypto-policies --show)"
-        ;;
-    ubuntu|debian)
-        # No update-crypto-policies on Debian/Ubuntu.
-        # Write an Apache drop-in as best-effort; note GCS may override it.
-        mkdir -p /etc/apache2/conf-available
-        cat > /etc/apache2/conf-available/elastic-gcs-tls.conf <<EOF
-# Elastic GCS approved cipher list (best-effort — GCS may regenerate VirtualHost settings)
-SSLProtocol -all +TLSv1.2 +TLSv1.3
-SSLCipherSuite ${APPROVED_CIPHERS}
-SSLHonorCipherOrder off
-EOF
-        a2enconf elastic-gcs-tls 2>/dev/null || true
-        ;;
-esac
-
-# GridFTP data channel TLS (/etc/grid-security/gsi.conf)
-# Explicit cipher list for ports 50000-51000; system crypto-policy also applies.
-mkdir -p /etc/grid-security
-cat > /etc/grid-security/gsi.conf <<EOF
-MIN_TLS_PROTOCOL=TLS1_2_VERSION
-CIPHERS=${APPROVED_CIPHERS}
-SERVER_CIPHER_ORDER=false
-EOF
-echo ">>> GridFTP TLS configured."
+bash /opt/elastic-gcs/scripts/configure_tls.sh
 
 # --- 2. Retrieve secrets ---
 echo ">>> Retrieving Globus credentials from Secrets Manager..."
