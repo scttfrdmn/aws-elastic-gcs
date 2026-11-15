@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-This project implements an elastic, auto-scaling Globus Connect Server (GCS) v5 deployment on AWS using CDK in Go. The system scales from a minimal control node (~$12/month idle) to multiple high-throughput Data Transfer Nodes (DTNs) on demand, contracting back when transfers complete.
+This project implements an elastic, auto-scaling Globus Connect Server (GCS) v5 deployment on AWS using CDK in Go. The system scales from a minimal control node (~$6/month stopped, ~$55/month running) to multiple high-throughput Data Transfer Nodes (DTNs) on demand, contracting back when transfers complete.
 
 The primary use case is fronting the **AWS Open Data Registry** with Globus endpoints, enabling any researcher with a Globus account to discover and transfer public datasets. The architecture deploys to multiple AWS regions to colocate with Open Data buckets.
 
@@ -18,13 +18,12 @@ The primary use case is fronting the **AWS Open Data Registry** with Globus endp
 All work is tracked in GitHub:
 - **Project board:** https://github.com/users/scttfrdmn/projects/27
 - **Issues:** https://github.com/scttfrdmn/aws-elastic-gcs/issues
-- **Milestones:** v0.2 (scaling fixes), v0.3 (cost/reliability), v0.4 (observability/multi-region)
-
-| Milestone | Focus | Key Issues |
-|-----------|-------|------------|
-| v0.2 | Correct automatic scaling | #1 SNS fix, #2 MaxDTNs config, #3 demand monitor, #4 scale-in guard, #5 cache eviction TTL, #6 warm pool CDK |
-| v0.3 | Cost & reliability | #7 Spot instances, #8 t4g.medium control node, #9 stale node cleanup, #10 S3 VPC endpoint |
-| v0.4 | Observability & multi-region | #11 open_data.go, #12 CloudWatch dashboard, #13 structured logging, #14 version drift detection |
+- **Milestones** (minor releases only while the project has no users):
+  - v0.12: operational & security fixes
+  - v0.13: refactor, test coverage & hardening
+  - v0.14: slot controller replacing the ASG + warm pool (#65)
+- **Releases:** tags and GitHub Releases match `CHANGELOG.md` (latest: v0.11.0)
+- **Site:** https://scttfrdmn.github.io/aws-elastic-gcs/ (built from `docs/` on every push to `main`)
 
 ## Key Repositories
 
@@ -72,10 +71,10 @@ COLD (terminated)          WARM (stopped)              HOT (running)
 │                                                              │
 │  ┌──────────────┐     ┌──────────────────────────────────┐   │
 │  │ Control Node │     │  ASG + Warm Pool                 │   │
-│  │ (t4g.medium) │     │  ┌─────────┐  ┌─────────┐       │   │
+│  │ (t3a.large)  │     │  ┌─────────┐  ┌─────────┐       │   │
 │  │              │     │  │  DTN 1   │  │  DTN 2   │ ...  │   │
 │  │ • GCS endpoint     │  │(stopped) │  │(stopped) │      │   │
-│  │ • Node identity    │  │ + EIP    │  │ + EIP    │      │   │
+│  │ • Node identity    │  │ slot lock│  │ slot lock│      │   │
 │  │   pre-creation     │  └─────────┘  └─────────┘       │   │
 │  │ • Orchestration    │                                  │   │
 │  └──────┬───────┘     └──────────────────────────────────┘   │
@@ -174,95 +173,62 @@ globus-connect-server storage-gateway create s3 \
 ## Project Structure
 
 ```
-elastic-gcs/
-├── CLAUDE.md                          # This file
-├── README.md                          # Project README
-├── go.mod
-├── go.sum
-├── cdk.json                           # CDK app configuration
-├── cdk.go                             # CDK app entrypoint
-│
+aws-elastic-gcs/
+├── cdk.go, cdk.json                   # CDK app: one control + one DTN pool stack per (region, deployment)
+├── mkdocs.yml                         # Project site (docs/ → GitHub Pages)
 ├── stacks/
-│   ├── network.go                     # VPC, subnets, security groups
-│   ├── control_node.go                # Control node EC2 + GCS endpoint setup
-│   ├── dtn_pool.go                    # ASG + warm pool + EIPs for DTNs
-│   ├── orchestration.go               # Lambda functions + EventBridge rules
-│   └── open_data.go                   # S3 storage gateway configs per Open Data bucket
-│
-├── lambda/
-│   ├── scaleout/
-│   │   └── main.go                    # Handles scale-out triggers
-│   ├── scalein/
-│   │   └── main.go                    # Handles scale-in + lifecycle hooks
-│   ├── lifecycle/
-│   │   └── main.go                    # ASG lifecycle hook handler (disable before stop)
-│   └── cache_eviction/
-│       └── main.go                    # Terminates warm pool instances past TTL
-│
-├── scripts/
-│   ├── userdata/
-│   │   ├── control_node_init.sh       # Control node bootstrap (install GCS, endpoint setup)
-│   │   ├── dtn_first_boot.sh          # DTN first boot (node setup --import-node)
-│   │   └── dtn_resume.sh              # DTN resume from stopped (node enable)
-│   ├── build_ami.sh                   # Packer or EC2 Image Builder script for DTN AMI
-│   └── create_node_identities.sh      # Pre-create N node identities on control node
-│
-├── config/
-│   ├── open_data_buckets.yaml         # Registry of Open Data buckets per region
-│   └── regions.yaml                   # Target regions and instance type preferences
-│
-├── cmd/
-│   └── aws-elastic-gcs-ctl/
-│       └── main.go                    # CLI tool for manual operations (check status, force scale, etc.)
-│
+│   ├── control_node.go                # VPC, security group, control node EC2 + EIP, boot unit
+│   ├── dtn_pool.go                    # ASG + warm pool, Lambdas, EventBridge, alarms, dashboard
+│   └── iam_scope.go                   # IAM statements confined to one deployment
+├── lambda/                            # scaleout, scalein, lifecycle, cache_eviction,
+│                                      # demand_monitor, version_check, waker, idle_shutdown
 ├── internal/
-│   ├── gcs/
-│   │   └── client.go                  # Wrapper for GCS CLI operations via SSM Run Command
-│   ├── scaling/
-│   │   └── policy.go                  # Scale-out/in decision logic
-│   └── metrics/
-│       └── collector.go               # Collect and publish custom CloudWatch metrics
-│
+│   ├── names/                         # All names/paths/tags from (region, deployment)
+│   ├── gcsid/                         # UUID validation before IDs reach shell commands
+│   └── logger/                        # Structured logging
+├── cmd/aws-elastic-gcs-ctl/           # Operator CLI (status, nodes, collections, deprovision, ...)
+├── config/                            # regions.yaml, open_data_buckets.yaml (+ examples)
+├── scripts/
+│   ├── userdata/                      # control_node_init.sh, control_node_boot.sh,
+│   │                                  # elastic-gcs-control.service, dtn_boot.sh,
+│   │                                  # dtn_shutdown.sh, spot_interrupt_monitor.sh
+│   ├── build_ami.sh                   # DTN AMI per GCS version → SSM parameter
+│   ├── control_node_power.sh          # stop/start/install the control node between sessions
+│   ├── instance_sizing.py, throughput_model.py
+├── docs/                              # Guides, performance study, blog, talk outline (the site)
 └── test/
-    ├── integration/
-    │   ├── node_lifecycle_test.go      # Test: disable → stop → resume → enable
-    │   ├── transfer_test.go            # Test: end-to-end transfer via elastic endpoint
-    │   └── scaling_test.go             # Test: scale-out latency measurement
-    └── benchmark/
-        └── timing_test.go             # Benchmark: measure each phase of scale-out
+    ├── integration/                   # Live tests: node lifecycle, transfers, autoscaling
+    └── benchmark/                     # timing tests, harness/ (two-deployment campaign), results/
 ```
 
 ## Implementation Status
 
-### v0.1 — Completed ✅
-Single-region deployment with control node, ASG + warm pool, Lambda lifecycle hooks, EIP-based node slot assignment, boot/shutdown scripts with GCS node disable/enable, lock file fix, and validated end-to-end Globus transfer against the 1000 Genomes Open Data bucket.
-
-**What works:**
-- Control node boots, runs GCS endpoint setup, pre-creates node identities in Secrets Manager
-- DTN warm pool (2 stopped instances) with EIP slot assignment via tags
-- Scale-out: DTN resumes in ~60s, `node enable` succeeds, transfer completes
-- Scale-in: lifecycle hook calls `node disable` before instance stops
-- Lock file fix: `chown gcsweb:gcsweb subscription_pause` after each root GCS CLI call
-
-**Known gaps → see v0.2 issues:**
-- Scale-out alarm never fires (demand monitor Lambda missing, `ActiveTransfers` metric not published)
-- Scale-in alarm fires immediately after scale-out (no active transfer guard)
-- `MaxDTNs` config doesn't exist; ASG max capped at `warmPoolSize + 1 = 3`
-- Warm pool `MinSize=2` reset on every `cdk deploy` (no CDK custom resource)
-
-### v0.2 — Correct Automatic Scaling
-See GitHub milestone [v0.2](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/1) and issues [#1–#6](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
-
-### v0.3 — Cost & Reliability
-See GitHub milestone [v0.3](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/2) and issues [#7–#10](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
-
-### v0.4 — Observability & Multi-Region
-See GitHub milestone [v0.4](https://github.com/scttfrdmn/aws-elastic-gcs/milestone/3) and issues [#11–#14](https://github.com/scttfrdmn/aws-elastic-gcs/issues).
+Status lives on GitHub (issues, milestones, project board); see `CHANGELOG.md`
+for what each release contains. Stable facts worth knowing:
+- **Multiple deployments per region** (`regions.yaml` `deployment:`). The
+  November 2026 benchmarks ran two deployments, `src` and `dst`, in us-west-2.
+- **DTN slots** are claimed with SSM parameter locks (`slot-lock/<N>`). First
+  boots are serialized by `setup-lock`, and resume runs `node update
+  --ip-address`, because DTNs have no EIPs.
+- **DNS gates.** A DTN signals the launch hook only once its IP is in endpoint
+  DNS (or out of it, for warm-pool first boots). Shutdown waits for the IP to
+  leave DNS.
+- **The control node** enables itself on boot and disables itself on shutdown
+  (`elastic-gcs-control.service`). `scripts/control_node_power.sh` stops it
+  between sessions.
+- **Performance** (`docs/performance/`): a single c8in.2xlarge DTN sustains
+  ~9.2 Gbps, and the peer endpoint's `network_use` setting usually sets a task's
+  speed.
 
 ## Key Design Decisions
 
-### Why EIPs for DTNs
-EC2 instances get new public IPs after stop/start. GCS nodes are registered with specific IPs in DNS. Without EIPs, every resume requires `node update --ip-address` which adds latency and complexity. EIPs are free when attached to a running instance and $3.60/month when not. For 2-3 warm DTN slots, this is negligible.
+### Why no EIPs for DTNs (slot locks instead)
+DTNs get a new public IP on every start, and resume runs `node update
+--ip-address`. Slots are claimed through SSM parameter locks rather than EIP
+tags (#15). EIPs would avoid the IP update but cost $3.60/month per idle slot.
+Because of the IP update, every DTN holds the endpoint-admin client secret
+(#42). Stable per-slot addresses are part of the slot controller design (#65).
+The control node does have an EIP.
 
 ### Why Pre-Created Node Identities
 `node create --export-node` generates the node ID and encryption key without deploying services. This decouples identity provisioning from instance lifecycle. Benefits:
@@ -301,6 +267,8 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 ### SSM Parameters
 - `/elastic-gcs/<region>/<deployment>/endpoint-id` — Globus endpoint UUID
 - `/elastic-gcs/<region>/<deployment>/control-node-id` — Control node EC2 instance ID
+- `/elastic-gcs/<region>/<deployment>/slot-lock/<N>` — DTN slot claim (value = instance ID)
+- `/elastic-gcs/<region>/<deployment>/setup-lock` — Serializes DTN first-boot `node setup`
 - `/elastic-gcs/<region>/dtn-ami/gcs-<version>` — DTN AMI for a GCS version (region-wide, shared by deployments)
 
 ### CDK Context / Config
@@ -315,21 +283,15 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 
 ## Testing Strategy
 
-### Validated (v0.1)
+### Validated
 - Node lifecycle (disable → stop → resume → enable) via warm pool scale events
-- End-to-end transfer: 1000 Genomes → Globus Tutorial Collection 1 (15KB file, 3s, SUCCEEDED)
-- Scale-out latency: ~60s DTN InService, ~30s node enable → first transfer
+- End-to-end transfers, and the November 2026 two-deployment benchmark campaign
+  (#58): `docs/performance/`, `test/benchmark/results/2026-11-us-west-2/`
+- Scale-out to ~2 min, measured until the node is in endpoint DNS
 
-### Integration Tests (planned)
-- Programmatic node lifecycle via globus-go-sdk assertions
-- Transfer throughput at 1, 2, 3 concurrent DTNs
-- Scale-out latency cold vs warm vs hot path timing
-
-### Benchmarks (GlobusWorld 2026 presentation)
-- Instance resume timing per instance type
-- GCS service start + node enable + DNS propagation breakdown
-- Throughput comparison: elastic vs static for bursty academic workload
-- Cost model: elastic vs always-on for various utilization patterns
+### Integration and benchmark tests
+- `test/integration/`: node lifecycle, transfer, autoscale (live AWS + Globus)
+- `test/benchmark/`: scale-out timing; `harness/` drives the two-deployment campaign
 
 ## Important Notes
 
@@ -339,7 +301,7 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 
 3. **Globus subscription required:** Multi-node endpoints, guest collections, and the S3 connector all require a managed endpoint under a Globus subscription.
 
-4. **8GB RAM minimum:** Don't try to use t4g.small (2GB) or t4g.micro. GCS requires 8GB. t4g.medium (8GB) is the floor.
+4. **8GB RAM minimum, x86-64 only:** GCS requires 8GB and publishes no aarch64 EL9 packages, so no Graviton (t4g.medium also has only 4GB). t3a.large is the floor for the control node.
 
 5. **Data channel ports:** Security groups must allow TCP 50000-51000 inbound and outbound for GridFTP data channels, plus TCP 443 for the control channel.
 
