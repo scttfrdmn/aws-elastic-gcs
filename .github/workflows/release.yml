@@ -44,7 +44,9 @@ jobs:
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: release --clean --release-notes ${{ runner.temp }}/notes.md
+          # A re-publish overlays the default branch's .goreleaser.yaml on the tag,
+          # which leaves the tree dirty; skip goreleaser's git validation then.
+          args: release --clean --release-notes ${{ runner.temp }}/notes.md ${{ github.event_name == 'workflow_dispatch' && '--skip=validate' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
