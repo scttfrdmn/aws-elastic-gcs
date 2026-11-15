@@ -16,8 +16,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/idle"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
@@ -72,93 +74,61 @@ func handler(ctx context.Context) error {
 		return nil
 	}
 	inst := desc.Reservations[0].Instances[0]
-	if string(inst.State.Name) != "running" {
-		logger.Info("control node not running, nothing to do",
-			"instance", instanceID, "state", string(inst.State.Name))
-		return nil
-	}
 
-	// 3. Minimum uptime guard: prevents thrash if the waker and idle_shutdown
-	//    fire close together (e.g. control node started, idle check fires
-	//    before any transfer begins).
+	// Gather the facts, then decide with idle.ShouldStop (#52).
+	in := idle.Inputs{
+		Running:   inst.State != nil && string(inst.State.Name) == "running",
+		MinUptime: time.Duration(minUptimeMinutes) * time.Minute,
+	}
 	if inst.LaunchTime != nil {
-		uptime := time.Since(aws.ToTime(inst.LaunchTime))
-		if uptime < time.Duration(minUptimeMinutes)*time.Minute {
-			logger.Info("control node within minimum uptime window, skipping",
-				"uptime_minutes", int(uptime.Minutes()),
-				"min_uptime_minutes", minUptimeMinutes)
+		in.Uptime = time.Since(aws.ToTime(inst.LaunchTime))
+	}
+	if in.Running {
+		groups, err := asgClient.DescribeAutoScalingGroups(ctx,
+			&autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{asgNameStr}})
+		if err != nil || len(groups.AutoScalingGroups) == 0 {
+			return fmt.Errorf("DescribeAutoScalingGroups: %w", err)
+		}
+		asg := groups.AutoScalingGroups[0]
+		in.Desired = int(aws.ToInt32(asg.DesiredCapacity))
+		for _, i := range asg.Instances {
+			if string(i.LifecycleState) == "InService" {
+				in.InService++
+			}
+		}
+		wp, err := asgClient.DescribeWarmPool(ctx,
+			&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(asgNameStr)})
+		if err != nil {
+			logger.Warn("DescribeWarmPool failed, skipping", "error", err.Error())
 			return nil
 		}
-	}
-
-	// 4. ASG desired must be 0 and no instance InService.
-	groups, err := asgClient.DescribeAutoScalingGroups(ctx,
-		&autoscaling.DescribeAutoScalingGroupsInput{
-			AutoScalingGroupNames: []string{asgNameStr},
+		for _, wi := range wp.Instances {
+			in.WarmStates = append(in.WarmStates, string(wi.LifecycleState))
+		}
+		stats, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
+			Namespace:  aws.String(metricNamespace),
+			MetricName: aws.String("ActiveTransfers"),
+			StartTime:  aws.Time(time.Now().Add(-time.Duration(idleMinutes) * time.Minute)),
+			EndTime:    aws.Time(time.Now()),
+			Period:     aws.Int32(60),
+			Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
+			Dimensions: []cwtypes.Dimension{
+				{Name: aws.String("Region"), Value: aws.String(dep.Region)},
+				{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
+			},
 		})
-	if err != nil || len(groups.AutoScalingGroups) == 0 {
-		return fmt.Errorf("DescribeAutoScalingGroups: %w", err)
-	}
-	asg := groups.AutoScalingGroups[0]
-	if aws.ToInt32(asg.DesiredCapacity) != 0 {
-		logger.Info("ASG desired > 0, skipping", "desired", aws.ToInt32(asg.DesiredCapacity))
-		return nil
-	}
-	for _, i := range asg.Instances {
-		if string(i.LifecycleState) == "InService" {
-			logger.Info("DTN still InService, skipping", "instance", aws.ToString(i.InstanceId))
+		if err != nil {
+			logger.Warn("GetMetricStatistics failed, skipping", "error", err.Error())
 			return nil
 		}
+		in.ActiveTransfers = scaling.Maxima(stats.Datapoints)
 	}
-
-	// 5. Warm pool — all instances must be in a stable stopped state.
-	//    A Warmed:Pending or Warmed:Running instance means a scale-out is in
-	//    progress and we must not stop the control node.
-	wp, err := asgClient.DescribeWarmPool(ctx,
-		&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(asgNameStr)})
-	if err != nil {
-		logger.Warn("DescribeWarmPool failed, skipping", "error", err.Error())
-		return nil
-	}
-	for _, wi := range wp.Instances {
-		ls := string(wi.LifecycleState)
-		if ls != "Warmed:Stopped" && ls != "Warmed:Terminated" {
-			logger.Info("warm pool instance not stable, skipping",
-				"instance", aws.ToString(wi.InstanceId), "state", ls)
-			return nil
-		}
-	}
-
-	// 6. ActiveTransfers must have been 0 for the full idle window.
-	stats, err := cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-		Namespace:  aws.String(metricNamespace),
-		MetricName: aws.String("ActiveTransfers"),
-		StartTime:  aws.Time(time.Now().Add(-time.Duration(idleMinutes) * time.Minute)),
-		EndTime:    aws.Time(time.Now()),
-		Period:     aws.Int32(int32(idleMinutes * 60)),
-		Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
-		Dimensions: []cwtypes.Dimension{
-			{Name: aws.String("Region"), Value: aws.String(dep.Region)},
-			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
-		},
-	})
-	if err != nil {
-		logger.Warn("GetMetricStatistics failed, skipping", "error", err.Error())
-		return nil
-	}
-	// No datapoint means demand_monitor isn't reporting, not that the endpoint
-	// is idle (#30): don't stop on missing data.
-	if len(stats.Datapoints) == 0 {
-		logger.Warn("no ActiveTransfers data in idle window (demand monitor down?), skipping")
-		return nil
-	}
-	if aws.ToFloat64(stats.Datapoints[0].Maximum) > 0 {
-		logger.Info("active transfers in idle window, skipping",
-			"transfers", aws.ToFloat64(stats.Datapoints[0].Maximum))
+	stop, why := idle.ShouldStop(in)
+	if !stop {
+		logger.Info("not stopping control node", "instance", instanceID, "reason", why)
 		return nil
 	}
 
-	// All conditions met — stop the control node.
 	logger.Info("idle conditions met, disabling control node before stop",
 		"instance", instanceID, "idle_minutes", idleMinutes)
 

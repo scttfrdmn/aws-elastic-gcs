@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Scaling follows demand** (#26).
+  - Scale-in goes to 0 in one step once there have been no active transfers for
+    15 minutes. Stepping down by one per alarm left the pool stuck, because the
+    alarm fires only on entering ALARM.
+  - `demand_monitor` now also scales up every minute, to
+    `ceil(throughput / per-DTN threshold)` capped at `max_dtns`. It only ever
+    raises the pool. The throughput alarm used to add at most one DTN per
+    OK→ALARM transition.
+- **`demand_monitor` reads every task** (#28).
+  - It pages through `endpoint_manager/task_list` (`limit=1000` with `last_key`)
+    instead of counting only the first page.
+  - The HTTP client has a 20 s timeout.
+  - The endpoint ID, credentials and token are cached across warm invocations.
+- **No more wake-ups on suspended tasks** (#29). `INACTIVE` tasks are suspended
+  (for example by expired credentials), and one stuck task could cycle capacity
+  every 15–20 minutes. A task against an endpoint with no running node stays
+  `ACTIVE`, which already scales out DTNs; they serve without the control node.
+  `QueuedTransfers` now counts suspended tasks, for observability only.
+- **The orphan-node sweep could delete the control node's registration.** While
+  the control node is out of the data path, its node is inactive and has no DTN
+  instance behind it. The sweep now protects the control node's IP.
+- The sweep lists the ASG's instances by tag, with pagination. It used to make
+  an account-wide `DescribeAutoScalingInstances` call without pagination.
+- Scale-in, idle shutdown and the CLI read every CloudWatch datapoint, not just
+  `Datapoints[0]` (CloudWatch doesn't order them).
+
 ### Changed
+- **Pure decision logic with unit tests** (#52): `internal/scaling`
+  (`DesiredDTNs`, `ScaleUp`, `AnyPositive`), `internal/idle` (`ShouldStop`),
+  `internal/eviction` (`OrphanNodes`, `Stale`) and `internal/demand` (paginated
+  task listing, tested against an `httptest` server).
 - **One SSM command runner** (#51). `internal/ssmexec` replaces seven
   hand-rolled SendCommand/poll loops in the Lambdas, the CLI and the test
   helpers.

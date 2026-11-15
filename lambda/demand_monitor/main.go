@@ -2,247 +2,194 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
+	"strconv"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
-	awslambda "github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/demand"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
 )
 
-// wakeRequest matches the WakeRequest struct in the waker Lambda.
-type wakeRequest struct {
-	ScaleOut bool `json:"scale_out"`
-}
-
-// handler polls the Globus Transfer API for active and inactive (queued) tasks
-// on the configured endpoint, publishes CloudWatch metrics, and invokes the
-// waker Lambda when queued transfers are detected (meaning the endpoint is
-// offline and needs to be started).
+// handler polls the Globus Transfer endpoint_manager API for the endpoint's
+// tasks, publishes demand metrics, and scales the DTN pool up when the active
+// load needs more DTNs than are desired (#26).
 //
-// Triggered by: EventBridge schedule (every 1 minute)
+// Triggered by: EventBridge schedule (every minute)
 //
-// Metrics published:
-//   - ElasticGCS/ActiveTransfers{Region=<region>}   — count of ACTIVE tasks; drives scale-in alarm
-//   - ElasticGCS/QueuedTransfers{Region=<region>}   — count of INACTIVE tasks; drives waker
-//   - ElasticGCS/TransferThroughput{Region=<region>} — sum of effective_bytes_per_second across
-//     all ACTIVE tasks (bytes/sec); drives multi-DTN scale-out alarm
+// Metrics (dimensions Region, Deployment):
+//   - ActiveTransfers    — ACTIVE tasks; the scale-out (0→1) and idle scale-in alarms use it
+//   - TransferThroughput — sum of effective_bytes_per_second over ACTIVE tasks
+//   - QueuedTransfers    — INACTIVE (suspended) tasks; observability only
 //
-// Auto-wake logic:
+// INACTIVE tasks are suspended and won't progress without intervention (expired
+// credentials, admin pause), so they no longer wake the endpoint (#29): a task
+// against an endpoint with no running nodes stays ACTIVE, and ActiveTransfers
+// already scales out DTNs, which serve without the control node.
 //
-//	INACTIVE tasks exist → endpoint offline → invoke waker with scale_out=true
+// Scale-up: desired = DesiredDTNs(active, throughput, per-DTN threshold,
+// MAX_DTNS); the pool is only ever raised here. Scale-in stays with the idle
+// alarm, so a dip in throughput can't stop DTNs mid-transfer.
 func handler(ctx context.Context, _ interface{}) error {
-	secretsPrefix := os.Getenv("SECRETS_PREFIX")
-	endpointIDParam := os.Getenv("ENDPOINT_ID_PARAM")
-	metricNamespace := os.Getenv("METRIC_NAMESPACE")
-	wakerFunctionName := os.Getenv("WAKER_FUNCTION_NAME")
-	if metricNamespace == "" {
-		metricNamespace = names.MetricNamespace
-	}
-
+	metricNamespace := envOr("METRIC_NAMESPACE", names.MetricNamespace)
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	// Read the Globus endpoint ID from SSM Parameter Store
-	ssmClient := ssm.NewFromConfig(cfg)
-	paramOut, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-		Name: aws.String(endpointIDParam),
-	})
+	endpointID, token, err := credentials(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("GetParameter %s failed: %w", endpointIDParam, err)
+		return err
 	}
-	endpointID := aws.ToString(paramOut.Parameter.Value)
+	lister := demand.Lister{Token: token}
+	activeTasks, err := lister.List(ctx, endpointID, "ACTIVE")
+	if err != nil {
+		resetToken() // an expired or revoked token shows up here first
+		return fmt.Errorf("list ACTIVE tasks: %w", err)
+	}
+	active := demand.Aggregate(activeTasks)
+	suspended := demand.Stats{}
+	if t, err := lister.List(ctx, endpointID, "INACTIVE"); err != nil {
+		logger.Warn("list INACTIVE tasks failed", "error", err.Error())
+	} else {
+		suspended = demand.Aggregate(t)
+	}
+	logger.Info("transfer task stats", "endpoint", endpointID,
+		"active_transfers", active.Count, "throughput_bytes_per_sec", active.TotalBytesPerSec,
+		"suspended_transfers", suspended.Count)
 
-	// Read Globus client credentials from Secrets Manager
-	smClient := secretsmanager.NewFromConfig(cfg)
-	clientIDOut, err := smClient.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(fmt.Sprintf("%s/globus-client-id", secretsPrefix)),
-	})
-	if err != nil {
-		return fmt.Errorf("GetSecretValue globus-client-id failed: %w", err)
-	}
-	clientSecretOut, err := smClient.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(fmt.Sprintf("%s/globus-client-secret", secretsPrefix)),
-	})
-	if err != nil {
-		return fmt.Errorf("GetSecretValue globus-client-secret failed: %w", err)
-	}
-	clientID := aws.ToString(clientIDOut.SecretString)
-	clientSecret := aws.ToString(clientSecretOut.SecretString)
-
-	// Authenticate with Globus using client credentials flow
-	authClient, err := sdkauth.NewClient(
-		sdkauth.WithClientID(clientID),
-		sdkauth.WithClientSecret(clientSecret),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create Globus auth client: %w", err)
-	}
-	token, err := authClient.GetClientCredentialsToken(ctx,
-		"urn:globus:auth:scope:transfer.api.globus.org:all")
-	if err != nil {
-		return fmt.Errorf("GetClientCredentialsToken failed: %w", err)
-	}
-
-	// Fetch ACTIVE task stats: count + sum of effective_bytes_per_second.
-	// The endpoint manager API (GET /endpoint_manager/task_list) returns tasks
-	// submitted by ALL users, not just the caller. This requires Activity Monitor
-	// or higher role on the endpoint (the automation client has Admin).
-	// The regular ListTasks API only returns the caller's own tasks and would
-	// always return 0 for tasks submitted by researchers via the globus CLI.
-	activeStats, err := fetchEndpointManagerStats(ctx, token.AccessToken, endpointID, "ACTIVE")
-	if err != nil {
-		return fmt.Errorf("endpoint_manager/task_list ACTIVE failed: %w", err)
-	}
-
-	// Count INACTIVE tasks for our endpoint.
-	// Globus marks tasks INACTIVE when the endpoint is offline or unreachable.
-	// A non-zero count means transfers are queued and the system needs to wake up.
-	queuedStats, err := fetchEndpointManagerStats(ctx, token.AccessToken, endpointID, "INACTIVE")
-	if err != nil {
-		// Non-fatal: log and continue so we still publish the active metrics.
-		logger.Warn("endpoint_manager/task_list INACTIVE failed", "error", err.Error())
-		queuedStats = taskStats{}
-	}
-
-	logger.Info("transfer task stats",
-		"endpoint", endpointID,
-		"active_transfers", activeStats.Count,
-		"throughput_bytes_per_sec", activeStats.TotalBytesPerSec,
-		"queued_transfers", queuedStats.Count,
-	)
-
-	// Publish all three metrics in a single PutMetricData call.
-	cwClient := cloudwatch.NewFromConfig(cfg)
 	dim := []cwtypes.Dimension{
 		{Name: aws.String("Region"), Value: aws.String(dep.Region)},
 		{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 	}
-	_, err = cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
+	if _, err := cloudwatch.NewFromConfig(cfg).PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
 		Namespace: aws.String(metricNamespace),
 		MetricData: []cwtypes.MetricDatum{
-			{
-				MetricName: aws.String("ActiveTransfers"),
-				Value:      aws.Float64(float64(activeStats.Count)),
-				Unit:       cwtypes.StandardUnitCount,
-				Dimensions: dim,
-			},
-			{
-				MetricName: aws.String("QueuedTransfers"),
-				Value:      aws.Float64(float64(queuedStats.Count)),
-				Unit:       cwtypes.StandardUnitCount,
-				Dimensions: dim,
-			},
-			{
-				MetricName: aws.String("TransferThroughput"),
-				Value:      aws.Float64(float64(activeStats.TotalBytesPerSec)),
-				Unit:       cwtypes.StandardUnitBytesSecond,
-				Dimensions: dim,
-			},
+			{MetricName: aws.String("ActiveTransfers"), Value: aws.Float64(float64(active.Count)), Unit: cwtypes.StandardUnitCount, Dimensions: dim},
+			{MetricName: aws.String("QueuedTransfers"), Value: aws.Float64(float64(suspended.Count)), Unit: cwtypes.StandardUnitCount, Dimensions: dim},
+			{MetricName: aws.String("TransferThroughput"), Value: aws.Float64(float64(active.TotalBytesPerSec)), Unit: cwtypes.StandardUnitBytesSecond, Dimensions: dim},
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("PutMetricData failed: %w", err)
 	}
 
-	// If queued transfers are detected and we have a waker configured, invoke it
-	// to start the control node and scale out DTNs. This is fire-and-forget:
-	// the waker runs asynchronously and handles idempotency (won't double-start
-	// an already-running node). We log but don't fail on invoke errors.
-	if queuedStats.Count > 0 && wakerFunctionName != "" {
-		logger.Info("queued transfers detected, invoking waker", "queued", queuedStats.Count, "waker", wakerFunctionName)
-		payload, _ := json.Marshal(wakeRequest{ScaleOut: true})
-		lambdaClient := awslambda.NewFromConfig(cfg)
-		_, invokeErr := lambdaClient.Invoke(ctx, &awslambda.InvokeInput{
-			FunctionName:   aws.String(wakerFunctionName),
-			InvocationType: "Event", // async — don't wait for response
-			Payload:        payload,
-		})
-		if invokeErr != nil {
-			logger.Warn("waker invocation failed", "error", invokeErr.Error())
-		} else {
-			logger.Info("waker invoked successfully")
-		}
-	}
+	return scaleUp(ctx, cfg, active)
+}
 
+// scaleUp raises the ASG's desired capacity to what the active load needs.
+func scaleUp(ctx context.Context, cfg aws.Config, active demand.Stats) error {
+	asgName := os.Getenv("ASG_NAME")
+	maxDTNs, _ := strconv.Atoi(os.Getenv("MAX_DTNS"))
+	perDTN, _ := strconv.ParseInt(os.Getenv("THROUGHPUT_THRESHOLD_BPS"), 10, 64)
+	if asgName == "" || maxDTNs <= 0 || active.Count == 0 {
+		return nil
+	}
+	target := scaling.DesiredDTNs(active.Count, active.TotalBytesPerSec, perDTN, maxDTNs)
+
+	asgClient := autoscaling.NewFromConfig(cfg)
+	out, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
+		AutoScalingGroupNames: []string{asgName},
+	})
+	if err != nil || len(out.AutoScalingGroups) == 0 {
+		return fmt.Errorf("describe ASG %s: %v", asgName, err)
+	}
+	current := int(aws.ToInt32(out.AutoScalingGroups[0].DesiredCapacity))
+	next, change := scaling.ScaleUp(current, target)
+	if !change {
+		return nil
+	}
+	logger.Info("scaling up for demand", "from", current, "to", next,
+		"active", active.Count, "throughput_bytes_per_sec", active.TotalBytesPerSec, "per_dtn_threshold", perDTN)
+	if _, err := asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
+		AutoScalingGroupName: aws.String(asgName),
+		DesiredCapacity:      aws.Int32(int32(next)),
+		HonorCooldown:        aws.Bool(false),
+	}); err != nil {
+		// ScalingActivityInProgress is common mid-scale-out; the next minute retries.
+		logger.Warn("SetDesiredCapacity failed; will retry next run", "error", err.Error())
+	}
 	return nil
 }
 
-// taskStats holds aggregate statistics for tasks in a given status.
-type taskStats struct {
-	Count            int
-	TotalBytesPerSec int64 // sum of effective_bytes_per_second across all tasks
+// Warm-invocation cache (#28): the endpoint ID, client credentials and access
+// token are fetched once per container, and the token is renewed before expiry.
+var (
+	credMu      sync.Mutex
+	cachedEP    string
+	cachedID    string
+	cachedSec   string
+	cachedTok   string
+	tokenExpiry time.Time
+)
+
+func resetToken() {
+	credMu.Lock()
+	cachedTok = ""
+	credMu.Unlock()
 }
 
-// endpointManagerTaskList is the response shape for
-// GET /v0.10/endpoint_manager/task_list
-type endpointManagerTaskList struct {
-	DATA []struct {
-		TaskID             string `json:"task_id"`
-		EffectiveBytesPerS int64  `json:"effective_bytes_per_second"`
-	} `json:"DATA"`
+func credentials(ctx context.Context, cfg aws.Config) (endpointID, token string, err error) {
+	credMu.Lock()
+	defer credMu.Unlock()
+	if cachedEP == "" {
+		p, err := ssm.NewFromConfig(cfg).GetParameter(ctx, &ssm.GetParameterInput{Name: aws.String(os.Getenv("ENDPOINT_ID_PARAM"))})
+		if err != nil {
+			return "", "", fmt.Errorf("get endpoint ID: %w", err)
+		}
+		cachedEP = aws.ToString(p.Parameter.Value)
+	}
+	if cachedID == "" || cachedSec == "" {
+		sm := secretsmanager.NewFromConfig(cfg)
+		prefix := os.Getenv("SECRETS_PREFIX")
+		for _, s := range []struct {
+			name string
+			dst  *string
+		}{{"globus-client-id", &cachedID}, {"globus-client-secret", &cachedSec}} {
+			out, err := sm.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(prefix + "/" + s.name)})
+			if err != nil {
+				return "", "", fmt.Errorf("get %s: %w", s.name, err)
+			}
+			*s.dst = aws.ToString(out.SecretString)
+		}
+	}
+	if cachedTok == "" || time.Now().After(tokenExpiry) {
+		auth, err := sdkauth.NewClient(sdkauth.WithClientID(cachedID), sdkauth.WithClientSecret(cachedSec))
+		if err != nil {
+			return "", "", fmt.Errorf("globus auth client: %w", err)
+		}
+		tok, err := auth.GetClientCredentialsToken(ctx, "urn:globus:auth:scope:transfer.api.globus.org:all")
+		if err != nil {
+			return "", "", fmt.Errorf("client credentials token: %w", err)
+		}
+		cachedTok = tok.AccessToken
+		life := time.Duration(tok.ExpiresIn) * time.Second
+		if life <= 0 {
+			life = time.Hour
+		}
+		tokenExpiry = time.Now().Add(life - 5*time.Minute)
+	}
+	return cachedEP, cachedTok, nil
 }
 
-// fetchEndpointManagerStats queries the Globus Transfer endpoint manager task
-// list API for tasks in the given status on the given endpoint. Returns the
-// task count and the sum of effective_bytes_per_second across all tasks.
-//
-// Unlike the regular /task_list endpoint, this returns tasks submitted by ALL
-// users on the endpoint, which is required for monitoring researcher transfers.
-// Requires Activity Monitor (or higher) role on the endpoint.
-func fetchEndpointManagerStats(ctx context.Context, bearerToken, endpointID, status string) (taskStats, error) {
-	q := url.Values{}
-	q.Set("filter_status", status)
-	q.Set("filter_endpoint", endpointID)
-	reqURL := "https://transfer.api.globus.org/v0.10/endpoint_manager/task_list?" + q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return taskStats{}, fmt.Errorf("build request: %w", err)
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
 	}
-	req.Header.Set("Authorization", "Bearer "+bearerToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return taskStats{}, fmt.Errorf("HTTP GET endpoint_manager/task_list: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return taskStats{}, fmt.Errorf("read response body: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return taskStats{}, fmt.Errorf("endpoint_manager/task_list returned HTTP %d: %s", resp.StatusCode, body)
-	}
-
-	var result endpointManagerTaskList
-	if err := json.Unmarshal(body, &result); err != nil {
-		return taskStats{}, fmt.Errorf("parse endpoint_manager/task_list response: %w", err)
-	}
-
-	var stats taskStats
-	stats.Count = len(result.DATA)
-	for _, task := range result.DATA {
-		stats.TotalBytesPerSec += task.EffectiveBytesPerS
-	}
-	return stats, nil
+	return def
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.
