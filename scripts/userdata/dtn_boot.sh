@@ -7,12 +7,18 @@ set -euo pipefail
 # This script runs on every boot of a DTN instance via a systemd unit.
 # It detects whether this is a first boot or a resume and acts accordingly.
 #
-# First boot: full node setup with --import-node (cold path, 2-3 min)
-# Resume:     just node enable               (warm path, 30-60s)
+# First boot: claim a slot (SSM lock), node setup --import-node, serialized
+#             across the deployment by an SSM setup lock.
+# Resume:     local node enable + node update --ip-address (the public IP
+#             changes on every start).
 #
-# EIP assignment uses tag-based discovery — the script finds an unassociated
-# EIP tagged for this deployment and claims it atomically. This allows a single
-# ASG launch template to work for all DTN slots without per-instance config.
+# Before signalling the ASG launch hook:
+#   - going InService: wait until the node's IP is in endpoint DNS;
+#   - going into the warm pool (first boot only): disable the node and wait
+#     until its IP is out of DNS, so a node about to be stopped never serves
+#     transfers (#69).
+# Any failure signals ABANDON at once, so the ASG replaces the instance in
+# seconds instead of waiting out the 15-minute hook timeout (#34).
 #
 # Required environment variables (injected by systemd unit):
 #   AWS_REGION      — AWS region (e.g. us-west-2)
@@ -109,6 +115,42 @@ release_setup_lock() {
 INSTANCE_ID=$(get_metadata "instance-id")
 echo "Instance ID: $INSTANCE_ID"
 
+# --- ASG launch hook ---
+# "Pending:Wait" = launching or resuming into service; "Warmed:Pending:Wait" =
+# first boot of an instance headed for the warm pool. Anything else (e.g. a
+# service restart on a running DTN) means there is no hook to signal.
+ASG_NAME="elastic-gcs-dtn-${AWS_REGION}-${DEPLOYMENT}"
+LIFECYCLE_STATE=$(aws autoscaling describe-auto-scaling-instances \
+    --instance-ids "$INSTANCE_ID" --region "$AWS_REGION" \
+    --query 'AutoScalingInstances[0].LifecycleState' --output text 2>/dev/null || echo unknown)
+echo "Lifecycle state: $LIFECYCLE_STATE"
+HOOK_DONE=false
+complete_hook() {  # CONTINUE|ABANDON
+    case "$LIFECYCLE_STATE" in *Pending:Wait) ;; *) return 0;; esac
+    [ "$HOOK_DONE" = true ] && return 0
+    echo ">>> Completing lifecycle action $1"
+    aws autoscaling complete-lifecycle-action \
+        --lifecycle-hook-name dtn-ready-hook \
+        --auto-scaling-group-name "$ASG_NAME" \
+        --instance-id "$INSTANCE_ID" \
+        --lifecycle-action-result "$1" \
+        --region "$AWS_REGION" \
+        && HOOK_DONE=true \
+        || echo "WARNING: failed to complete lifecycle action $1"
+}
+
+SECRETS_DIR=""
+on_exit() {
+    local rc=$?
+    [ -n "$SECRETS_DIR" ] && rm -rf "$SECRETS_DIR"
+    release_setup_lock
+    if [ "$rc" -ne 0 ]; then
+        echo "ERROR: boot failed (exit $rc); abandoning so the ASG replaces this instance"
+        complete_hook ABANDON
+    fi
+}
+trap on_exit EXIT
+
 # --- SSM-based slot claim ---
 # Claim a DTN slot by atomically writing an SSM parameter. PutParameter without
 # --overwrite fails with ParameterAlreadyExists if the slot is taken, making it
@@ -167,10 +209,15 @@ aws ec2 create-tags \
     --tags "Key=elastic-gcs:slot,Value=${DTN_SLOT_NUMBER}" \
     --region "$AWS_REGION" 2>/dev/null || true
 
-# Get public IP from IMDS. The ephemeral public IP is assigned at instance start
-# and is stable within a second or two. A brief sleep ensures it is populated.
-sleep 2
-PUBLIC_IP=$(get_metadata "public-ipv4")
+# Public IP from IMDS; it can take a moment to appear after start.
+PUBLIC_IP=""
+for _ in $(seq 1 30); do
+    PUBLIC_IP=$(get_metadata "public-ipv4" || true)
+    [[ "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && break
+    PUBLIC_IP=""
+    sleep 1
+done
+[ -n "$PUBLIC_IP" ] || { echo "ERROR: no public IPv4 from IMDS"; exit 1; }
 echo ">>> Public IP: $PUBLIC_IP (slot $DTN_SLOT_NUMBER)"
 
 # --- Detect: first boot vs resume ---
@@ -187,13 +234,14 @@ if [ -d "$GCS_STATE_DIR" ] && [ -s "$GCS_STATE_DIR/info.json" ]; then
     RESUME_START=$(date +%s%N)
 
     systemctl start globus-connect-server 2>/dev/null || true
-    sleep 3
 
     # node update requires GCS CLI auth (client credentials).
     # The endpoint ID comes from the local info.json (always accurate).
     ENDPOINT_ID=$(jq -r '.endpoint_id' "$GCS_STATE_DIR/info.json")
-    export GCS_CLI_CLIENT_ID=$(get_secret "${SECRETS_PREFIX}/globus-client-id")
-    export GCS_CLI_CLIENT_SECRET=$(get_secret "${SECRETS_PREFIX}/globus-client-secret")
+    # Assigned separately from export so a failed fetch stops the script (set -e).
+    GCS_CLI_CLIENT_ID=$(get_secret "${SECRETS_PREFIX}/globus-client-id")
+    GCS_CLI_CLIENT_SECRET=$(get_secret "${SECRETS_PREFIX}/globus-client-secret")
+    export GCS_CLI_CLIENT_ID GCS_CLI_CLIENT_SECRET
     export GCS_CLI_ENDPOINT_ID="$ENDPOINT_ID"
 
     # Use node update --ip-address to both correct the IP (changes every
@@ -241,8 +289,8 @@ else
 
     # Secrets go in a private temp dir that is removed on any exit, so a
     # failed setup can't leave the deployment key on disk.
+    # (removed by on_exit).
     SECRETS_DIR=$(umask 077 && mktemp -d /tmp/elastic-gcs.XXXXXX)
-    trap 'rm -rf "$SECRETS_DIR"; release_setup_lock' EXIT
     DEPLOY_KEY_FILE="$SECRETS_DIR/deployment-key.json"
     NODE_IDENTITY_FILE="$SECRETS_DIR/node-slot-${DTN_SLOT_NUMBER}.json"
 
@@ -305,19 +353,27 @@ aws ec2 create-tags \
     --tags "Key=elastic-gcs:gcs-node-id,Value=${NODE_ID}" \
     --region "$AWS_REGION" 2>/dev/null || true
 
-# --- Wait for DNS before declaring the node ready (#34, #69) ---
-# Globus adds the node to the endpoint's DNS asynchronously; until it does,
-# transfers can't reach this node.
-wait_endpoint_dns present "$PUBLIC_IP" 180 || true
+# --- Ready gate, then signal the launch hook (#34, #69) ---
+if [ "$LIFECYCLE_STATE" = "Warmed:Pending:Wait" ]; then
+    # Headed for the warm pool: node setup left the node active and in DNS.
+    # Take it out before the ASG stops the instance, so it never receives
+    # transfer processes it can't finish. The resume path re-enables it.
+    echo ">>> Warm-pool first boot: disabling node before it is stopped"
+    globus-connect-server node disable
+    chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
+    wait_endpoint_dns absent "$PUBLIC_IP" 180 || true
+else
+    # Going InService: transfers can't reach this node until Globus adds it to
+    # the endpoint's DNS, which happens asynchronously.
+    wait_endpoint_dns present "$PUBLIC_IP" 180 || true
+fi
+complete_hook CONTINUE
 
-# --- Verify node is healthy ---
-echo ">>> Verifying node health..."
-sleep 5
-globus-connect-server self-diagnostic 2>&1 | head -20 || true
+# --- After signalling: diagnostics and metrics (off the scale-out path) ---
 NODE_STATUS=$(globus-connect-server node show -F json 2>/dev/null | jq -r '.status' || echo "unknown")
 echo ">>> Node status: $NODE_STATUS"
+globus-connect-server self-diagnostic 2>&1 | head -20 || true
 
-# --- Publish timing metrics to CloudWatch ---
 if [ "$BOOT_TYPE" = "resume" ]; then
     METRIC_VALUE="$RESUME_MS"
     METRIC_NAME="DTNResumeLatencyMs"
@@ -325,7 +381,6 @@ else
     METRIC_VALUE="$SETUP_MS"
     METRIC_NAME="DTNFirstBootLatencyMs"
 fi
-
 aws cloudwatch put-metric-data \
     --namespace "ElasticGCS" \
     --metric-name "$METRIC_NAME" \
@@ -335,36 +390,10 @@ aws cloudwatch put-metric-data \
     --region "$AWS_REGION" 2>/dev/null \
     || echo "WARNING: Failed to publish CloudWatch metric"
 
-# --- Signal ASG lifecycle hook completion ---
-# The boot script signals directly rather than relying on the lifecycle Lambda,
-# giving the tightest possible scale-out latency. The Lambda is a fallback.
-echo ">>> Checking for ASG lifecycle hook..."
-LIFECYCLE_STATE=$(aws autoscaling describe-auto-scaling-instances \
-    --instance-ids "$INSTANCE_ID" \
-    --region "$AWS_REGION" \
-    --query 'AutoScalingInstances[0].LifecycleState' \
-    --output text 2>/dev/null || echo "unknown")
-
-if [[ "$LIFECYCLE_STATE" == *"Pending:Wait"* ]] || [[ "$LIFECYCLE_STATE" == *"Warmed:Pending:Wait"* ]]; then
-    ASG_NAME=$(aws autoscaling describe-auto-scaling-instances \
-        --instance-ids "$INSTANCE_ID" \
-        --region "$AWS_REGION" \
-        --query 'AutoScalingInstances[0].AutoScalingGroupName' \
-        --output text)
-
-    echo ">>> Completing lifecycle action CONTINUE for ASG: $ASG_NAME"
-    aws autoscaling complete-lifecycle-action \
-        --lifecycle-hook-name "dtn-ready-hook" \
-        --auto-scaling-group-name "$ASG_NAME" \
-        --instance-id "$INSTANCE_ID" \
-        --lifecycle-action-result CONTINUE \
-        --region "$AWS_REGION" 2>/dev/null \
-        || echo "WARNING: Failed to complete lifecycle action"
-fi
-
 echo ""
 echo "=== DTN Boot Complete ==="
 echo "Boot type:   $BOOT_TYPE"
+echo "Lifecycle:   $LIFECYCLE_STATE"
 echo "Node status: $NODE_STATUS"
 echo "Public IP:   $PUBLIC_IP"
 echo "DTN Slot:    $DTN_SLOT_NUMBER"
