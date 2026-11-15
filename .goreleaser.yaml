@@ -52,6 +52,8 @@ release:
     name: aws-elastic-gcs
   prerelease: auto
   mode: keep-existing
+  # Re-publishing a tag (workflow_dispatch) overwrites same-named assets.
+  replace_existing_artifacts: true
   footer: |
     ### Install the operator CLI
     ```bash
