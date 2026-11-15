@@ -25,7 +25,7 @@ type Outcome string
 
 const (
 	Released Outcome = "released"
-	NotHeld  Outcome = "not-held"   // no lock for this slot
+	NotHeld  Outcome = "not-held"    // no lock for this slot
 	OtherOwn Outcome = "other-owner" // the lock belongs to a different instance
 )
 
