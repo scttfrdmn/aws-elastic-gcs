@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-15
+
+Validated live on the us-west-2 `src` and `dst` deployments.
+
 ### Fixed
 - `config/open_data_buckets.example.yaml`: `sentinel-cogs` is public, not
   requester-pays. The retired `landsat-pds` is replaced by the requester-pays
@@ -27,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     replaced by polling, and the lifecycle state is read once.
   - A failed Globus credential fetch on resume now stops the boot instead of being
     masked.
+  - Warm-pool first boots publish their boot-time metric before signalling,
+    because the ASG stops the instance right after the signal (#84).
 - **Control node lifecycle** (#30, #31).
   - The resume block in `control_node_init.sh` never ran, because cloud-init runs
     UserData once per instance. It is replaced by `elastic-gcs-control.service`,
@@ -55,6 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   topic (`elastic-gcs:operatorEmail` subscribes an address). The scale-out Lambda
   also ignores every alarm except the deployment's two scale-out alarms, and any
   non-`ALARM` state.
+
+### Changed
+- `CLAUDE.md` matches the code (#36): t3a.large control node, slot locks instead
+  of DTN EIPs, the real project layout, current milestones and the site.
+- Upgrade note: install the new control-node unit on existing control nodes with
+  `scripts/control_node_power.sh <region> <deployment> install`. Deploying the
+  control stack updates its UserData in place, which stops and starts the node.
 
 ### Security
 - **No SSH ingress by default** (#35). An empty `adminCIDR` used to open port 22 to
@@ -588,7 +601,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SUCCEEDED (15,977 bytes, 3 seconds, task `867b66d1-0e99-11f1-a9bc-0affe9df1385`)
 - Scale-out latency (warm): ~60 s DTN InService; scale-in: ~30 s (SSM path)
 
-[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scttfrdmn/aws-elastic-gcs/compare/v0.8.0...v0.9.0
