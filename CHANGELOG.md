@@ -111,7 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **No instance can read every SSM parameter** (#45).
   `AmazonSSMManagedInstanceCore` is replaced by the same permissions minus
   `ssm:GetParameter(s)` on `*`. The control node, DTNs and AMI builder read only
-  their deployment's parameters.
+  their deployment's parameters. So do the Lambdas: their `ssm:GetParameter` is
+  scoped to the deployment's parameter prefix too.
 - **The AMI builder has its own role and security group** (#45). `build_ami.sh`
   launches the builder with `elastic-gcs-ami-builder-<region>-<deployment>`: an
   SSM-agent-only role with no secret or parameter access, and an egress-only

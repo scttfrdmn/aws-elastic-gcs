@@ -557,13 +557,13 @@ WantedBy=elastic-gcs-dtn.service
 	})
 	// Lifecycle Lambda needs SSM (node disable + slot lock release), ASG (complete hook), EC2 (describe + CreateTags)
 	lc := scoped("Lifecycle")
+	grant(lifecycleFn, lc.readParams(dep.ParamPrefix()))
 	grant(lifecycleFn, lc.runShellOnRole(names.RoleDTN)...)
 	grant(lifecycleFn,
 		lc.onASG("autoscaling:CompleteLifecycleAction"),
 		lc.onRoleInstances("TagInstances", names.RoleDTN, "ec2:CreateTags"),
 		lc.unscoped(
 			"autoscaling:DescribeAutoScalingInstances",
-			"ssm:GetParameter",
 			"ec2:DescribeInstances",
 		),
 		// Slot-lock release: this deployment's parameters only.
@@ -614,11 +614,11 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	si := scoped("ScaleIn")
+	grant(scaleInFn, si.readParams(dep.ParamPrefix()))
 	grant(scaleInFn, si.runShellOnRole(names.RoleControl)...) // re-enable the control node before the last DTN goes (#71)
 	grant(scaleInFn,
 		si.onASG("autoscaling:SetDesiredCapacity"),
-		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData",
-			"ssm:GetParameter", "ec2:DescribeInstances"),
+		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData", "ec2:DescribeInstances"),
 	)
 
 	cacheEvictionFn := awslambda.NewFunction(stack, jsii.String("CacheEvictionFn"), &awslambda.FunctionProps{
@@ -638,6 +638,7 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	ce := scoped("CacheEviction")
+	grant(cacheEvictionFn, ce.readParams(dep.ParamPrefix()))
 	grant(cacheEvictionFn, ce.runShellOnRole(names.RoleControl)...)
 	grant(cacheEvictionFn,
 		ce.onRoleInstances("TerminateInstances", names.RoleDTN, "ec2:TerminateInstances"),
@@ -645,7 +646,6 @@ WantedBy=elastic-gcs-dtn.service
 			"autoscaling:DescribeWarmPool",
 			"autoscaling:DescribeAutoScalingInstances",
 			"ec2:DescribeInstances",
-			"ssm:GetParameter",
 			"cloudwatch:PutMetricData",
 		),
 	)
@@ -684,13 +684,13 @@ WantedBy=elastic-gcs-dtn.service
 		Sid:    jsii.String("DemandMonitorLambdaPerms"),
 		Effect: awsiam.Effect_ALLOW,
 		Actions: jsii.Strings(
-			"ssm:GetParameter",
 			"cloudwatch:PutMetricData",
 			"autoscaling:DescribeAutoScalingGroups",
 		),
 		Resources: jsii.Strings("*"),
 	}))
 	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").onASG("autoscaling:SetDesiredCapacity"))
+	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").readParams(dep.ParamPrefix()))
 	// Globus client credentials: this deployment's secrets only, not every
 	// secret in the account (part of #44).
 	demandMonitorFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
@@ -723,9 +723,9 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	vc := scoped("VersionCheck")
+	grant(versionCheckFn, vc.readParams(dep.ParamPrefix()))
 	grant(versionCheckFn, vc.runShell()...)
 	grant(versionCheckFn, vc.unscoped(
-		"ssm:GetParameter",
 		"autoscaling:DescribeAutoScalingGroups",
 		"ec2:DescribeInstances",
 		"cloudwatch:PutMetricData",
@@ -1154,13 +1154,13 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	wk := scoped("Waker")
+	grant(wakerFn, wk.readParams(dep.ParamPrefix()))
 	grant(wakerFn, wk.runShellOnRole(names.RoleControl)...)
 	grant(wakerFn,
 		wk.onRoleInstances("StartInstances", names.RoleControl, "ec2:StartInstances"),
 		wk.onASG("autoscaling:SetDesiredCapacity"),
 		wk.unscoped(
 			"ec2:DescribeInstances",
-			"ssm:GetParameter",
 			"ssm:DescribeInstanceInformation",
 			"autoscaling:DescribeAutoScalingGroups",
 			"autoscaling:DescribeWarmPool",
@@ -1213,12 +1213,12 @@ WantedBy=elastic-gcs-dtn.service
 		})
 		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
 		is := scoped("IdleShutdown")
+		grant(idleShutdownFn, is.readParams(dep.ParamPrefix()))
 		grant(idleShutdownFn, is.runShellOnRole(names.RoleControl)...) // node disable before stop (#30)
 		grant(idleShutdownFn,
 			is.onRoleInstances("StopInstances", names.RoleControl, "ec2:StopInstances"),
 			is.unscoped(
 				"ec2:DescribeInstances",
-				"ssm:GetParameter",
 				"autoscaling:DescribeAutoScalingGroups",
 				"autoscaling:DescribeWarmPool",
 				"cloudwatch:GetMetricStatistics",
