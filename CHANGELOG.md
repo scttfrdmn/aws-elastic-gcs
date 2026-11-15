@@ -132,7 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DTNs can no longer tamper with scaling or other DTNs** (#43).
   - DTNs publish metrics only to a namespace of their own, `ElasticGCS/DTN`
     (boot latency), so they can't forge the demand metrics that drive scaling.
-  - `ec2:CreateTags` applies to the requesting instance only.
+  - `ec2:CreateTags` stays limited to this ASG's instances and the slot and
+    node-ID tag keys. IAM rejects `${ec2:SourceInstanceARN}` as a resource, so a
+    DTN can't be limited to tagging only itself.
   - Slot and setup locks can be created but not overwritten. DTNs can delete the
     setup lock only; slot locks are released by the Lambdas, which check the
     owner.
