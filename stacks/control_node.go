@@ -30,7 +30,8 @@ type ControlNodeStackProps struct {
 	EndpointDisplayName  string // Human-readable endpoint name
 	OrganizationName     string // Organization shown in Globus endpoint listing
 
-	// SSH access restriction. Empty string allows 0.0.0.0/0 (not recommended for prod).
+	// AdminCIDR opens SSH (22) to this CIDR. Empty (the default) means no SSH
+	// ingress at all; use SSM Session Manager.
 	AdminCIDR string
 
 	// MaxDTNs is the maximum number of simultaneously active DTN nodes.
@@ -153,16 +154,16 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.Bool(false),
 	)
 
-	adminCIDR := props.AdminCIDR
-	if adminCIDR == "" {
-		adminCIDR = "0.0.0.0/0"
+	// SSH only when an admin CIDR is configured (#35). Access is normally via
+	// SSM Session Manager; there is no SSH ingress by default.
+	if props.AdminCIDR != "" {
+		sg.AddIngressRule(
+			awsec2.Peer_Ipv4(jsii.String(props.AdminCIDR)),
+			awsec2.Port_Tcp(jsii.Number(22)),
+			jsii.String("SSH admin access"),
+			jsii.Bool(false),
+		)
 	}
-	sg.AddIngressRule(
-		awsec2.Peer_Ipv4(jsii.String(adminCIDR)),
-		awsec2.Port_Tcp(jsii.Number(22)),
-		jsii.String("SSH admin access"),
-		jsii.Bool(false),
-	)
 
 	s.SecurityGroup = sg
 

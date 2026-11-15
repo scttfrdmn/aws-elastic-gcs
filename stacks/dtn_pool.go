@@ -53,6 +53,9 @@ type DTNPoolStackProps struct {
 	// "5.4.101"). Selects the matching DTN AMI and pins the UserData fallback
 	// install so DTNs always match the control node.
 	GCSVersion string
+
+	// OperatorEmail, if set, is subscribed to the operator alert topic.
+	OperatorEmail string
 }
 
 // NewDTNPoolStack creates the Phase 3 DTN pool infrastructure:
@@ -132,6 +135,10 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
 	// without relying on CDK tokens.
 	asgName := dep.Resource("dtn")
+	// scoped builds IAM statements confined to this deployment's instances and ASG (#35).
+	scoped := func(sid string) iamScope {
+		return iamScope{sid: sid, region: region, account: *stack.Account(), asgName: asgName, depID: dep.ID()}
+	}
 
 	// -------------------------------------------------------------------------
 	// DTN IAM Role
@@ -222,16 +229,10 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		),
 	}))
 
-	// AutoScaling: signal lifecycle hook completion from boot script
-	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("LifecycleHookComplete"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"autoscaling:CompleteLifecycleAction",
-			"autoscaling:DescribeAutoScalingInstances",
-		),
-		Resources: jsii.Strings("*"),
-	}))
+	// AutoScaling: signal lifecycle hook completion from boot script, on this
+	// deployment's ASG only.
+	dtnRole.AddToPolicy(scoped("LifecycleHook").onASG("autoscaling:CompleteLifecycleAction"))
+	dtnRole.AddToPolicy(scoped("LifecycleHook").unscoped("autoscaling:DescribeAutoScalingInstances"))
 
 	// CloudWatch: publish timing and health metrics
 	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
@@ -411,9 +412,11 @@ WantedBy=elastic-gcs-dtn.service
 		VpcSubnets: &awsec2.SubnetSelection{
 			SubnetType: awsec2.SubnetType_PUBLIC,
 		},
-		MinCapacity:           jsii.Number(0),
-		MaxCapacity:           jsii.Number(float64(maxDTNs)),
-		DesiredCapacity:       jsii.Number(0),
+		MinCapacity: jsii.Number(0),
+		MaxCapacity: jsii.Number(float64(maxDTNs)),
+		// No DesiredCapacity (#71): CloudFormation would reset the live group to it
+		// on every deploy, stopping DTNs mid-transfer. Omitted, a new group starts
+		// at MinCapacity and later deploys leave the scaling Lambdas' value alone.
 		DefaultInstanceWarmup: awscdk.Duration_Seconds(jsii.Number(0)),
 	}
 	if props.RegionConfig.UseSpot {
@@ -590,21 +593,24 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	// Lifecycle Lambda needs SSM (node disable + slot lock release), ASG (complete hook), EC2 (describe + CreateTags)
-	lifecycleFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("LifecycleLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"autoscaling:CompleteLifecycleAction",
+	lc := scoped("Lifecycle")
+	grant(lifecycleFn, lc.runShell()...)
+	grant(lifecycleFn,
+		lc.onASG("autoscaling:CompleteLifecycleAction"),
+		lc.onInstances("TagInstances", "ec2:CreateTags"),
+		lc.unscoped(
 			"autoscaling:DescribeAutoScalingInstances",
-			"ssm:SendCommand",
-			"ssm:GetCommandInvocation",
 			"ssm:GetParameter",
-			"ssm:DeleteParameter",
 			"ec2:DescribeInstances",
-			"ec2:CreateTags",
 		),
-		Resources: jsii.Strings("*"),
-	}))
+		// Slot-lock release: this deployment's parameters only.
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:       jsii.String("LifecycleReleaseSlotLock"),
+			Effect:    awsiam.Effect_ALLOW,
+			Actions:   jsii.Strings("ssm:DeleteParameter"),
+			Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:%s:parameter%s/*", region, *stack.Account(), dep.ParamPrefix())),
+		}),
+	)
 
 	scaleOutFn := awslambda.NewFunction(stack, jsii.String("ScaleOutFn"), &awslambda.FunctionProps{
 		FunctionName: jsii.String(dep.Resource("scaleout")),
@@ -619,20 +625,16 @@ WantedBy=elastic-gcs-dtn.service
 			"MAX_DTNS":       jsii.String(fmt.Sprintf("%d", maxDTNs)),
 			"REGION":         jsii.String(region),
 			"SECRETS_PREFIX": jsii.String(secretsPrefix),
+			// Only these alarms may scale out; anything else on the topic is ignored (#27).
+			"SCALE_OUT_ALARMS": jsii.String(dep.Resource("scaleout") + "," + dep.Resource("scaleout-throughput")),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	scaleOutFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("ScaleOutLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"autoscaling:SetDesiredCapacity",
-			"autoscaling:DescribeAutoScalingGroups",
-			"autoscaling:DescribeWarmPool",
-			"cloudwatch:PutMetricData",
-		),
-		Resources: jsii.Strings("*"),
-	}))
+	so := scoped("ScaleOut")
+	grant(scaleOutFn,
+		so.onASG("autoscaling:SetDesiredCapacity"),
+		so.unscoped("autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeWarmPool", "cloudwatch:PutMetricData"),
+	)
 
 	scaleInFn := awslambda.NewFunction(stack, jsii.String("ScaleInFn"), &awslambda.FunctionProps{
 		FunctionName: jsii.String(dep.Resource("scalein")),
@@ -650,17 +652,11 @@ WantedBy=elastic-gcs-dtn.service
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	scaleInFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("ScaleInLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"autoscaling:SetDesiredCapacity",
-			"autoscaling:DescribeAutoScalingGroups",
-			"cloudwatch:GetMetricStatistics",
-			"cloudwatch:PutMetricData",
-		),
-		Resources: jsii.Strings("*"),
-	}))
+	si := scoped("ScaleIn")
+	grant(scaleInFn,
+		si.onASG("autoscaling:SetDesiredCapacity"),
+		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData"),
+	)
 
 	cacheEvictionFn := awslambda.NewFunction(stack, jsii.String("CacheEvictionFn"), &awslambda.FunctionProps{
 		FunctionName: jsii.String(dep.Resource("cache-eviction")),
@@ -679,21 +675,18 @@ WantedBy=elastic-gcs-dtn.service
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	cacheEvictionFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("CacheEvictionLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
+	ce := scoped("CacheEviction")
+	grant(cacheEvictionFn, ce.runShell()...)
+	grant(cacheEvictionFn,
+		ce.onInstances("TerminateInstances", "ec2:TerminateInstances"),
+		ce.unscoped(
 			"autoscaling:DescribeWarmPool",
 			"autoscaling:DescribeAutoScalingInstances",
-			"ec2:TerminateInstances",
 			"ec2:DescribeInstances",
-			"ssm:SendCommand",
-			"ssm:GetCommandInvocation",
 			"ssm:GetParameter",
 			"cloudwatch:PutMetricData",
 		),
-		Resources: jsii.Strings("*"),
-	}))
+	)
 	// Cache eviction also needs to release slot locks for instances it terminates,
 	// since those instances may not run their shutdown script before being killed.
 	cacheEvictionFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
@@ -728,11 +721,20 @@ WantedBy=elastic-gcs-dtn.service
 		Effect: awsiam.Effect_ALLOW,
 		Actions: jsii.Strings(
 			"ssm:GetParameter",
-			"secretsmanager:GetSecretValue",
 			"cloudwatch:PutMetricData",
 			"lambda:InvokeFunction",
 		),
 		Resources: jsii.Strings("*"),
+	}))
+	// Globus client credentials: this deployment's secrets only, not every
+	// secret in the account (part of #44).
+	demandMonitorFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:     jsii.String("DemandMonitorGlobusSecrets"),
+		Effect:  awsiam.Effect_ALLOW,
+		Actions: jsii.Strings("secretsmanager:GetSecretValue"),
+		Resources: jsii.Strings(
+			fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s/*", region, *stack.Account(), secretsPrefix),
+		),
 	}))
 
 	// -------------------------------------------------------------------------
@@ -756,19 +758,14 @@ WantedBy=elastic-gcs-dtn.service
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	versionCheckFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("VersionCheckLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"ssm:SendCommand",
-			"ssm:GetCommandInvocation",
-			"ssm:GetParameter",
-			"autoscaling:DescribeAutoScalingGroups",
-			"ec2:DescribeInstances",
-			"cloudwatch:PutMetricData",
-		),
-		Resources: jsii.Strings("*"),
-	}))
+	vc := scoped("VersionCheck")
+	grant(versionCheckFn, vc.runShell()...)
+	grant(versionCheckFn, vc.unscoped(
+		"ssm:GetParameter",
+		"autoscaling:DescribeAutoScalingGroups",
+		"ec2:DescribeInstances",
+		"cloudwatch:PutMetricData",
+	))
 
 	// -------------------------------------------------------------------------
 	// EventBridge: ASG Lifecycle Hook Events → Lifecycle Lambda
@@ -925,8 +922,21 @@ WantedBy=elastic-gcs-dtn.service
 	})
 	throughputAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleOutTopic))
 
+	// Operator notifications (#27): health alarms go here, never to the
+	// scale-out topic. Subscribe an email with -c elastic-gcs:operatorEmail=...
+	operatorTopic := awssns.NewTopic(stack, jsii.String("OperatorTopic"), &awssns.TopicProps{
+		TopicName:   jsii.String(dep.Resource("operator")),
+		DisplayName: jsii.String("Elastic GCS Operator Alerts"),
+	})
+	if props.OperatorEmail != "" {
+		operatorTopic.AddSubscription(awssnssubscriptions.NewEmailSubscription(jsii.String(props.OperatorEmail), nil))
+	}
+	awscdk.NewCfnOutput(stack, jsii.String("OperatorTopicArn"), &awscdk.CfnOutputProps{
+		Value:       operatorTopic.TopicArn(),
+		Description: jsii.String("SNS topic for operator alerts (version drift)"),
+	})
+
 	// GCS Version Drift alarm: fires when GCSVersionDrift > 0 (any drift detected).
-	// Uses the scaleOutTopic for operator notification (same SNS infrastructure).
 	versionDriftAlarmName := dep.Resource("version-drift")
 	versionDriftAlarm := awscloudwatch.NewAlarm(stack, jsii.String("VersionDriftAlarm"), &awscloudwatch.AlarmProps{
 		AlarmName:        jsii.String(versionDriftAlarmName),
@@ -946,7 +956,7 @@ WantedBy=elastic-gcs-dtn.service
 		EvaluationPeriods:  jsii.Number(1),
 		TreatMissingData:   awscloudwatch.TreatMissingData_NOT_BREACHING,
 	})
-	versionDriftAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(scaleOutTopic))
+	versionDriftAlarm.AddAlarmAction(awscloudwatchactions.NewSnsAction(operatorTopic))
 
 	// -------------------------------------------------------------------------
 	// CloudWatch Dashboard — ElasticGCS-{region}
@@ -1180,22 +1190,19 @@ WantedBy=elastic-gcs-dtn.service
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
-	wakerFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("WakerLambdaPerms"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
+	wk := scoped("Waker")
+	grant(wakerFn, wk.runShell()...)
+	grant(wakerFn,
+		wk.onInstances("StartInstances", "ec2:StartInstances"),
+		wk.onASG("autoscaling:SetDesiredCapacity"),
+		wk.unscoped(
 			"ec2:DescribeInstances",
-			"ec2:StartInstances",
 			"ssm:GetParameter",
-			"ssm:SendCommand",
-			"ssm:GetCommandInvocation",
 			"ssm:DescribeInstanceInformation",
 			"autoscaling:DescribeAutoScalingGroups",
 			"autoscaling:DescribeWarmPool",
-			"autoscaling:SetDesiredCapacity",
 		),
-		Resources: jsii.Strings("*"),
-	}))
+	)
 
 	// Every Lambda derives its names, SSM paths and metric dimensions from
 	// AWS_REGION (set by the runtime) and DEPLOYMENT via names.FromEnv.
@@ -1246,19 +1253,17 @@ WantedBy=elastic-gcs-dtn.service
 			LogRetention: awslogs.RetentionDays_ONE_WEEK,
 		})
 		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
-		idleShutdownFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-			Sid:    jsii.String("IdleShutdownLambdaPerms"),
-			Effect: awsiam.Effect_ALLOW,
-			Actions: jsii.Strings(
+		is := scoped("IdleShutdown")
+		grant(idleShutdownFn,
+			is.onInstances("StopInstances", "ec2:StopInstances"),
+			is.unscoped(
 				"ec2:DescribeInstances",
-				"ec2:StopInstances",
 				"ssm:GetParameter",
 				"autoscaling:DescribeAutoScalingGroups",
 				"autoscaling:DescribeWarmPool",
 				"cloudwatch:GetMetricStatistics",
 			),
-			Resources: jsii.Strings("*"),
-		}))
+		)
 
 		awsevents.NewRule(stack, jsii.String("IdleShutdownRule"), &awsevents.RuleProps{
 			Description: jsii.String(fmt.Sprintf(

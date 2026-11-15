@@ -93,7 +93,7 @@ Automating this toggle is part of the slot controller (#65).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `cdk deploy` kills running transfers | `DesiredCapacity` in the template resets the ASG to 0 (#71) | Don't deploy during transfers until #71 is fixed |
+| `cdk deploy` kills running transfers | Before 0.12, `DesiredCapacity` in the template reset the ASG to 0 (#71) | Fixed: the template no longer sets it. Deploys can still replace warm-pool instances when the launch template changes, so avoid deploying during transfers |
 | Endpoint DNS lists dead IPs; GCS CLI hangs | A node stopped before Globus removed it from DNS | Fixed for resume/stop in #72. If it recurs: disable all active nodes except the control node, then toggle one inactive node (`--enable` then `--disable`) to force a DNS rebuild (#69) |
 | 4 of 8 warm-pool instances fail first boot | Concurrent `node setup` races on the endpoint keychain | Fixed in #67 (first boots take turns via an SSM lock) |
 | Service account can't manage its endpoint | Role creation needs a subscription, which the owner attaches after setup (#66) | The owner runs `globus gcs endpoint role create <ep> administrator <client-id>` |

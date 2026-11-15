@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`cdk deploy` no longer resets the DTN pool** (#71). The ASG template no
+  longer sets `DesiredCapacity`, which CloudFormation re-applied on every deploy:
+  live DTNs were stopped mid-transfer.
+- **The version-drift alarm no longer launches a DTN** (#27). It notified the
+  scale-out topic, whose Lambda treated it as demand. It now goes to a new operator
+  topic (`elastic-gcs:operatorEmail` subscribes an address). The scale-out Lambda
+  also ignores every alarm except the deployment's two scale-out alarms, and any
+  non-`ALARM` state.
+
+### Security
+- **No SSH ingress by default** (#35). An empty `adminCIDR` used to open port 22 to
+  `0.0.0.0/0` on the control node and every DTN. SSH is now opened only to an
+  explicitly configured CIDR.
+- **Lambda permissions are confined to their own deployment** (#35):
+  - `ssm:SendCommand` is allowed only with `AWS-RunShellScript`, and only on
+    instances tagged with the deployment;
+  - `ec2:Start/Stop/TerminateInstances` and `ec2:CreateTags` require that tag;
+  - `autoscaling:SetDesiredCapacity` and `CompleteLifecycleAction` are limited to
+    the deployment's ASG, for the Lambdas and the DTN role alike;
+  - `demand_monitor` reads only the deployment's secrets (part of #44);
+  - the lifecycle Lambda deletes only the deployment's SSM parameters.
+
 ## [0.11.0] - 2026-11-14
 
 ### Added
