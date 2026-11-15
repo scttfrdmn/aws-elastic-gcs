@@ -242,9 +242,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			info := dtnInfo{instanceID: id, state: stateByID[id]}
 			for _, tag := range tagsByID[id] {
 				switch aws.ToString(tag.Key) {
-				case "elastic-gcs:slot":
+				case names.TagSlot:
 					info.slot = aws.ToString(tag.Value)
-				case "elastic-gcs:gcs-node-id":
+				case names.TagGCSNodeID:
 					v := aws.ToString(tag.Value)
 					if len(v) > 8 {
 						v = v[:8]
@@ -283,6 +283,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Alarm states
 	alarmNames := []string{
 		dep.Resource("scaleout"),
+		dep.Resource("scaleout-throughput"),
 		dep.Resource("scalein"),
 		dep.Resource("version-drift"),
 	}
@@ -822,6 +823,8 @@ var lambdaFunctionBases = map[string]string{
 	"demand-monitor": "elastic-gcs-demand-monitor",
 	"cache-eviction": "elastic-gcs-cache-eviction",
 	"version-check":  "elastic-gcs-version-check",
+	"waker":          "elastic-gcs-waker",
+	"idle-shutdown":  "elastic-gcs-idle-shutdown",
 }
 
 func sortedLambdaNames() []string {

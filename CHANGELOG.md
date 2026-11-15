@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the first.
   - The waker waits for the GCS Manager with one on-node loop instead of an SSM
     round trip every 5 s.
+- **Shared names** (#50).
+  - Tag keys, lifecycle hook names and the metric namespace come from
+    `internal/names`. `dtn_boot.sh` receives them through the systemd unit
+    environment, with matching defaults.
+  - Lambdas read the region only from `AWS_REGION`. The stack-set `REGION`
+    variable is gone, and version_check used to read it.
+  - Slot locks are released through `internal/slotlock`, which deletes a lock only
+    when the instance still owns it. cache_eviction used to delete it
+    unconditionally.
+  - The CLI's `logs` and status lists include the waker, idle-shutdown and
+    throughput-alarm entries.
 
 ### Added
 - **Packaged operator CLI.** Each `v*` tag publishes `aws-elastic-gcs-ctl`

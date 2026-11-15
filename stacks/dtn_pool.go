@@ -208,7 +208,7 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 				"ec2:ResourceTag/aws:autoscaling:groupName": asgName,
 			},
 			"ForAllValues:StringEquals": map[string]interface{}{
-				"aws:TagKeys": []string{"elastic-gcs:slot", "elastic-gcs:gcs-node-id"},
+				"aws:TagKeys": []string{names.TagSlot, names.TagGCSNodeID},
 			},
 		},
 	}))
@@ -296,10 +296,13 @@ Environment=DEPLOYMENT=%[3]s
 Environment=SECRETS_PREFIX=%[4]s
 Environment=PARAM_PREFIX=%[5]s
 Environment=TOTAL_SLOTS=%[6]d
+Environment=ASG_NAME=%[7]s
+Environment=LIFECYCLE_HOOK=%[8]s
+Environment=METRIC_NAMESPACE=%[9]s
 
 [Install]
 WantedBy=multi-user.target
-`, scriptDir, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots)
+`, scriptDir, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots, asgName, names.HookReady, names.MetricNamespace)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
 
 	// Spot interruption monitor — polls IMDS every 5 seconds for a spot
@@ -559,13 +562,13 @@ WantedBy=elastic-gcs-dtn.service
 	// -------------------------------------------------------------------------
 	asg.AddLifecycleHook(jsii.String("DTNLaunchHook"), &awsautoscaling.BasicLifecycleHookProps{
 		LifecycleTransition: awsautoscaling.LifecycleTransition_INSTANCE_LAUNCHING,
-		LifecycleHookName:   jsii.String("dtn-ready-hook"),
+		LifecycleHookName:   jsii.String(names.HookReady),
 		HeartbeatTimeout:    awscdk.Duration_Minutes(jsii.Number(15)),
 		DefaultResult:       awsautoscaling.DefaultResult_ABANDON,
 	})
 	asg.AddLifecycleHook(jsii.String("DTNTerminateHook"), &awsautoscaling.BasicLifecycleHookProps{
 		LifecycleTransition: awsautoscaling.LifecycleTransition_INSTANCE_TERMINATING,
-		LifecycleHookName:   jsii.String("dtn-disable-hook"),
+		LifecycleHookName:   jsii.String(names.HookDisable),
 		HeartbeatTimeout:    awscdk.Duration_Minutes(jsii.Number(5)),
 		DefaultResult:       awsautoscaling.DefaultResult_CONTINUE,
 	})
@@ -577,7 +580,6 @@ WantedBy=elastic-gcs-dtn.service
 	// -------------------------------------------------------------------------
 	commonLambdaEnv := &map[string]*string{
 		"ASG_NAME":       asg.AutoScalingGroupName(),
-		"REGION":         jsii.String(region),
 		"SECRETS_PREFIX": jsii.String(secretsPrefix),
 	}
 
@@ -623,7 +625,6 @@ WantedBy=elastic-gcs-dtn.service
 		Environment: &map[string]*string{
 			"ASG_NAME":       asg.AutoScalingGroupName(),
 			"MAX_DTNS":       jsii.String(fmt.Sprintf("%d", maxDTNs)),
-			"REGION":         jsii.String(region),
 			"SECRETS_PREFIX": jsii.String(secretsPrefix),
 			// Only these alarms may scale out; anything else on the topic is ignored (#27).
 			"SCALE_OUT_ALARMS": jsii.String(dep.Resource("scaleout") + "," + dep.Resource("scaleout-throughput")),
@@ -646,7 +647,6 @@ WantedBy=elastic-gcs-dtn.service
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":         asg.AutoScalingGroupName(),
-			"REGION":           jsii.String(region),
 			"SECRETS_PREFIX":   jsii.String(secretsPrefix),
 			"METRIC_NAMESPACE": jsii.String(names.MetricNamespace),
 		},
@@ -670,7 +670,6 @@ WantedBy=elastic-gcs-dtn.service
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),
-			"REGION":                jsii.String(region),
 			"SECRETS_PREFIX":        jsii.String(secretsPrefix),
 			"CACHE_EVICTION_HOURS":  jsii.String(fmt.Sprintf("%d", cacheEvictionHours)),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
@@ -710,7 +709,6 @@ WantedBy=elastic-gcs-dtn.service
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(1)),
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
-			"REGION":              jsii.String(region),
 			"SECRETS_PREFIX":      jsii.String(secretsPrefix),
 			"ENDPOINT_ID_PARAM":   jsii.String(dep.Param(names.ParamEndpointID)),
 			"METRIC_NAMESPACE":    jsii.String(names.MetricNamespace),
@@ -755,7 +753,6 @@ WantedBy=elastic-gcs-dtn.service
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),
-			"REGION":                jsii.String(region),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
@@ -1187,7 +1184,6 @@ WantedBy=elastic-gcs-dtn.service
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
 			"ASG_NAME":              asg.AutoScalingGroupName(),
-			"REGION":                jsii.String(region),
 			"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
@@ -1246,7 +1242,6 @@ WantedBy=elastic-gcs-dtn.service
 			MemorySize:   jsii.Number(128),
 			Environment: &map[string]*string{
 				"ASG_NAME":              asg.AutoScalingGroupName(),
-				"REGION":                jsii.String(region),
 				"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
 				"IDLE_MINUTES":          jsii.String(fmt.Sprintf("%d", props.IdleShutdownMinutes)),
 				"MIN_UPTIME_MINUTES":    jsii.String(fmt.Sprintf("%d", minUptime)),

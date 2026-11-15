@@ -102,6 +102,16 @@ const (
 	TagDeployment = "elastic-gcs:deployment"
 	TagRegion     = "elastic-gcs:region"
 	TagRole       = "elastic-gcs:role"
+
+	// Written by dtn_boot.sh (its IAM allows exactly these two keys).
+	TagSlot      = "elastic-gcs:slot"
+	TagGCSNodeID = "elastic-gcs:gcs-node-id"
+	// Written by the lifecycle Lambda when an instance enters the warm pool.
+	TagWarmPoolEntryTime = "elastic-gcs:warm-pool-entry-time"
+
+	// ASG lifecycle hooks (dtn_boot.sh gets HookReady via LIFECYCLE_HOOK).
+	HookReady   = "dtn-ready-hook"
+	HookDisable = "dtn-disable-hook"
 )
 
 // FromEnv builds the Deployment from AWS_REGION (set by the Lambda runtime)

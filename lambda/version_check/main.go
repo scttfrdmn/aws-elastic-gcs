@@ -37,7 +37,7 @@ var versionRe = regexp.MustCompile(`(\d+\.\d+\.\d+)`)
 
 // handler runs the version drift check and publishes the GCSVersionDrift metric.
 func handler(ctx context.Context, _ interface{}) error {
-	region := os.Getenv("REGION")
+	region := os.Getenv("AWS_REGION")
 	asgName := os.Getenv("ASG_NAME")
 	controlNodeIDParam := os.Getenv("CONTROL_NODE_ID_PARAM")
 
@@ -128,7 +128,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	// Publish GCSVersionDrift metric.
 	// 0 = all nodes agree (healthy), >0 = drift (alert).
 	_, err = cwClient.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
-		Namespace: aws.String("ElasticGCS"),
+		Namespace: aws.String(names.MetricNamespace),
 		MetricData: []cwtypes.MetricDatum{
 			{
 				MetricName: aws.String("GCSVersionDrift"),

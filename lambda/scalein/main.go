@@ -47,7 +47,7 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	region := os.Getenv("AWS_REGION")
 	metricNamespace := os.Getenv("METRIC_NAMESPACE")
 	if metricNamespace == "" {
-		metricNamespace = "ElasticGCS"
+		metricNamespace = names.MetricNamespace
 	}
 
 	logger.Info("scale-in evaluation triggered", "region", region, "asg", asgName)

@@ -19,11 +19,12 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/slotlock"
 )
 
 const (
-	warmPoolEntryTagKey = "elastic-gcs:warm-pool-entry-time"
-	gcsNodeIDTagKey     = "elastic-gcs:gcs-node-id"
+	warmPoolEntryTagKey = names.TagWarmPoolEntryTime
+	gcsNodeIDTagKey     = names.TagGCSNodeID
 )
 
 // handler terminates warm pool instances that have been stopped too long,
@@ -173,19 +174,12 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 
 			// Release SSM slot lock (may be orphaned if shutdown script didn't run).
 			if slotNum := slotNumber(inst.Tags); slotNum != "" {
-				lockParam := dep.Param(names.ParamSlotLock + "/" + slotNum)
-				if _, ssmErr := ssmClient.DeleteParameter(ctx, &ssm.DeleteParameterInput{
-					Name: aws.String(lockParam),
-				}); ssmErr != nil {
-					logger.Warn("could not release slot lock",
-						"param", lockParam,
-						"error", ssmErr.Error(),
-					)
+				// Only if this instance still owns it (#50).
+				outcome, ssmErr := slotlock.Release(ctx, ssmClient, dep, slotNum, instanceID)
+				if ssmErr != nil {
+					logger.Warn("could not release slot lock", "slot", slotNum, "error", ssmErr.Error())
 				} else {
-					logger.Info("released slot lock for terminated instance",
-						"param", lockParam,
-						"instance", instanceID,
-					)
+					logger.Info("slot lock release", "slot", slotNum, "instance", instanceID, "outcome", string(outcome))
 				}
 			} else {
 				logger.Warn("no elastic-gcs:slot tag on instance, slot lock not released",
@@ -351,7 +345,7 @@ func gcsNodeIDTag(tags []ec2types.Tag) string {
 // slotNumber returns the DTN slot number from the elastic-gcs:slot EC2 tag, or "".
 func slotNumber(tags []ec2types.Tag) string {
 	for _, tag := range tags {
-		if aws.ToString(tag.Key) == "elastic-gcs:slot" {
+		if aws.ToString(tag.Key) == names.TagSlot {
 			return aws.ToString(tag.Value)
 		}
 	}

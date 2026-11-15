@@ -19,6 +19,7 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/slotlock"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
@@ -141,7 +142,7 @@ func tagWarmPoolEntry(ctx context.Context, ec2Client *ec2.Client, instanceID str
 		Resources: []string{instanceID},
 		Tags: []ec2types.Tag{
 			{
-				Key:   aws.String("elastic-gcs:warm-pool-entry-time"),
+				Key:   aws.String(names.TagWarmPoolEntryTime),
 				Value: aws.String(entryTime),
 			},
 		},
@@ -178,7 +179,7 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 	inst := out.Reservations[0].Instances[0]
 	var slot string
 	for _, tag := range inst.Tags {
-		if aws.ToString(tag.Key) == "elastic-gcs:slot" {
+		if aws.ToString(tag.Key) == names.TagSlot {
 			slot = aws.ToString(tag.Value)
 			break
 		}
@@ -189,45 +190,12 @@ func releaseSlotLock(ctx context.Context, ec2Client *ec2.Client, ssmClient *ssm.
 		)
 		return
 	}
-	paramName := dep.Param(names.ParamSlotLock + "/" + slot)
-
-	// Verify this instance actually holds the lock before releasing it.
-	// The EC2 slot tag may be stale (e.g. if the instance never acquired the lock
-	// or if another instance already holds it). Deleting a lock we don't own would
-	// break the other instance's ability to resume.
-	lockOut, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
-		Name: aws.String(paramName),
-	})
+	outcome, err := slotlock.Release(ctx, ssmClient, dep, slot, instanceID)
 	if err != nil {
-		logger.Info("slot lock not found, nothing to release",
-			"param", paramName,
-		)
+		logger.Warn("failed to release slot lock", "slot", slot, "instance", instanceID, "error", err.Error())
 		return
 	}
-	lockOwner := aws.ToString(lockOut.Parameter.Value)
-	if lockOwner != instanceID {
-		logger.Warn("slot lock owned by another instance, NOT releasing",
-			"param", paramName,
-			"owner", lockOwner,
-			"instance", instanceID,
-		)
-		return
-	}
-
-	_, err = ssmClient.DeleteParameter(ctx, &ssm.DeleteParameterInput{
-		Name: aws.String(paramName),
-	})
-	if err != nil {
-		logger.Warn("failed to release slot lock",
-			"param", paramName,
-			"error", err.Error(),
-		)
-	} else {
-		logger.Info("released slot lock for terminated instance",
-			"param", paramName,
-			"instance", instanceID,
-		)
-	}
+	logger.Info("slot lock release", "slot", slot, "instance", instanceID, "outcome", string(outcome))
 }
 
 // completeLifecycle signals the ASG lifecycle hook with the given result (CONTINUE or ABANDON).
