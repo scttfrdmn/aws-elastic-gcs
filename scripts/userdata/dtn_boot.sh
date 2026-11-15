@@ -353,6 +353,21 @@ aws ec2 create-tags \
     --tags "Key=elastic-gcs:gcs-node-id,Value=${NODE_ID}" \
     --region "$AWS_REGION" 2>/dev/null || true
 
+# --- Boot metric ---
+publish_boot_metric() {
+    local name value
+    if [ "$BOOT_TYPE" = "resume" ]; then name=DTNResumeLatencyMs; value=$RESUME_MS
+    else name=DTNFirstBootLatencyMs; value=$SETUP_MS; fi
+    aws cloudwatch put-metric-data \
+        --namespace "ElasticGCS" \
+        --metric-name "$name" \
+        --value "$value" \
+        --unit Milliseconds \
+        --dimensions "Region=$AWS_REGION,Deployment=$DEPLOYMENT,Slot=$DTN_SLOT_NUMBER" \
+        --region "$AWS_REGION" 2>/dev/null \
+        || echo "WARNING: Failed to publish CloudWatch metric"
+}
+
 # --- Ready gate, then signal the launch hook (#34, #69) ---
 if [ "$LIFECYCLE_STATE" = "Warmed:Pending:Wait" ]; then
     # Headed for the warm pool: node setup left the node active and in DNS.
@@ -362,33 +377,24 @@ if [ "$LIFECYCLE_STATE" = "Warmed:Pending:Wait" ]; then
     globus-connect-server node disable
     chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause 2>/dev/null || true
     wait_endpoint_dns absent "$PUBLIC_IP" 180 || true
-else
-    # Going InService: transfers can't reach this node until Globus adds it to
-    # the endpoint's DNS, which happens asynchronously.
-    wait_endpoint_dns present "$PUBLIC_IP" 180 || true
+    # The ASG stops the instance right after CONTINUE, so publish first: this
+    # boot isn't on any transfer's critical path.
+    publish_boot_metric
+    complete_hook CONTINUE
+    echo "=== DTN warm-pool first boot complete (slot $DTN_SLOT_NUMBER, node $NODE_ID) ==="
+    exit 0
 fi
+
+# Going InService: transfers can't reach this node until Globus adds it to the
+# endpoint's DNS, which happens asynchronously.
+wait_endpoint_dns present "$PUBLIC_IP" 180 || true
 complete_hook CONTINUE
 
 # --- After signalling: diagnostics and metrics (off the scale-out path) ---
 NODE_STATUS=$(globus-connect-server node show -F json 2>/dev/null | jq -r '.status' || echo "unknown")
 echo ">>> Node status: $NODE_STATUS"
 globus-connect-server self-diagnostic 2>&1 | head -20 || true
-
-if [ "$BOOT_TYPE" = "resume" ]; then
-    METRIC_VALUE="$RESUME_MS"
-    METRIC_NAME="DTNResumeLatencyMs"
-else
-    METRIC_VALUE="$SETUP_MS"
-    METRIC_NAME="DTNFirstBootLatencyMs"
-fi
-aws cloudwatch put-metric-data \
-    --namespace "ElasticGCS" \
-    --metric-name "$METRIC_NAME" \
-    --value "$METRIC_VALUE" \
-    --unit Milliseconds \
-    --dimensions "Region=$AWS_REGION,Deployment=$DEPLOYMENT,Slot=$DTN_SLOT_NUMBER" \
-    --region "$AWS_REGION" 2>/dev/null \
-    || echo "WARNING: Failed to publish CloudWatch metric"
+publish_boot_metric
 
 echo ""
 echo "=== DTN Boot Complete ==="
