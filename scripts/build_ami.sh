@@ -62,17 +62,25 @@ CONTROL_INSTANCE=$(aws ssm get-parameter \
     --query Parameter.Value --output text \
     --region "$REGION" --profile "$AWS_PROFILE")
 
-read -r SUBNET_ID SG_ID IAM_PROFILE_ARN < <(aws ec2 describe-instances \
+SUBNET_ID=$(aws ec2 describe-instances \
     --instance-ids "$CONTROL_INSTANCE" \
-    --query 'Reservations[0].Instances[0].[SubnetId,SecurityGroups[0].GroupId,IamInstanceProfile.Arn]' \
-    --output text \
+    --query 'Reservations[0].Instances[0].SubnetId' --output text \
     --region "$REGION" --profile "$AWS_PROFILE")
 
-echo ">>> Subnet: $SUBNET_ID  SG: $SG_ID"
-echo ">>> IAM Profile: $IAM_PROFILE_ARN"
+# The builder has its own profile (SSM agent only, no secrets) and an
+# egress-only security group, both from the control stack (#45).
+BUILDER_NAME="elastic-gcs-ami-builder-${REGION}-${DEPLOYMENT}"
+IAM_PROFILE_NAME="$BUILDER_NAME"
+SG_ID=$(aws ec2 describe-security-groups \
+    --filters "Name=group-name,Values=${BUILDER_NAME}" \
+    --query 'SecurityGroups[0].GroupId' --output text \
+    --region "$REGION" --profile "$AWS_PROFILE")
+if [ -z "$SG_ID" ] || [ "$SG_ID" = "None" ]; then
+    echo "ERROR: security group ${BUILDER_NAME} not found; deploy the control stack (0.13+) first"
+    exit 1
+fi
 
-# Extract profile name from ARN
-IAM_PROFILE_NAME="${IAM_PROFILE_ARN##*/}"
+echo ">>> Subnet: $SUBNET_ID  SG: $SG_ID  Profile: $IAM_PROFILE_NAME"
 
 # --- UserData: ONLY install SSM Agent so we can manage the rest via SSM ---
 # Doing package installs in UserData causes RPM lock races with cloud-init.

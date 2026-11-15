@@ -156,6 +156,27 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 
 	s.SecurityGroup = sg
 
+	// AMI builder (#45): scripts/build_ami.sh launches a throwaway instance that
+	// installs GCS from the internet. It gets its own role (SSM agent only, no
+	// secrets or parameters) and its own egress-only security group, instead of
+	// the control node's profile and the endpoint's internet-facing group.
+	awsec2.NewSecurityGroup(stack, jsii.String("AMIBuilderSG"), &awsec2.SecurityGroupProps{
+		Vpc:               vpc,
+		SecurityGroupName: jsii.String(dep.Resource("ami-builder")),
+		Description:       jsii.String("Elastic GCS AMI builder: egress only"),
+		AllowAllOutbound:  jsii.Bool(true),
+	})
+	builderRole := awsiam.NewRole(stack, jsii.String("AMIBuilderRole"), &awsiam.RoleProps{
+		AssumedBy:   awsiam.NewServicePrincipal(jsii.String("ec2.amazonaws.com"), nil),
+		Description: jsii.String("Elastic GCS AMI builder: SSM agent only"),
+		RoleName:    jsii.String(dep.Resource("ami-builder")),
+	})
+	addSSMCore(builderRole)
+	awsiam.NewInstanceProfile(stack, jsii.String("AMIBuilderProfile"), &awsiam.InstanceProfileProps{
+		Role:                builderRole,
+		InstanceProfileName: jsii.String(dep.Resource("ami-builder")),
+	})
+
 	// -------------------------------------------------------------------------
 	// IAM Role
 	// Least-privilege policy for the control node:
@@ -172,8 +193,8 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	})
 
 	// SSM Session Manager — enables SSH-free maintenance
-	role.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(
-		jsii.String("AmazonSSMManagedInstanceCore")))
+	// SSM agent permissions without GetParameter on "*" (#45).
+	addSSMCore(role)
 
 	// CloudWatch agent
 	role.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(

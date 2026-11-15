@@ -156,3 +156,42 @@ func grant(fn interface {
 		fn.AddToRolePolicy(st)
 	}
 }
+
+// ssmCoreStatements is AmazonSSMManagedInstanceCore without ssm:GetParameter(s)
+// on "*" (#45): what Run Command and Session Manager need. Roles that read
+// parameters get their own statements scoped to the deployment's prefix.
+func ssmCoreStatements() []awsiam.PolicyStatement {
+	return []awsiam.PolicyStatement{
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:    jsii.String("SSMCoreAgent"),
+			Effect: awsiam.Effect_ALLOW,
+			Actions: jsii.Strings(
+				"ssm:DescribeAssociation", "ssm:GetDeployablePatchSnapshotForInstance",
+				"ssm:GetDocument", "ssm:DescribeDocument", "ssm:GetManifest",
+				"ssm:ListAssociations", "ssm:ListInstanceAssociations",
+				"ssm:PutInventory", "ssm:PutComplianceItems", "ssm:PutConfigurePackageResult",
+				"ssm:UpdateAssociationStatus", "ssm:UpdateInstanceAssociationStatus",
+				"ssm:UpdateInstanceInformation",
+			),
+			Resources: jsii.Strings("*"),
+		}),
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:    jsii.String("SSMCoreMessages"),
+			Effect: awsiam.Effect_ALLOW,
+			Actions: jsii.Strings(
+				"ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
+				"ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel",
+				"ec2messages:AcknowledgeMessage", "ec2messages:DeleteMessage", "ec2messages:FailMessage",
+				"ec2messages:GetEndpoint", "ec2messages:GetMessages", "ec2messages:SendReply",
+			),
+			Resources: jsii.Strings("*"),
+		}),
+	}
+}
+
+// addSSMCore attaches ssmCoreStatements to a role.
+func addSSMCore(role awsiam.Role) {
+	for _, st := range ssmCoreStatements() {
+		role.AddToPolicy(st)
+	}
+}
