@@ -42,9 +42,20 @@ func main() {
 	// GCS package version pinned on every node. All nodes in an endpoint must
 	// run the same GCS version, so the control node, DTN UserData, and DTN AMI
 	// (scripts/build_ami.sh) all key off this one value.
-	gcsVersion := ctxString(app, "globus:gcsVersion")
-	if gcsVersion == "" {
-		gcsVersion = "5.4.101"
+	// Deployment-wide defaults from CDK context; per-deployment settings in
+	// regions.yaml win. config.Resolve validates everything (#49).
+	defaults := config.Defaults{GCSVersion: ctxString(app, "globus:gcsVersion"), AdminCIDR: adminCIDR}
+	for key, dst := range map[string]*int{
+		"elastic-gcs:maxDTNs":                &defaults.MaxDTNs,
+		"elastic-gcs:cacheEvictionHours":     &defaults.CacheEvictionHours,
+		"elastic-gcs:throughputScaleOutMBps": &defaults.ThroughputMBps,
+	} {
+		n, err := config.CtxInt(key, ctxString(app, key))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		*dst = n
 	}
 
 	// CDK_DEFAULT_ACCOUNT is injected by the CDK CLI when running cdk commands.
@@ -75,34 +86,10 @@ func main() {
 
 		// Phase 1 + 2: Network + Control Node
 		controlStackName := dep.Stack("Control")
-		// Phase 3: DTN Pool (depends on control stack)
-		cacheHours := 72
-		if h := ctxString(app, "elastic-gcs:cacheEvictionHours"); h != "" {
-			fmt.Sscanf(h, "%d", &cacheHours)
-		}
-		// Resolve pool sizes once so both stacks agree: the control node
-		// pre-creates maxDTNs+warmPoolSize node identities and DTNs claim slots
-		// 1..maxDTNs+warmPoolSize. max_dtns in regions.yaml (per deployment)
-		// wins over the elastic-gcs:maxDTNs context default.
-		if region.WarmPoolSize <= 0 {
-			region.WarmPoolSize = 2
-		}
-		maxDTNs := region.MaxDTNs
-		if maxDTNs <= 0 {
-			if m := ctxString(app, "elastic-gcs:maxDTNs"); m != "" {
-				fmt.Sscanf(m, "%d", &maxDTNs)
-			}
-		}
-		if maxDTNs <= 0 {
-			maxDTNs = region.WarmPoolSize + 1
-		}
-		// throughputMBps: MB/s above which a second (or third) DTN is triggered.
-		// Override via: cdk deploy -c elastic-gcs:throughputScaleOutMBps=800
-		// Falls back to per-region config, then ~70% of the DTN type's sustained
-		// throughput (docs/instance-sizing.md).
-		throughputMBps := 0
-		if t := ctxString(app, "elastic-gcs:throughputScaleOutMBps"); t != "" {
-			fmt.Sscanf(t, "%d", &throughputMBps)
+		cfg, err := config.Resolve(region, defaults)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config/regions.yaml: %v\n", err)
+			os.Exit(1)
 		}
 
 		controlStack := stacks.NewControlNodeStack(app, controlStackName, &stacks.ControlNodeStackProps{
@@ -111,15 +98,12 @@ func main() {
 				Description: jsii.String(fmt.Sprintf("Elastic GCS Control Node - %s", dep.ID())),
 			},
 			Deployment:           dep,
-			RegionConfig:         region,
+			Config:               cfg,
 			OpenDataBuckets:      regionBuckets,
 			GlobusSubscriptionID: globusSubscriptionID,
 			GlobusOwnerIdentity:  globusOwnerIdentity,
 			EndpointDisplayName:  endpointDisplayName,
 			OrganizationName:     orgName,
-			AdminCIDR:            adminCIDR,
-			MaxDTNs:              maxDTNs,
-			GCSVersion:           gcsVersion,
 		})
 		dtnStackName := dep.Stack("DTNPool")
 		stacks.NewDTNPoolStack(app, dtnStackName, &stacks.DTNPoolStackProps{
@@ -127,17 +111,11 @@ func main() {
 				Env:         env,
 				Description: jsii.String(fmt.Sprintf("Elastic GCS DTN Pool - %s", dep.ID())),
 			},
-			Deployment:                  dep,
-			RegionConfig:                region,
-			ControlStack:                controlStack,
-			OpenDataBuckets:             regionBuckets,
-			CacheEvictionHours:          cacheHours,
-			MaxDTNs:                     maxDTNs,
-			ThroughputScaleOutThreshold: int64(throughputMBps) * 1_000_000,
-			IdleShutdownMinutes:         region.IdleShutdownMinutes,
-			MinUptimeMinutes:            region.MinUptimeMinutes,
-			GCSVersion:                  gcsVersion,
-			OperatorEmail:               operatorEmail,
+			Deployment:      dep,
+			Config:          cfg,
+			ControlStack:    controlStack,
+			OpenDataBuckets: regionBuckets,
+			OperatorEmail:   operatorEmail,
 		})
 	}
 

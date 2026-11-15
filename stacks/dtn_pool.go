@@ -31,28 +31,11 @@ import (
 // and cache eviction configuration.
 type DTNPoolStackProps struct {
 	awscdk.StackProps
-	Deployment         names.Deployment
-	RegionConfig       config.RegionConfig
-	ControlStack       *ControlNodeStack
-	OpenDataBuckets    []config.OpenDataBucket
-	CacheEvictionHours int // default 72h if 0
-	MaxDTNs            int // default WarmPoolSize+1 if 0
-	// ThroughputScaleOutThreshold is the bytes/sec threshold for the multi-DTN
-	// scale-out alarm (ElasticGCS/TransferThroughput). When the sum of
-	// effective_bytes_per_second across all ACTIVE tasks exceeds this for 2
-	// consecutive minutes, the scaleout Lambda fires again to add another DTN.
-	// 0 = use default (500 MB/s = 500_000_000 bytes/sec).
-	ThroughputScaleOutThreshold int64
-
-	// IdleShutdownMinutes > 0 enables the idle_shutdown Lambda and EventBridge rule.
-	// 0 = disabled (control node runs continuously). See docs/ephemeral-control-node.md.
-	IdleShutdownMinutes int
-	MinUptimeMinutes    int // default 30 when IdleShutdownMinutes > 0
-
-	// GCSVersion is the exact globus-connect-server54 package version (e.g.
-	// "5.4.101"). Selects the matching DTN AMI and pins the UserData fallback
-	// install so DTNs always match the control node.
-	GCSVersion string
+	Deployment names.Deployment
+	// Config is the resolved, validated deployment config (config.Resolve).
+	Config          config.Resolved
+	ControlStack    *ControlNodeStack
+	OpenDataBuckets []config.OpenDataBucket
 
 	// OperatorEmail, if set, is subscribed to the operator alert topic.
 	OperatorEmail string
@@ -81,55 +64,19 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	awscdk.Tags_Of(stack).Add(jsii.String(names.TagDeployment), jsii.String(dep.ID()), nil)
 	awscdk.Tags_Of(stack).Add(jsii.String(names.TagRegion), jsii.String(region), nil)
 
-	warmPoolSize := props.RegionConfig.WarmPoolSize
-	if warmPoolSize <= 0 {
-		warmPoolSize = 2
-	}
-
-	// MaxDTNs: maximum number of simultaneously running (InService) DTNs.
-	// Defaults to warmPoolSize+1 if not set.
-	maxDTNs := props.MaxDTNs
-	if maxDTNs <= 0 {
-		if props.RegionConfig.MaxDTNs > 0 {
-			maxDTNs = props.RegionConfig.MaxDTNs
-		} else {
-			maxDTNs = warmPoolSize + 1
-		}
-	}
-
-	// Total slots = maxDTNs (InService) + warmPoolSize (Warmed:Stopped).
-	// Each slot needs a pre-created GCS node identity in Secrets Manager
-	// and an SSM slot-lock parameter path (/elastic-gcs/{region}/slot-lock/{N}).
-	totalSlots := maxDTNs + warmPoolSize
-
-	cacheEvictionHours := props.CacheEvictionHours
-	if cacheEvictionHours <= 0 {
-		cacheEvictionHours = 72
-	}
-
-	dtnInstanceStr := props.RegionConfig.DTNInstance
-	if dtnInstanceStr == "" {
-		dtnInstanceStr = defaultDTNInstance
-	}
-
-	// ThroughputScaleOutThreshold: bytes/sec above which a second (or third) DTN
-	// is triggered. Falls back to the per-region config, then to ~70% of what
-	// one DTN of this type sustains to the internet (see docs/instance-sizing.md),
-	// then to 500 MB/s for types not in dtnSustainedBytesPerSec.
-	throughputThreshold := props.ThroughputScaleOutThreshold
-	if throughputThreshold <= 0 && props.RegionConfig.ThroughputScaleOutMBps > 0 {
-		throughputThreshold = int64(props.RegionConfig.ThroughputScaleOutMBps) * 1_000_000
-	}
-	if throughputThreshold <= 0 {
-		if sustained, ok := dtnSustainedBytesPerSec[dtnInstanceStr]; ok {
-			throughputThreshold = sustained * 7 / 10
-		} else {
-			throughputThreshold = 500_000_000
-			awscdk.Annotations_Of(stack).AddWarningV2(jsii.String("elastic-gcs:throughputThreshold"),
-				jsii.String(fmt.Sprintf("DTN type %s has no known sustained throughput; using a "+
-					"500 MB/s scale-out threshold. Set throughput_scaleout_mbps for this region "+
-					"(see docs/instance-sizing.md).", dtnInstanceStr)), nil)
-		}
+	// All sizing comes from config.Resolve, shared with the control stack (#49).
+	cfg := props.Config
+	warmPoolSize := cfg.WarmPoolSize
+	maxDTNs := cfg.MaxDTNs
+	totalSlots := cfg.TotalSlots
+	cacheEvictionHours := cfg.CacheEvictionHours
+	dtnInstanceStr := cfg.DTNInstance
+	throughputThreshold := cfg.ThroughputThresholdBps
+	if cfg.ThroughputDerivedFallback {
+		awscdk.Annotations_Of(stack).AddWarningV2(jsii.String("elastic-gcs:throughputThreshold"),
+			jsii.String(fmt.Sprintf("DTN type %s has no known sustained throughput; using a "+
+				"500 MB/s scale-out threshold. Set throughput_scaleout_mbps for this region "+
+				"(see docs/instance-sizing.md).", dtnInstanceStr)), nil)
 	}
 
 	// ASG name is hardcoded so EventBridge lifecycle rules can filter on it
@@ -363,7 +310,7 @@ WantedBy=elastic-gcs-dtn.service
 	// control stack must be deployed first, because the AMI builder borrows its
 	// networking). Deploying this stack fails until `make ami` has written the
 	// parameter, so a DTN can never run a different GCS version than the pin.
-	dtnAMI := awsec2.MachineImage_FromSsmParameter(jsii.String(dep.AMIParam(props.GCSVersion)), nil)
+	dtnAMI := awsec2.MachineImage_FromSsmParameter(jsii.String(dep.AMIParam(cfg.GCSVersion)), nil)
 
 	ltProps := &awsec2.LaunchTemplateProps{
 		LaunchTemplateName: jsii.String(dep.Resource("dtn")),
@@ -385,10 +332,10 @@ WantedBy=elastic-gcs-dtn.service
 			},
 		},
 	}
-	if props.RegionConfig.KeyPairName != "" {
+	if cfg.KeyPairName != "" {
 		ltProps.KeyPair = awsec2.KeyPair_FromKeyPairName(
 			stack, jsii.String("DTNKeyPair"),
-			jsii.String(props.RegionConfig.KeyPairName),
+			jsii.String(cfg.KeyPairName),
 		)
 	}
 	// Note: Spot options are NOT set on the launch template. ASG warm pools do not
@@ -422,14 +369,14 @@ WantedBy=elastic-gcs-dtn.service
 		// at MinCapacity and later deploys leave the scaling Lambdas' value alone.
 		DefaultInstanceWarmup: awscdk.Duration_Seconds(jsii.Number(0)),
 	}
-	if props.RegionConfig.UseSpot {
+	if cfg.UseSpot {
 		instancesDist := &awsautoscaling.InstancesDistribution{
 			OnDemandBaseCapacity:                jsii.Number(0),
 			OnDemandPercentageAboveBaseCapacity: jsii.Number(0),
 			SpotAllocationStrategy:              awsautoscaling.SpotAllocationStrategy_PRICE_CAPACITY_OPTIMIZED,
 		}
-		if props.RegionConfig.SpotMaxPrice != "" {
-			instancesDist.SpotMaxPrice = jsii.String(props.RegionConfig.SpotMaxPrice)
+		if cfg.SpotMaxPrice != "" {
+			instancesDist.SpotMaxPrice = jsii.String(cfg.SpotMaxPrice)
 		}
 		asgProps.MixedInstancesPolicy = &awsautoscaling.MixedInstancesPolicy{
 			LaunchTemplate:        lt,
@@ -479,7 +426,7 @@ WantedBy=elastic-gcs-dtn.service
 		"AutoScalingGroupName": jsii.String(asgName),
 		"ForceDelete":          jsii.Bool(true),
 	}
-	if !props.RegionConfig.UseSpot {
+	if !cfg.UseSpot {
 		warmPoolCR := customresources.NewAwsCustomResource(stack, jsii.String("WarmPoolCR"),
 			&customresources.AwsCustomResourceProps{
 				OnCreate: &customresources.AwsSdkCall{
@@ -1226,11 +1173,8 @@ WantedBy=elastic-gcs-dtn.service
 	// IMPORTANT: When enabled, the endpoint becomes unreachable while stopped.
 	// Read docs/ephemeral-control-node.md before enabling.
 	// -------------------------------------------------------------------------
-	if props.IdleShutdownMinutes > 0 {
-		minUptime := props.MinUptimeMinutes
-		if minUptime <= 0 {
-			minUptime = 30
-		}
+	if cfg.IdleShutdownMinutes > 0 {
+		minUptime := cfg.MinUptimeMinutes
 
 		idleShutdownFn := awslambda.NewFunction(stack, jsii.String("IdleShutdownFn"), &awslambda.FunctionProps{
 			FunctionName: jsii.String(dep.Resource("idle-shutdown")),
@@ -1243,7 +1187,7 @@ WantedBy=elastic-gcs-dtn.service
 			Environment: &map[string]*string{
 				"ASG_NAME":              asg.AutoScalingGroupName(),
 				"CONTROL_NODE_ID_PARAM": jsii.String(dep.Param(names.ParamControlNodeID)),
-				"IDLE_MINUTES":          jsii.String(fmt.Sprintf("%d", props.IdleShutdownMinutes)),
+				"IDLE_MINUTES":          jsii.String(fmt.Sprintf("%d", cfg.IdleShutdownMinutes)),
 				"MIN_UPTIME_MINUTES":    jsii.String(fmt.Sprintf("%d", minUptime)),
 				"METRIC_NAMESPACE":      jsii.String(names.MetricNamespace),
 			},
@@ -1266,7 +1210,7 @@ WantedBy=elastic-gcs-dtn.service
 		awsevents.NewRule(stack, jsii.String("IdleShutdownRule"), &awsevents.RuleProps{
 			Description: jsii.String(fmt.Sprintf(
 				"Check for idle control node every 15 min in %s (threshold: %dmin)",
-				region, props.IdleShutdownMinutes)),
+				region, cfg.IdleShutdownMinutes)),
 			Schedule: awsevents.Schedule_Rate(awscdk.Duration_Minutes(jsii.Number(15))),
 		}).AddTarget(awseventstargets.NewLambdaFunction(idleShutdownFn, nil))
 	}
@@ -1312,25 +1256,4 @@ WantedBy=elastic-gcs-dtn.service
 	})
 
 	return stack
-}
-
-// defaultDTNInstance is the DTN type used when regions.yaml sets none: the
-// cheapest x86-64 type per sustained internet Gbps with at least 16 GiB.
-const defaultDTNInstance = "c8in.2xlarge"
-
-// dtnSustainedBytesPerSec is the sustained multi-flow internet-gateway
-// throughput of recommended DTN types, used to derive the default scale-out
-// threshold. The *8in families are IGW-limited to their baseline bandwidth;
-// most other types under 32 vCPUs are capped at 5 Gbps. Regenerate with
-// scripts/instance_sizing.py.
-var dtnSustainedBytesPerSec = map[string]int64{
-	"m8in.xlarge":  781_250_000,   // 6.25 Gbps
-	"c8in.2xlarge": 1_562_500_000, // 12.5 Gbps
-	"m8in.2xlarge": 1_562_500_000, // 12.5 Gbps
-	"c8in.4xlarge": 3_125_000_000, // 25 Gbps
-	"m8in.4xlarge": 3_125_000_000, // 25 Gbps
-	"c8in.8xlarge": 6_250_000_000, // 50 Gbps
-	"m6in.xlarge":  625_000_000,   // 5 Gbps IGW cap
-	"c6in.2xlarge": 625_000_000,   // 5 Gbps IGW cap
-	"m6i.xlarge":   195_250_000,   // 1.562 Gbps baseline
 }
