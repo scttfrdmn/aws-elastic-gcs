@@ -164,6 +164,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HMAC-SHA1, which DEFAULT still allowed for TLS 1.2 CBC suites. The control
   node now runs the same `configure_tls.sh` as the DTN AMI. That script merges
   GCS's `gsi.conf` instead of overwriting it.
+  - **Limitation, measured live:** port 443 is served by the GCS Manager
+    VirtualHost, whose explicit `SSLCipherSuite` overrides the system policy.
+    CHACHA20 and DHE-GCM are still offered there; static RSA and SHA1 CBC are
+    refused. Everything offered is forward-secret AEAD. See #47.
 - **Hardening** (#48).
   - SSM Run Command output from the Lambdas goes to a 90-day log group
     (`/elastic-gcs/<deployment>/ssm-commands`), so commands run on instances are

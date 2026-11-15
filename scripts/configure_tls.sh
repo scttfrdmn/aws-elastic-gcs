@@ -10,10 +10,16 @@ set -euo pipefail
 # SSLCipherSuite settings and REGENERATES them whenever collections change.
 # They are marked "DO NOT EDIT". Direct Apache edits are overwritten.
 #
-# Solution: Rocky/RHEL 9 system crypto-policy constrains OpenSSL at the OS
-# level. Apache (and every other OpenSSL consumer) cannot offer ciphers that
-# the policy has removed, regardless of what GCS writes in its VirtualHost.
-# GridFTP data channels are configured separately via /etc/grid-security/gsi.conf.
+# What this does: sets the Rocky/RHEL 9 system crypto-policy (the default for
+# every OpenSSL consumer, including GridFTP) and the GridFTP data-channel
+# settings in /etc/grid-security/gsi.conf.
+#
+# LIMITATION (measured 2026-11-15, #47): on port 443 the GCS Manager VirtualHost
+# sets an explicit SSLCipherSuite, and an explicit list overrides the policy's
+# default cipher string. A live DTN accepted ECDHE-RSA-CHACHA20-POLY1305 and
+# DHE-RSA-AES128-GCM-SHA256 there; static RSA key exchange and the SHA1 CBC suites
+# were refused. Everything GCS offers on 443 is forward-secret AEAD, but it isn't
+# limited to the approved list below. Doing that needs a GCS-supported setting.
 #
 # Approved ciphers (IANA → OpenSSL format):
 #   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256  → ECDHE-ECDSA-AES128-GCM-SHA256
