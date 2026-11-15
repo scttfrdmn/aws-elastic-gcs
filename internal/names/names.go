@@ -17,6 +17,11 @@ import (
 // carry both Region and Deployment dimensions (see Dimensions).
 const MetricNamespace = "ElasticGCS"
 
+// DTNMetricNamespace holds metrics DTNs publish about themselves (boot
+// latency). It is separate so the DTN role can be limited to it: DTNs must not
+// be able to forge the demand metrics that drive scaling (#43).
+const DTNMetricNamespace = "ElasticGCS/DTN"
+
 // DefaultDeployment is used when regions.yaml doesn't name a deployment.
 const DefaultDeployment = "default"
 
@@ -108,6 +113,11 @@ const (
 	TagGCSNodeID = "elastic-gcs:gcs-node-id"
 	// Written by the lifecycle Lambda when an instance enters the warm pool.
 	TagWarmPoolEntryTime = "elastic-gcs:warm-pool-entry-time"
+
+	// Instance roles, in the TagRole tag. Lambdas that act on the control node
+	// (or on DTNs) require the matching role tag (#44).
+	RoleControl = "control"
+	RoleDTN     = "dtn"
 
 	// ASG lifecycle hooks (dtn_boot.sh gets HookReady via LIFECYCLE_HOOK).
 	HookReady   = "dtn-ready-hook"

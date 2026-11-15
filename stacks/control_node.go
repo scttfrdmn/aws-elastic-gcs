@@ -401,7 +401,7 @@ fi
 	}
 
 	instance := awsec2.NewInstance(stack, jsii.String("ControlNode"), instanceProps)
-	awscdk.Tags_Of(instance).Add(jsii.String(names.TagRole), jsii.String("control"), nil)
+	awscdk.Tags_Of(instance).Add(jsii.String(names.TagRole), jsii.String(names.RoleControl), nil)
 	s.ControlInstance = instance
 
 	// -------------------------------------------------------------------------
@@ -415,7 +415,7 @@ fi
 	eip := awsec2.NewCfnEIP(stack, jsii.String("ControlNodeEIP"), &awsec2.CfnEIPProps{
 		Tags: &[]*awscdk.CfnTag{
 			{Key: jsii.String("Name"), Value: jsii.String(dep.Resource("control"))},
-			{Key: jsii.String(names.TagRole), Value: jsii.String("control")},
+			{Key: jsii.String(names.TagRole), Value: jsii.String(names.RoleControl)},
 		},
 	})
 

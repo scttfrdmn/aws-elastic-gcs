@@ -62,6 +62,54 @@ func (s iamScope) runShell() []awsiam.PolicyStatement {
 	}
 }
 
+// runShellOnRole is runShell restricted further to instances whose TagRole is
+// role, so a Lambda that targets "the control node" can't be pointed at any
+// other instance through the SSM parameter it reads (#44).
+func (s iamScope) runShellOnRole(role string) []awsiam.PolicyStatement {
+	return []awsiam.PolicyStatement{
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:       jsii.String(s.sid + "RunShellDocument"),
+			Effect:    awsiam.Effect_ALLOW,
+			Actions:   jsii.Strings("ssm:SendCommand"),
+			Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s::document/AWS-RunShellScript", s.region)),
+		}),
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:       jsii.String(s.sid + "RunShellOnRole"),
+			Effect:    awsiam.Effect_ALLOW,
+			Actions:   jsii.Strings("ssm:SendCommand"),
+			Resources: jsii.Strings(s.instanceARN()),
+			Conditions: &map[string]interface{}{
+				"StringEquals": map[string]interface{}{
+					"ssm:resourceTag/" + names.TagDeployment: s.depID,
+					"ssm:resourceTag/" + names.TagRole:       role,
+				},
+			},
+		}),
+		awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+			Sid:       jsii.String(s.sid + "RunShellResults"),
+			Effect:    awsiam.Effect_ALLOW,
+			Actions:   jsii.Strings("ssm:GetCommandInvocation"),
+			Resources: jsii.Strings("*"),
+		}),
+	}
+}
+
+// onRoleInstances is onInstances restricted to instances whose TagRole is role.
+func (s iamScope) onRoleInstances(name, role string, actions ...string) awsiam.PolicyStatement {
+	return awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:       jsii.String(s.sid + name),
+		Effect:    awsiam.Effect_ALLOW,
+		Actions:   jsii.Strings(actions...),
+		Resources: jsii.Strings(s.instanceARN()),
+		Conditions: &map[string]interface{}{
+			"StringEquals": map[string]interface{}{
+				"aws:ResourceTag/" + names.TagDeployment: s.depID,
+				"aws:ResourceTag/" + names.TagRole:       role,
+			},
+		},
+	})
+}
+
 // onInstances allows EC2 instance actions (Start/Stop/Terminate/CreateTags)
 // only on instances of this deployment.
 func (s iamScope) onInstances(name string, actions ...string) awsiam.PolicyStatement {

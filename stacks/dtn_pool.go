@@ -147,9 +147,9 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		Sid:     jsii.String("EC2CreateTags"),
 		Effect:  awsiam.Effect_ALLOW,
 		Actions: jsii.Strings("ec2:CreateTags"),
-		Resources: jsii.Strings(
-			fmt.Sprintf("arn:aws:ec2:%s:%s:instance/*", region, *stack.Account()),
-		),
+		// The instance making the request only (#43): a DTN can't rewrite another
+		// DTN's gcs-node-id tag and misdirect cache-eviction deletes.
+		Resources: jsii.Strings("${ec2:SourceInstanceARN}"),
 		Conditions: &map[string]interface{}{
 			"StringEquals": map[string]interface{}{
 				"ec2:ResourceTag/aws:autoscaling:groupName": asgName,
@@ -160,20 +160,27 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		},
 	}))
 
-	// SSM slot-lock: atomic slot claim (PutParameter without --overwrite) and
-	// release (DeleteParameter) on shutdown. Read access is already covered by
-	// SSMParameterRead below (used to check for an existing lock on restart).
+	// SSM locks (#43). Slot and setup locks are claimed atomically by creating
+	// the parameter, never by overwriting one, so a DTN can't steal a lock it
+	// doesn't hold. DTNs never release slot locks (the lifecycle and
+	// cache-eviction Lambdas do, owner-checked); they release only the setup lock.
 	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
-		Sid:    jsii.String("SlotLockSSM"),
-		Effect: awsiam.Effect_ALLOW,
-		Actions: jsii.Strings(
-			"ssm:PutParameter",
-			"ssm:DeleteParameter",
-		),
+		Sid:     jsii.String("ClaimLocks"),
+		Effect:  awsiam.Effect_ALLOW,
+		Actions: jsii.Strings("ssm:PutParameter"),
 		Resources: jsii.Strings(
 			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s/*", region, dep.ParamPrefix(), names.ParamSlotLock),
 			fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s", region, dep.ParamPrefix(), names.ParamSetupLock),
 		),
+		Conditions: &map[string]interface{}{
+			"StringNotEquals": map[string]interface{}{"ssm:Overwrite": "true"},
+		},
+	}))
+	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
+		Sid:       jsii.String("ReleaseSetupLock"),
+		Effect:    awsiam.Effect_ALLOW,
+		Actions:   jsii.Strings("ssm:DeleteParameter"),
+		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ssm:%s:*:parameter%s/%s", region, dep.ParamPrefix(), names.ParamSetupLock)),
 	}))
 
 	// AutoScaling: signal lifecycle hook completion from boot script, on this
@@ -181,12 +188,16 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 	dtnRole.AddToPolicy(scoped("LifecycleHook").onASG("autoscaling:CompleteLifecycleAction"))
 	dtnRole.AddToPolicy(scoped("LifecycleHook").unscoped("autoscaling:DescribeAutoScalingInstances"))
 
-	// CloudWatch: publish timing and health metrics
+	// CloudWatch: DTNs publish their own boot latency only, in a namespace of
+	// their own, so they can't forge the demand metrics that drive scaling (#43).
 	dtnRole.AddToPolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{
 		Sid:       jsii.String("CloudWatchMetrics"),
 		Effect:    awsiam.Effect_ALLOW,
 		Actions:   jsii.Strings("cloudwatch:PutMetricData"),
 		Resources: jsii.Strings("*"),
+		Conditions: &map[string]interface{}{
+			"StringEquals": map[string]interface{}{"cloudwatch:namespace": names.DTNMetricNamespace},
+		},
 	}))
 
 	// SSM Parameter Store: read endpoint ID and AMI ID
@@ -249,7 +260,7 @@ Environment=METRIC_NAMESPACE=%[9]s
 
 [Install]
 WantedBy=multi-user.target
-`, scriptDir, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots, asgName, names.HookReady, names.MetricNamespace)
+`, scriptDir, region, dep.Name, secretsPrefix, dep.ParamPrefix(), totalSlots, asgName, names.HookReady, names.DTNMetricNamespace)
 	svcB64 := base64.StdEncoding.EncodeToString([]byte(svcContent))
 
 	// Spot interruption monitor — polls IMDS every 5 seconds for a spot
@@ -386,6 +397,9 @@ WantedBy=elastic-gcs-dtn.service
 		asgProps.LaunchTemplate = lt
 	}
 	asg := awsautoscaling.NewAutoScalingGroup(stack, jsii.String("DTNASG"), asgProps)
+	// DTNs carry elastic-gcs:role=dtn (propagated at launch); Lambdas that act on
+	// DTNs require it, and those that act on the control node require "control" (#44).
+	awscdk.Tags_Of(asg).Add(jsii.String(names.TagRole), jsii.String(names.RoleDTN), nil)
 
 	// -------------------------------------------------------------------------
 	// Warm Pool — created via CDK AwsCustomResource (putWarmPool API call).
@@ -453,7 +467,7 @@ WantedBy=elastic-gcs-dtn.service
 				},
 				Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
 					&customresources.SdkCallsPolicyOptions{
-						Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
+						Resources: jsii.Strings(scoped("").asgARN()),
 					}),
 				InstallLatestAwsSdk: jsii.Bool(false),
 			})
@@ -486,7 +500,7 @@ WantedBy=elastic-gcs-dtn.service
 				// to clean up (SpotCleanupCR already removed it).
 				Policy: customresources.AwsCustomResourcePolicy_FromSdkCalls(
 					&customresources.SdkCallsPolicyOptions{
-						Resources: customresources.AwsCustomResourcePolicy_ANY_RESOURCE(),
+						Resources: jsii.Strings(scoped("").asgARN()),
 					}),
 				InstallLatestAwsSdk: jsii.Bool(false),
 			})
@@ -543,10 +557,10 @@ WantedBy=elastic-gcs-dtn.service
 	})
 	// Lifecycle Lambda needs SSM (node disable + slot lock release), ASG (complete hook), EC2 (describe + CreateTags)
 	lc := scoped("Lifecycle")
-	grant(lifecycleFn, lc.runShell()...)
+	grant(lifecycleFn, lc.runShellOnRole(names.RoleDTN)...)
 	grant(lifecycleFn,
 		lc.onASG("autoscaling:CompleteLifecycleAction"),
-		lc.onInstances("TagInstances", "ec2:CreateTags"),
+		lc.onRoleInstances("TagInstances", names.RoleDTN, "ec2:CreateTags"),
 		lc.unscoped(
 			"autoscaling:DescribeAutoScalingInstances",
 			"ssm:GetParameter",
@@ -600,7 +614,7 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	si := scoped("ScaleIn")
-	grant(scaleInFn, si.runShell()...) // re-enable the control node before the last DTN goes (#71)
+	grant(scaleInFn, si.runShellOnRole(names.RoleControl)...) // re-enable the control node before the last DTN goes (#71)
 	grant(scaleInFn,
 		si.onASG("autoscaling:SetDesiredCapacity"),
 		si.unscoped("autoscaling:DescribeAutoScalingGroups", "cloudwatch:GetMetricStatistics", "cloudwatch:PutMetricData",
@@ -624,9 +638,9 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	ce := scoped("CacheEviction")
-	grant(cacheEvictionFn, ce.runShell()...)
+	grant(cacheEvictionFn, ce.runShellOnRole(names.RoleControl)...)
 	grant(cacheEvictionFn,
-		ce.onInstances("TerminateInstances", "ec2:TerminateInstances"),
+		ce.onRoleInstances("TerminateInstances", names.RoleDTN, "ec2:TerminateInstances"),
 		ce.unscoped(
 			"autoscaling:DescribeWarmPool",
 			"autoscaling:DescribeAutoScalingInstances",
@@ -1140,9 +1154,9 @@ WantedBy=elastic-gcs-dtn.service
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
 	wk := scoped("Waker")
-	grant(wakerFn, wk.runShell()...)
+	grant(wakerFn, wk.runShellOnRole(names.RoleControl)...)
 	grant(wakerFn,
-		wk.onInstances("StartInstances", "ec2:StartInstances"),
+		wk.onRoleInstances("StartInstances", names.RoleControl, "ec2:StartInstances"),
 		wk.onASG("autoscaling:SetDesiredCapacity"),
 		wk.unscoped(
 			"ec2:DescribeInstances",
@@ -1199,9 +1213,9 @@ WantedBy=elastic-gcs-dtn.service
 		})
 		idleShutdownFn.AddEnvironment(jsii.String("DEPLOYMENT"), jsii.String(dep.Name), nil)
 		is := scoped("IdleShutdown")
-		grant(idleShutdownFn, is.runShell()...) // node disable before stop (#30)
+		grant(idleShutdownFn, is.runShellOnRole(names.RoleControl)...) // node disable before stop (#30)
 		grant(idleShutdownFn,
-			is.onInstances("StopInstances", "ec2:StopInstances"),
+			is.onRoleInstances("StopInstances", names.RoleControl, "ec2:StopInstances"),
 			is.unscoped(
 				"ec2:DescribeInstances",
 				"ssm:GetParameter",
