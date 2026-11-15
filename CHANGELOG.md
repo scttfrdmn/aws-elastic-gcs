@@ -118,6 +118,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The warm-pool and Spot custom resources are scoped to the deployment's ASG.
   - **Upgrade:** refresh the warm pool after deploying, so existing DTNs get the
     role tag.
+- **Verified installs** (#46). The control node and the AMI builder install
+  their software through `scripts/lib/verified_install.sh`, which fails closed.
+  - The SSM agent comes from the regional bucket, and it and the AWS CLI v2 are
+    checked against detached signatures with pinned keys (`scripts/keys/`, each
+    fingerprint-checked).
+  - EPEL comes from the distribution's own signed `epel-release`.
+  - The Globus repo is defined by this project, with the pinned Globus key and
+    `gpgcheck`/`repo_gpgcheck` on. It used to come from the unverified
+    `globus-repo` RPM's repo file.
+  - The `|| true` fallbacks are gone, and the unused Ubuntu path in the control
+    node setup is removed.
 - **TLS policy enforces the approved list** (#47). The RHEL 9 crypto-policy
   module also removes static RSA key exchange (no forward secrecy) and
   HMAC-SHA1, which DEFAULT still allowed for TLS 1.2 CBC suites. The control

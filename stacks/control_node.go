@@ -1,8 +1,13 @@
 package stacks
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
@@ -314,10 +319,14 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 
 	ud := awsec2.UserData_ForLinux(nil)
 	ud.AddCommands(
-		// Install SSM Agent first so we can connect via Session Manager.
-		// Rocky Linux 9 does not include SSM Agent by default.
-		jsii.String("dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm 2>/dev/null || true"),
-		jsii.String("systemctl enable amazon-ssm-agent && systemctl start amazon-ssm-agent"),
+		jsii.String("set -euo pipefail"),
+		// Verified installs (#46): the SSM agent and AWS CLI are signature-checked
+		// against keys pinned in scripts/keys before anything else runs. The
+		// library and keys are inline because S3 downloads need the AWS CLI.
+		jsii.String(verifiedInstallBootstrap()),
+		jsii.String("source /opt/elastic-gcs/lib/verified_install.sh"),
+		jsii.String(fmt.Sprintf("install_ssm_agent %s", region)),
+		jsii.String("install_aws_cli"),
 		// Environment variables consumed by control_node_init.sh
 		jsii.String(fmt.Sprintf("export AWS_REGION=%q", region)),
 		jsii.String(fmt.Sprintf("export SECRETS_PREFIX=%q", secretsPrefix)),
@@ -334,17 +343,6 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export NETWORK_USE_ARGS=%q", props.Config.NetworkUse.Args())),
 		// JSON-encode the buckets array — shell-safe quoting via printf
 		jsii.String(fmt.Sprintf("export OPEN_DATA_BUCKETS_JSON=%q", string(bucketsJSON))),
-		// The Rocky base AMI has no AWS CLI; install v2 so the init script can
-		// be downloaded from S3.
-		jsii.String(strings.TrimSpace(`
-if ! command -v aws >/dev/null; then
-    dnf install -y unzip
-    curl -sSf https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
-    (cd /tmp && unzip -q awscliv2.zip && ./aws/install)
-    ln -sf /usr/local/bin/aws /usr/bin/aws
-    rm -rf /tmp/aws /tmp/awscliv2.zip
-fi
-`)),
 	)
 	initPath := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
 		Bucket:    initScript.Bucket(),
@@ -495,4 +493,35 @@ fi
 	})
 
 	return s
+}
+
+// verifiedInstallBootstrap returns shell that writes scripts/lib/verified_install.sh
+// and the pinned keys in scripts/keys/ to /opt/elastic-gcs, gzip+base64 encoded
+// to keep UserData small (#46).
+func verifiedInstallBootstrap() string {
+	files := map[string]string{
+		"/opt/elastic-gcs/lib/verified_install.sh":   "scripts/lib/verified_install.sh",
+		"/opt/elastic-gcs/keys/amazon-ssm-agent.asc": "scripts/keys/amazon-ssm-agent.asc",
+		"/opt/elastic-gcs/keys/aws-cli.asc":          "scripts/keys/aws-cli.asc",
+		"/opt/elastic-gcs/keys/globus-2024.asc":      "scripts/keys/globus-2024.asc",
+	}
+	dsts := make([]string, 0, len(files))
+	for dst := range files {
+		dsts = append(dsts, dst)
+	}
+	sort.Strings(dsts)
+	var b strings.Builder
+	b.WriteString("mkdir -p /opt/elastic-gcs/lib /opt/elastic-gcs/keys\n")
+	for _, dst := range dsts {
+		data, err := os.ReadFile(files[dst])
+		if err != nil {
+			panic(fmt.Sprintf("read %s: %v", files[dst], err))
+		}
+		var gz bytes.Buffer
+		w := gzip.NewWriter(&gz)
+		_, _ = w.Write(data)
+		_ = w.Close()
+		fmt.Fprintf(&b, "echo '%s' | base64 -d | gunzip > %s\n", base64.StdEncoding.EncodeToString(gz.Bytes()), dst)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
