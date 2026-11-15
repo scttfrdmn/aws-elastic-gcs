@@ -55,7 +55,7 @@ release:
   footer: |
     ### Install the operator CLI
     ```bash
-    brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux
+    brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux (formula)
     scoop bucket add scttfrdmn https://github.com/scttfrdmn/scoop-bucket
     scoop install aws-elastic-gcs-ctl                      # Windows
     ```
@@ -80,38 +80,35 @@ nfpms:
     section: admin
     bindir: /usr/bin
 
-# Homebrew cask in scttfrdmn/homebrew-tap (Casks/). Skipped when the
-# HOMEBREW_TAP_GITHUB_TOKEN secret isn't set. Linux users can also use the
-# .deb/.rpm packages.
-homebrew_casks:
+# Homebrew formula in scttfrdmn/homebrew-tap (Formula/) and Scoop manifest in
+# scttfrdmn/scoop-bucket, the same setup as scttfrdmn/cargoship: repo secrets
+# HOMEBREW_TAP_GITHUB_TOKEN and SCOOP_BUCKET_GITHUB_TOKEN. A missing token fails
+# the release rather than silently skipping.
+brews:
   - name: aws-elastic-gcs-ctl
     ids: [ctl]
-    binaries: [aws-elastic-gcs-ctl]
     repository:
       owner: scttfrdmn
       name: homebrew-tap
-      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
     homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
     description: Operator CLI for Elastic Globus Connect Server deployments on AWS
-    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
-    hooks:
-      post:
-        # The binary is not notarized; clear the quarantine flag so it runs.
-        install_steps: |
-          on_macos do
-            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/aws-elastic-gcs-ctl"]
-          end
+    license: Apache-2.0
+    skip_upload: auto
+    test: |
+      system "#{bin}/aws-elastic-gcs-ctl", "version"
+    install: |
+      bin.install "aws-elastic-gcs-ctl"
 
-# Scoop manifest in scttfrdmn/scoop-bucket. Skipped when the
-# SCOOP_BUCKET_GITHUB_TOKEN secret isn't set.
 scoops:
   - name: aws-elastic-gcs-ctl
     ids: [ctl]
     repository:
       owner: scttfrdmn
       name: scoop-bucket
-      token: '{{ envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}'
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
     homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
     description: Operator CLI for Elastic Globus Connect Server deployments on AWS
     license: Apache-2.0
-    skip_upload: '{{ if eq (envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
+    skip_upload: auto

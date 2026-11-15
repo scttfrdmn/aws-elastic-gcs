@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The CLI publishes a Homebrew **formula** (`brews`, `Formula/`) instead of a
+  cask, matching `scttfrdmn/homebrew-tap` and `scttfrdmn/cargoship`. A missing tap
+  or bucket token now fails the release instead of silently skipping. Re-running
+  the release workflow for an existing tag uses the default branch's
+  `.goreleaser.yaml`.
+
 ## [0.13.0] - 2026-11-15
 
 Validated live on the us-west-2 `src` and `dst` deployments. Upgrade notes:
