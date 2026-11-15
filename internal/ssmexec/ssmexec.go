@@ -11,6 +11,7 @@ package ssmexec
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -30,6 +31,9 @@ type Options struct {
 	Wait    time.Duration // how long to wait for a result (default 90s)
 	Poll    time.Duration // polling interval (default 3s)
 	Comment string        // SSM command comment (shows in the console)
+	// LogGroup receives the command's output in CloudWatch Logs, so what ran on
+	// an instance is auditable (#48). Default: $SSM_LOG_GROUP.
+	LogGroup string
 }
 
 // Result is the outcome of a command that reached a final state.
@@ -66,6 +70,15 @@ func Run(ctx context.Context, api API, instanceID, script string, opt Options) (
 	}
 	if opt.Comment != "" {
 		in.Comment = aws.String(opt.Comment)
+	}
+	if opt.LogGroup == "" {
+		opt.LogGroup = os.Getenv("SSM_LOG_GROUP")
+	}
+	if opt.LogGroup != "" {
+		in.CloudWatchOutputConfig = &ssmtypes.CloudWatchOutputConfig{
+			CloudWatchLogGroupName:  aws.String(opt.LogGroup),
+			CloudWatchOutputEnabled: true,
+		}
 	}
 	out, err := api.SendCommand(ctx, in)
 	if err != nil {

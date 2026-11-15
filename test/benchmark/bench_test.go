@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
+
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -43,7 +45,6 @@ type benchEnv struct {
 	endpointIDParam  string
 
 	gcsCLIClientID     string
-	gcsCLIClientSecret string
 	gcsEndpointID      string
 
 	cfg       aws.Config
@@ -95,7 +96,6 @@ func newBenchEnv(t *testing.T) *benchEnv {
 		controlNodeParam:   controlNodeParam,
 		endpointIDParam:    endpointIDParam,
 		gcsCLIClientID:     clientID,
-		gcsCLIClientSecret: clientSecret,
 		gcsEndpointID:      gcsEndpointID,
 		cfg:                cfg,
 		asgClient:          autoscaling.NewFromConfig(cfg),
@@ -281,11 +281,9 @@ type gcsNodeListResult struct {
 func (e *benchEnv) countActiveGCSNodes(ctx context.Context, t *testing.T) int {
 	t.Helper()
 	controlID := e.controlNodeID(ctx, t)
-	cmd := fmt.Sprintf(
-		"export GCS_CLI_CLIENT_ID=%s; export GCS_CLI_CLIENT_SECRET=%s; export GCS_CLI_ENDPOINT_ID=%s; "+
-			"sudo -E globus-connect-server node list -F json 2>&1",
-		e.gcsCLIClientID, e.gcsCLIClientSecret, e.gcsEndpointID,
-	)
+	// Credentials are read on the node (gcscli.Preamble), never placed in the
+	// SSM command text, which SSM keeps in its history (#48).
+	cmd := gcscli.Script(e.dep, "globus-connect-server node list -F json 2>&1")
 	raw := e.runSSMCommandSoft(ctx, controlID, cmd)
 	if raw == "" {
 		return 0
@@ -308,11 +306,9 @@ func (e *benchEnv) countActiveGCSNodes(ctx context.Context, t *testing.T) int {
 func (e *benchEnv) waitForGCSNodeActive(ctx context.Context, t *testing.T, baselineActive int, timeout time.Duration) time.Time {
 	t.Helper()
 	controlID := e.controlNodeID(ctx, t)
-	cmd := fmt.Sprintf(
-		"export GCS_CLI_CLIENT_ID=%s; export GCS_CLI_CLIENT_SECRET=%s; export GCS_CLI_ENDPOINT_ID=%s; "+
-			"sudo -E globus-connect-server node list -F json 2>&1",
-		e.gcsCLIClientID, e.gcsCLIClientSecret, e.gcsEndpointID,
-	)
+	// Credentials are read on the node (gcscli.Preamble), never placed in the
+	// SSM command text, which SSM keeps in its history (#48).
+	cmd := gcscli.Script(e.dep, "globus-connect-server node list -F json 2>&1")
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)

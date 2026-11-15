@@ -87,9 +87,11 @@ cp config/regions.example.yaml config/regions.yaml
 aws secretsmanager create-secret \
   --name elastic-gcs/us-east-1/default/globus-client-id \
   --secret-string "<your-automation-client-id>"
+# Read the secret from stdin (paste, then Ctrl-D) so it isn't in your shell
+# history or the process list.
 aws secretsmanager create-secret \
   --name elastic-gcs/us-east-1/default/globus-client-secret \
-  --secret-string "<your-automation-client-secret>"
+  --secret-string file:///dev/stdin
 
 # 4. Deploy
 make deploy-control REGION=us-east-1 DEPLOYMENT=default  # ~10 min (GCS endpoint setup)

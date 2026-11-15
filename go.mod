@@ -2,6 +2,9 @@ module github.com/scttfrdmn/aws-elastic-gcs
 
 go 1.26.0
 
+// Build with a toolchain that has the GO-2026-6859 net/http fix (#48).
+toolchain go1.27.4
+
 require (
 	github.com/aws/aws-cdk-go/awscdk/v2 v2.276.0
 	github.com/aws/aws-lambda-go v1.55.1
