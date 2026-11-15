@@ -1,6 +1,13 @@
 package config
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+	"time"
+)
+
+func ip(n int) *int   { return &n }
+func bp(b bool) *bool { return &b }
 
 func TestResolve(t *testing.T) {
 	cases := []struct {
@@ -45,6 +52,28 @@ func TestResolve(t *testing.T) {
 		}, false},
 		{"network use over 128", RegionConfig{NetworkUse: NetworkUse{MaxConcurrency: 256}}, Defaults{}, nil, true},
 		{"preferred over max", RegionConfig{NetworkUse: NetworkUse{PreferredConcurrency: 64, MaxConcurrency: 32}}, Defaults{}, nil, true},
+		{"slot defaults (balanced)", RegionConfig{MaxDTNs: 8}, Defaults{}, func(r Resolved) bool {
+			return r.Pool == "asg" && r.CostProfile == "balanced" && r.WarmSlots == 2 && r.ControlNode == "always" && r.Dashboard &&
+				r.DrainTimeout == 10*time.Minute && r.ColdTTL == 72*time.Hour && r.UnhealthyAfter == 5*time.Minute &&
+				r.ScaleInIdle == 15*time.Minute && r.MaxRestarts == 2 && len(r.InstanceTypes) == 1 && r.InstanceTypes[0] == "c8in.2xlarge"
+		}, false},
+		{"minimal profile", RegionConfig{MaxDTNs: 4, CostProfile: "minimal"}, Defaults{}, func(r Resolved) bool {
+			return r.WarmSlots == 0 && r.ControlNode == "none" && !r.Dashboard && r.ColdTTL == 24*time.Hour
+		}, false},
+		{"explicit settings beat the profile", RegionConfig{MaxDTNs: 4, CostProfile: "minimal", WarmSlots: ip(1), ControlNode: "on_demand", Dashboard: bp(true), ColdTTL: "6h"}, Defaults{}, func(r Resolved) bool {
+			return r.WarmSlots == 1 && r.ControlNode == "on_demand" && r.Dashboard && r.ColdTTL == 6*time.Hour
+		}, false},
+		{"explicit zero warm slots", RegionConfig{MaxDTNs: 4, WarmSlots: ip(0)}, Defaults{}, func(r Resolved) bool { return r.WarmSlots == 0 }, false},
+		{"profile default clamps to max_dtns", RegionConfig{MaxDTNs: 1}, Defaults{}, func(r Resolved) bool { return r.WarmSlots == 1 }, false},
+		{"legacy cache eviction hours feed cold_ttl", RegionConfig{}, Defaults{CacheEvictionHours: 48}, func(r Resolved) bool { return r.ColdTTL == 48*time.Hour }, false},
+		{"instance type fallback list", RegionConfig{DTNInstance: "c8in.2xlarge", InstanceTypes: []string{"c8in.2xlarge", "m8in.2xlarge", "c8in.4xlarge"}}, Defaults{}, func(r Resolved) bool {
+			return reflect.DeepEqual(r.InstanceTypes, []string{"c8in.2xlarge", "m8in.2xlarge", "c8in.4xlarge"})
+		}, false},
+		{"bad pool", RegionConfig{Pool: "k8s"}, Defaults{}, nil, true},
+		{"bad cost profile", RegionConfig{CostProfile: "cheap"}, Defaults{}, nil, true},
+		{"bad control node", RegionConfig{ControlNode: "sometimes"}, Defaults{}, nil, true},
+		{"warm slots over max", RegionConfig{MaxDTNs: 2, WarmSlots: ip(3)}, Defaults{}, nil, true},
+		{"bad duration", RegionConfig{DrainTimeout: "soon"}, Defaults{}, nil, true},
 		{"bad gcs version", RegionConfig{}, Defaults{GCSVersion: "5.4"}, nil, true},
 		{"bad cidr", RegionConfig{}, Defaults{AdminCIDR: "10.0.0.0/33"}, nil, true},
 		{"world cidr", RegionConfig{}, Defaults{AdminCIDR: "0.0.0.0/0"}, nil, true},

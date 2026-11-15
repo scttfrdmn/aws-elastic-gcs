@@ -48,3 +48,18 @@ regions:
   #     max_concurrency: 128
   #     preferred_parallelism: 8
   #     max_parallelism: 16
+
+  # Slot controller (#65), replacing the ASG and warm pool. Defaults come from
+  # cost_profile (balanced | minimal); explicit settings win. See
+  # docs/configuration.md.
+  #   pool: slots
+  #   cost_profile: balanced      # minimal: ~$0-1/month idle, cold first transfer
+  #   warm_slots: 2
+  #   cold_ttl: 72h
+  #   drain_timeout: 10m
+  #   scale_in_idle: 15m
+  #   unhealthy_after: 5m
+  #   max_restarts: 2
+  #   instance_types: [c8in.2xlarge, m8in.2xlarge]
+  #   control_node: always        # always | on_demand | none
+  #   dashboard: true

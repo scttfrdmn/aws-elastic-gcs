@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Slot-controller and cost settings** in `regions.yaml` (#126).
+  - New settings: `pool`, `cost_profile` (`balanced` | `minimal`), `warm_slots`,
+    `cold_ttl`, `drain_timeout`, `scale_in_idle`, `unhealthy_after`,
+    `max_restarts`, `instance_types` (a fallback list), `control_node`
+    (`always` | `on_demand` | `none`) and `dashboard`.
+  - All are resolved and validated in `config.Resolve` and documented in
+    `docs/configuration.md`.
+  - Profile defaults never exceed `max_dtns`, and explicit settings beat the
+    profile.
 - `internal/slots`: the slot controller's pure decision core (#125, design in
   #65).
   - `Plan(observed, desired, cfg)` returns start, revive, drain, stop, restart,

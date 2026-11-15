@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Defaults are deployment-wide settings from CDK context (cdk.json or -c).
@@ -50,6 +51,35 @@ type Resolved struct {
 	KeyPairName string
 
 	NetworkUse NetworkUse
+
+	// Slot controller (#65, #126).
+	Pool           string // asg | slots
+	CostProfile    string // balanced | minimal
+	WarmSlots      int
+	DrainTimeout   time.Duration
+	ColdTTL        time.Duration
+	UnhealthyAfter time.Duration
+	MaxRestarts    int
+	ScaleInIdle    time.Duration
+	InstanceTypes  []string // DTN types in fallback order; [0] == DTNInstance
+	ControlNode    string   // always | on_demand | none
+	Dashboard      bool
+}
+
+// Cost profiles (#65): presets for the idle-cost settings; any setting given
+// explicitly in regions.yaml wins.
+//
+//	balanced (default): 2 warm slots, control node always on, dashboard.
+//	minimal: no warm slots, no control node, no dashboard: about $0-1/month
+//	         idle, but the first transfer after idle waits for a cold revival.
+var costProfiles = map[string]struct {
+	WarmSlots   int
+	ControlNode string
+	Dashboard   bool
+	ColdTTL     time.Duration
+}{
+	"balanced": {WarmSlots: 2, ControlNode: "always", Dashboard: true, ColdTTL: 72 * time.Hour},
+	"minimal":  {WarmSlots: 0, ControlNode: "none", Dashboard: false, ColdTTL: 24 * time.Hour},
 }
 
 // Default values (docs/instance-sizing.md, docs/configuration.md).
@@ -167,6 +197,72 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 		bad("network_use values must be >= 0")
 	}
 
+	// Slot controller settings (#126).
+	r.Pool = or(rc.Pool, "asg")
+	if r.Pool != "asg" && r.Pool != "slots" {
+		bad("pool %q: want asg or slots", rc.Pool)
+	}
+	r.CostProfile = or(rc.CostProfile, "balanced")
+	prof, ok := costProfiles[r.CostProfile]
+	if !ok {
+		bad("cost_profile %q: want balanced or minimal", rc.CostProfile)
+		prof = costProfiles["balanced"]
+	}
+	r.WarmSlots = min(prof.WarmSlots, r.MaxDTNs) // a profile default never exceeds max_dtns
+	if rc.WarmSlots != nil {
+		r.WarmSlots = *rc.WarmSlots
+	}
+	if r.WarmSlots < 0 || r.WarmSlots > r.MaxDTNs {
+		bad("warm_slots %d: want 0..max_dtns (%d)", r.WarmSlots, r.MaxDTNs)
+	}
+	r.ControlNode = or(rc.ControlNode, prof.ControlNode)
+	if r.ControlNode != "always" && r.ControlNode != "on_demand" && r.ControlNode != "none" {
+		bad("control_node %q: want always, on_demand or none", rc.ControlNode)
+	}
+	r.Dashboard = prof.Dashboard
+	if rc.Dashboard != nil {
+		r.Dashboard = *rc.Dashboard
+	}
+	dur := func(field, v string, def time.Duration) time.Duration {
+		if v == "" {
+			return def
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			bad("%s %q: want a positive duration like 10m or 72h", field, v)
+			return def
+		}
+		return d
+	}
+	coldDefault := prof.ColdTTL
+	if d.CacheEvictionHours > 0 { // legacy elastic-gcs:cacheEvictionHours context
+		coldDefault = time.Duration(d.CacheEvictionHours) * time.Hour
+	}
+	r.DrainTimeout = dur("drain_timeout", rc.DrainTimeout, 10*time.Minute)
+	r.ColdTTL = dur("cold_ttl", rc.ColdTTL, coldDefault)
+	r.UnhealthyAfter = dur("unhealthy_after", rc.UnhealthyAfter, 5*time.Minute)
+	r.ScaleInIdle = dur("scale_in_idle", rc.ScaleInIdle, 15*time.Minute)
+	r.MaxRestarts = 2
+	if rc.MaxRestarts != nil {
+		r.MaxRestarts = *rc.MaxRestarts
+		if r.MaxRestarts < 0 {
+			bad("max_restarts must be >= 0")
+		}
+	}
+	r.InstanceTypes = []string{r.DTNInstance}
+	for _, t := range rc.InstanceTypes {
+		if t = strings.TrimSpace(t); t == "" {
+			bad("instance_types has an empty entry")
+		} else if t != r.DTNInstance {
+			r.InstanceTypes = append(r.InstanceTypes, t)
+		}
+	}
+	if r.Pool == "slots" && r.UseSpot {
+		// Spot is a per-slot launch option under the slot controller; the
+		// warm-pool restriction (Spot forces warm_pool_size 0) doesn't apply.
+		r.WarmPoolSize = 0
+	}
+
 	if !gcsVersionRe.MatchString(r.GCSVersion) {
 		bad("globus:gcsVersion %q is not an exact version like 5.4.101", r.GCSVersion)
 	}
@@ -205,4 +301,10 @@ func or(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// SlotConfig returns the slot reconciler's settings (internal/slots.Config
+// fields), kept here as plain values so config doesn't import the controller.
+func (r Resolved) SlotConfig() (maxDTNs, warmSlots int, drain, coldTTL, unhealthyAfter time.Duration, maxRestarts int) {
+	return r.MaxDTNs, r.WarmSlots, r.DrainTimeout, r.ColdTTL, r.UnhealthyAfter, r.MaxRestarts
 }
