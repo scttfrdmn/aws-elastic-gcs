@@ -62,8 +62,14 @@ Automating this toggle is part of the slot controller (#65).
 - **Extra DTNs** serve additional concurrent tasks.
 - **A task from a default-configured peer** is capped at ~1.1 Gbps, so one DTN
   serves it with room to spare.
-- **Scaling signal:** use the sum of concurrency across active tasks, not
-  aggregate bytes/s (#26). Desired DTNs ≈ ⌈Σ concurrency ÷ 32⌉.
+- **Scaling signal:** the pool scales on aggregate throughput. Each minute,
+  desired DTNs = ⌈Σ `effective_bytes_per_second` ÷ per-DTN threshold⌉, capped at
+  `max_dtns` (#26). The threshold is 70% of one DTN's sustained rate.
+  - It goes to 0 after 15 idle minutes.
+  - `effective_bytes_per_second` is a lifetime average, so the signal lags.
+  - The sum of negotiated concurrency would lead instead (≈ ⌈Σ concurrency ÷ 32⌉).
+    The task document doesn't report it, though; only task events do. It is a
+    candidate signal for the slot controller (#65).
 - **Warm the pool to `max_dtns`.** Only warm instances resume in ~100 s, measured
   until the node is in DNS; cold launches take longer. A stopped warm instance
   costs ~$1.60/month of EBS.

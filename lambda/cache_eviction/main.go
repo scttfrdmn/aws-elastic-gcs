@@ -16,6 +16,7 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/eviction"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
@@ -111,7 +112,7 @@ func handler(ctx context.Context, _ interface{}) error {
 	// Orphan sweep: delete GCS nodes whose EC2 instance no longer exists.
 	// This catches nodes left behind by ABANDON'd lifecycle actions or hard terminates.
 	if controlNodeID != "" && secretsPrefix != "" {
-		if err := sweepOrphanedNodes(ctx, ssmClient, ec2Client, asgClient, controlNodeID, secretsPrefix, region, asgName); err != nil {
+		if err := sweepOrphanedNodes(ctx, ssmClient, ec2Client, controlNodeID, asgName); err != nil {
 			logger.Warn("orphan node sweep failed", "error", err.Error())
 		}
 	} else {
@@ -223,98 +224,72 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 // tag we cannot determine which GCS nodes belong to live instances, so deleting
 // inactive nodes would break their next resume. This guards the transition period
 // until all instances in the pool run a boot script version that sets the tag.
-func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *ec2.Client,
-	asgClient *autoscaling.Client, controlNodeID, secretsPrefix, region, asgName string) error {
+func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *ec2.Client, controlNodeID, asgName string) error {
 
 	logger.Info("starting orphan GCS node sweep")
 
-	// Collect all live ASG instances: active (InService) + warm pool (stopped/pending).
-	var allInstanceIDs []string
-
-	asgOut, err := asgClient.DescribeAutoScalingInstances(ctx, &autoscaling.DescribeAutoScalingInstancesInput{})
-	if err == nil {
-		for _, inst := range asgOut.AutoScalingInstances {
-			if aws.ToString(inst.AutoScalingGroupName) == asgName {
-				allInstanceIDs = append(allInstanceIDs, aws.ToString(inst.InstanceId))
-			}
-		}
-	}
-	warmPoolOut, err := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
-		AutoScalingGroupName: aws.String(asgName),
+	// Every non-terminated instance of this ASG (InService and warm pool), via
+	// its aws:autoscaling:groupName tag, paginated (#52).
+	live := map[string]bool{}
+	pager := ec2.NewDescribeInstancesPaginator(ec2Client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String("tag:aws:autoscaling:groupName"), Values: []string{asgName}},
+			{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+		},
 	})
-	if err == nil {
-		for _, inst := range warmPoolOut.Instances {
-			allInstanceIDs = append(allInstanceIDs, aws.ToString(inst.InstanceId))
-		}
-	}
-
-	// Check every live instance for the gcs-node-id tag.
-	// If any instance is untagged we cannot safely sweep — skip and log.
-	activeNodeIDs := make(map[string]struct{})
-	if len(allInstanceIDs) > 0 {
-		ec2Out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: allInstanceIDs,
-		})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("DescribeInstances for ASG instances failed: %w", err)
+			return fmt.Errorf("DescribeInstances for %s: %w", asgName, err)
 		}
-		for _, r := range ec2Out.Reservations {
+		for _, r := range page.Reservations {
 			for _, inst := range r.Instances {
-				if inst.State.Name == ec2types.InstanceStateNameTerminated {
-					continue
-				}
 				nodeID := gcsNodeIDTag(inst.Tags)
 				if nodeID == "" {
-					logger.Warn("instance has no gcs-node-id tag, skipping orphan sweep to avoid deleting live nodes",
-						"instance", aws.ToString(inst.InstanceId),
-						"state", string(inst.State.Name),
-						"tag", gcsNodeIDTagKey,
-					)
+					// Without the tag we can't tell which node is this instance's;
+					// deleting would break its next resume.
+					logger.Warn("instance has no gcs-node-id tag, skipping orphan sweep",
+						"instance", aws.ToString(inst.InstanceId), "state", string(inst.State.Name))
 					return nil
 				}
-				activeNodeIDs[nodeID] = struct{}{}
-				logger.Info("live instance mapped to GCS node",
-					"instance", aws.ToString(inst.InstanceId),
-					"node", nodeID,
-					"state", string(inst.State.Name),
-				)
+				live[nodeID] = true
 			}
 		}
 	}
 
-	// Get all GCS nodes from the endpoint via SSM on the control node.
+	// The control node isn't a DTN, and when it's out of the data path its node
+	// is inactive: protect it by IP.
+	protected := map[string]bool{}
+	if out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{controlNodeID}}); err == nil {
+		for _, r := range out.Reservations {
+			for _, inst := range r.Instances {
+				if ip := aws.ToString(inst.PublicIpAddress); ip != "" {
+					protected[ip] = true
+				}
+			}
+		}
+	}
+	if len(protected) == 0 {
+		logger.Warn("could not determine the control node's IP, skipping orphan sweep", "instance", controlNodeID)
+		return nil
+	}
+
 	allNodes, err := gcscli.ListNodes(ctx, ssmClient, controlNodeID, dep)
 	if err != nil {
 		return fmt.Errorf("node list via SSM failed: %w", err)
 	}
-	logger.Info("GCS node list retrieved", "total_nodes", len(allNodes))
-
-	// Delete inactive GCS nodes that have no live EC2 instance.
-	var deleted, skipped int
-	for _, node := range allNodes {
-		if node.Active() {
-			skipped++
-			continue // active nodes are always kept (control node + serving DTNs)
-		}
-		if _, ok := activeNodeIDs[node.ID]; ok {
-			logger.Info("inactive node has a live EC2 instance, skipping", "node", node.ID)
-			skipped++
-			continue
-		}
-		logger.Info("deleting orphaned inactive GCS node", "node", node.ID)
-		if err := deleteGCSNode(ctx, ssmClient, controlNodeID, node.ID); err != nil {
-			logger.Warn("failed to delete orphan node", "node", node.ID, "error", err.Error())
+	orphans := eviction.OrphanNodes(allNodes, live, protected)
+	var deleted int
+	for _, id := range orphans {
+		logger.Info("deleting orphaned inactive GCS node", "node", id)
+		if err := deleteGCSNode(ctx, ssmClient, controlNodeID, id); err != nil {
+			logger.Warn("failed to delete orphan node", "node", id, "error", err.Error())
 		} else {
 			deleted++
 		}
 	}
-
-	logger.Info("orphan sweep complete",
-		"total_nodes", len(allNodes),
-		"active_ec2", len(activeNodeIDs),
-		"skipped", skipped,
-		"deleted", deleted,
-	)
+	logger.Info("orphan sweep complete", "total_nodes", len(allNodes), "live_dtns", len(live),
+		"orphans", len(orphans), "deleted", deleted)
 	return nil
 }
 

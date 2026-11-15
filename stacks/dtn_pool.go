@@ -656,10 +656,13 @@ WantedBy=elastic-gcs-dtn.service
 		Timeout:      awscdk.Duration_Minutes(jsii.Number(1)),
 		MemorySize:   jsii.Number(128),
 		Environment: &map[string]*string{
-			"SECRETS_PREFIX":      jsii.String(secretsPrefix),
-			"ENDPOINT_ID_PARAM":   jsii.String(dep.Param(names.ParamEndpointID)),
-			"METRIC_NAMESPACE":    jsii.String(names.MetricNamespace),
-			"WAKER_FUNCTION_NAME": jsii.String(dep.Resource("waker")),
+			"SECRETS_PREFIX":    jsii.String(secretsPrefix),
+			"ENDPOINT_ID_PARAM": jsii.String(dep.Param(names.ParamEndpointID)),
+			"METRIC_NAMESPACE":  jsii.String(names.MetricNamespace),
+			// Demand-driven scale-up (#26): desired = ceil(throughput / threshold).
+			"ASG_NAME":                 jsii.String(asgName),
+			"MAX_DTNS":                 jsii.String(fmt.Sprintf("%d", maxDTNs)),
+			"THROUGHPUT_THRESHOLD_BPS": jsii.String(fmt.Sprintf("%d", throughputThreshold)),
 		},
 		LogRetention: awslogs.RetentionDays_ONE_WEEK,
 	})
@@ -669,10 +672,11 @@ WantedBy=elastic-gcs-dtn.service
 		Actions: jsii.Strings(
 			"ssm:GetParameter",
 			"cloudwatch:PutMetricData",
-			"lambda:InvokeFunction",
+			"autoscaling:DescribeAutoScalingGroups",
 		),
 		Resources: jsii.Strings("*"),
 	}))
+	demandMonitorFn.AddToRolePolicy(scoped("DemandMonitor").onASG("autoscaling:SetDesiredCapacity"))
 	// Globus client credentials: this deployment's secrets only, not every
 	// secret in the account (part of #44).
 	demandMonitorFn.AddToRolePolicy(awsiam.NewPolicyStatement(&awsiam.PolicyStatementProps{

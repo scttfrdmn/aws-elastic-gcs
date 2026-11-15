@@ -19,6 +19,7 @@ import (
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
@@ -39,7 +40,7 @@ type snsEnvelope struct {
 //  1. Unwrap SNS envelope if present (CloudWatch routes alarms through SNS)
 //  2. Check CloudWatch for recent active transfers — skip if transfers detected
 //  3. Get current ASG desired capacity
-//  4. If desired > 0, decrement by 1
+//  4. If desired > 0, set it to 0 (the alarm fires only once per idle period)
 //  5. ASG moves the instance to warm pool (Warmed:Stopped) via ReuseOnScaleIn
 //  6. The lifecycle Lambda handles node disable before the instance stops
 func handler(ctx context.Context, rawEvent json.RawMessage) error {
@@ -81,10 +82,8 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 	})
 	if err != nil {
 		logger.Warn("GetMetricStatistics failed, proceeding with scale-in", "error", err.Error())
-	} else if len(stats.Datapoints) > 0 && aws.ToFloat64(stats.Datapoints[0].Maximum) > 0 {
-		logger.Info("active transfers detected, skipping scale-in",
-			"transfers", aws.ToFloat64(stats.Datapoints[0].Maximum),
-		)
+	} else if scaling.AnyPositive(scaling.Maxima(stats.Datapoints)) {
+		logger.Info("active transfers detected, skipping scale-in")
 		return nil
 	}
 
@@ -109,7 +108,10 @@ func handler(ctx context.Context, rawEvent json.RawMessage) error {
 		return nil
 	}
 
-	newDesired := currentDesired - 1
+	// The alarm fires once, on entering ALARM, so step all the way down (#26):
+	// 15 minutes with no active transfers means no DTN is needed. Stepping by
+	// one left the pool stuck at desired-1 while the alarm stayed in ALARM.
+	newDesired := 0
 
 	// Never leave a running endpoint with zero active nodes (#71). Before the
 	// last DTN goes, make sure a running control node is serving: if it was

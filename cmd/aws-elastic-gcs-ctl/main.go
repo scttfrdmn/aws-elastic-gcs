@@ -42,6 +42,7 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
 )
 
 // toolVersion is set at release time by goreleaser (-X main.toolVersion=...).
@@ -276,8 +277,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			{Name: aws.String("Deployment"), Value: aws.String(dep.Name)},
 		},
 	})
-	if len(stats.Datapoints) > 0 {
-		activeTransfers = aws.ToFloat64(stats.Datapoints[0].Maximum)
+	if stats != nil {
+		for _, v := range scaling.Maxima(stats.Datapoints) {
+			activeTransfers = max(activeTransfers, v)
+		}
 	}
 
 	// Alarm states
