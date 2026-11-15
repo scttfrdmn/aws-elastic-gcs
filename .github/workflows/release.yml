@@ -1,11 +1,11 @@
 # Release the operator CLI on every v* tag: GitHub Release assets (archives,
-# .deb, .rpm, checksums), the Homebrew cask in scttfrdmn/homebrew-tap and the
+# .deb, .rpm, checksums), the Homebrew formula in scttfrdmn/homebrew-tap and the
 # Scoop manifest in scttfrdmn/scoop-bucket. Release notes are the tag's section
 # of CHANGELOG.md.
 #
-# Secrets: HOMEBREW_TAP_GITHUB_TOKEN and SCOOP_BUCKET_GITHUB_TOKEN (fine-grained
-# tokens with contents:write on those repos). Without them the cask/manifest
-# upload is skipped and everything else still publishes.
+# Secrets: HOMEBREW_TAP_GITHUB_TOKEN and SCOOP_BUCKET_GITHUB_TOKEN (tokens with
+# contents:write on scttfrdmn/homebrew-tap and scttfrdmn/scoop-bucket), as in
+# scttfrdmn/cargoship. A missing token fails the formula/manifest step.
 name: release
 
 on:
@@ -28,6 +28,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
+      # Re-publishing an existing tag uses the default branch's release config,
+      # so packaging fixes apply without retagging.
+      - name: Release config from the default branch
+        if: github.event_name == 'workflow_dispatch'
+        run: git checkout origin/${{ github.event.repository.default_branch }} -- .goreleaser.yaml
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
