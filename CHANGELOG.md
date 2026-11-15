@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Packaged operator CLI.** Each `v*` tag publishes `aws-elastic-gcs-ctl`
+  through goreleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`):
+  archives for Linux, macOS and Windows (amd64 and arm64), `.deb` and `.rpm`
+  packages, a Homebrew cask in `scttfrdmn/homebrew-tap` and a Scoop manifest in
+  `scttfrdmn/scoop-bucket`. Release notes come from this file. `aws-elastic-gcs-ctl
+  version` reports the tag; it used to print a hard-coded `v0.6.0`.
+
 ## [0.12.0] - 2026-11-15
 
 Validated live on the us-west-2 `src` and `dst` deployments.

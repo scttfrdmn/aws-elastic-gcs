@@ -26,6 +26,18 @@ Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-s
 
 See [docs/ephemeral-control-node.md](docs/ephemeral-control-node.md) for the full cost breakdown and idle-shutdown configuration.
 
+## Install the operator CLI
+
+```bash
+brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux
+scoop bucket add scttfrdmn https://github.com/scttfrdmn/scoop-bucket
+scoop install aws-elastic-gcs-ctl                      # Windows
+```
+
+`.deb` and `.rpm` packages and archives are attached to each
+[release](https://github.com/scttfrdmn/aws-elastic-gcs/releases). The
+infrastructure itself is deployed from a clone of this repository (below).
+
 ## How It Works
 
 GCS nodes are pre-registered with unique identities stored in AWS Secrets Manager. DTN instances stay stopped in an ASG warm pool, paying only for EBS storage. When Globus transfer demand is detected, a Lambda resumes a stopped instance, runs `node enable`, and the DTN is serving, in endpoint DNS, in about two minutes.

@@ -30,3 +30,4 @@ deployment-key.json
 test/benchmark/harness/bench.env
 site/
 __pycache__/
+dist/
