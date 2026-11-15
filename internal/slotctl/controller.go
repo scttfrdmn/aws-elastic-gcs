@@ -54,6 +54,7 @@ type Env struct {
 	MaxDTNs          int
 	LaunchTemplateID string
 	InstanceTypes    []string // fallback order
+	SubnetIDs        []string // public subnets; slot N uses SubnetIDs[(N-1) % len]
 	RuntimeProfile   string
 	SetupProfile     string
 	SetupRole        string
@@ -109,17 +110,18 @@ func (c *Controller) Gather(ctx context.Context) (slots.Observed, error) {
 		}
 	}
 	online := c.ssmOnline(ctx, running)
-	conns := c.dataConns(ctx, running, online)
+	nodes := c.probeNodes(ctx, running, online)
 
 	probes := map[string]Probe{}
 	now := c.now()
 	for _, in := range insts {
 		id := aws.ToString(in.InstanceId)
-		p := Probe{SSMOnline: online[id], DataConns: conns[id]}
+		p := nodes[id]
+		p.SSMOnline = online[id]
 		p.InDNS = inDNS != nil && inDNS[aws.ToString(in.PublicIpAddress)]
 		probes[id] = p
 		if slices.Contains(running, id) {
-			c.trackHealth(ctx, in, p.SSMOnline && p.InDNS, now)
+			c.trackHealth(ctx, in, p.SSMOnline && p.InDNS && p.GCSActive, now)
 		}
 	}
 	serving := c.controlServing(ctx, inDNS)
@@ -127,16 +129,28 @@ func (c *Controller) Gather(ctx context.Context) (slots.Observed, error) {
 }
 
 // trackHealth sets elastic-gcs:unhealthy-since when a running slot first fails
-// its check, and clears it (and the restart count) once it passes.
+// its check. Once it passes, it clears that and the restart count, and ends a
+// starting or reviving phase, so a later failure is restarted, not rebuilt.
 func (c *Controller) trackHealth(ctx context.Context, in ec2types.Instance, healthy bool, now time.Time) {
 	t := tagMap(in.Tags)
 	id := aws.ToString(in.InstanceId)
-	switch {
-	case !healthy && t[TagUnhealthySince] == "":
-		c.tag(ctx, id, TagUnhealthySince, now.Format(time.RFC3339))
-	case healthy && (t[TagUnhealthySince] != "" || t[TagRestarts] != ""):
-		_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id},
-			Tags: []ec2types.Tag{{Key: aws.String(TagUnhealthySince)}, {Key: aws.String(TagRestarts)}}})
+	if !healthy {
+		if t[TagUnhealthySince] == "" {
+			c.tag(ctx, id, TagUnhealthySince, now.Format(time.RFC3339))
+		}
+		return
+	}
+	var clear []ec2types.Tag
+	for _, k := range []string{TagUnhealthySince, TagRestarts} {
+		if t[k] != "" {
+			clear = append(clear, ec2types.Tag{Key: aws.String(k)})
+		}
+	}
+	if p := slots.Phase(t[TagPhase]); p == slots.Starting || p == slots.Reviving {
+		clear = append(clear, ec2types.Tag{Key: aws.String(TagPhase)}, ec2types.Tag{Key: aws.String(TagPhaseSince)})
+	}
+	if len(clear) > 0 {
+		_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id}, Tags: clear})
 	}
 }
 
@@ -179,21 +193,34 @@ func (c *Controller) ssmOnline(ctx context.Context, ids []string) map[string]boo
 	return m
 }
 
-// dataConnsScript counts established GridFTP data connections.
-const dataConnsScript = `ss -Htn state established '( sport >= :50000 and sport <= :51000 ) or ( dport >= :50000 and dport <= :51000 )' | wc -l`
+// nodeProbeScript prints the established GridFTP data connections, then
+// whether the GCS services are active (GCS 5.4 unit names).
+const nodeProbeScript = `ss -Htn state established '( sport >= :50000 and sport <= :51000 ) or ( dport >= :50000 and dport <= :51000 )' | wc -l
+systemctl is-active --quiet gcs_manager && systemctl is-active --quiet globus-gridftp-server && echo up || echo down`
 
-func (c *Controller) dataConns(ctx context.Context, ids []string, online map[string]bool) map[string]int {
-	m := map[string]int{}
+// probeNodes runs nodeProbeScript on each SSM-online instance.
+func (c *Controller) probeNodes(ctx context.Context, ids []string, online map[string]bool) map[string]Probe {
+	m := map[string]Probe{}
 	for _, id := range ids {
 		if !online[id] {
 			continue
 		}
-		res, err := ssmexec.RunOK(ctx, c.SSM, id, dataConnsScript, ssmexec.Options{Wait: 30 * time.Second, Poll: 2 * time.Second, Comment: "elastic-gcs: count data connections"})
+		res, err := ssmexec.RunOK(ctx, c.SSM, id, nodeProbeScript, ssmexec.Options{Wait: 30 * time.Second, Poll: 2 * time.Second, Comment: "elastic-gcs: probe node"})
 		if err == nil {
-			m[id], _ = strconv.Atoi(strings.TrimSpace(res.Stdout))
+			m[id] = parseNodeProbe(res.Stdout)
 		}
 	}
 	return m
+}
+
+func parseNodeProbe(out string) Probe {
+	f := strings.Fields(out)
+	var p Probe
+	if len(f) > 0 {
+		p.DataConns, _ = strconv.Atoi(f[0])
+	}
+	p.GCSActive = len(f) > 1 && f[1] == "up"
+	return p
 }
 
 func (c *Controller) controlServing(ctx context.Context, inDNS map[string]bool) bool {
@@ -235,6 +262,7 @@ func (c *Controller) Execute(ctx context.Context, a slots.Action) error {
 			return c.withFallback(ctx, in, err)
 		}
 		c.tags(ctx, id, TagPhase, string(slots.Starting), TagPhaseSince, now)
+		c.clearUnhealthy(ctx, id)
 		return nil
 	case slots.BeginDrain:
 		// Local disable: no Globus credentials on the DTN (#42). Then wait for
@@ -264,6 +292,7 @@ func (c *Controller) Execute(ctx context.Context, a slots.Action) error {
 			return c.withFallback(ctx, in, err)
 		}
 		c.tags(ctx, id, TagPhase, string(slots.Starting), TagPhaseSince, now)
+		c.clearUnhealthy(ctx, id) // the unhealthy clock restarts with the instance
 		return nil
 	case slots.Rebuild, slots.Evict:
 		if found {
@@ -320,10 +349,12 @@ func (c *Controller) revive(ctx context.Context, slot int) error {
 	for _, typ := range c.Env.InstanceTypes {
 		out, err := c.EC2.RunInstances(ctx, &ec2.RunInstancesInput{
 			MinCount: aws.Int32(1), MaxCount: aws.Int32(1),
-			LaunchTemplate:     &ec2types.LaunchTemplateSpecification{LaunchTemplateId: aws.String(c.Env.LaunchTemplateID), Version: aws.String("$Latest")},
-			InstanceType:       ec2types.InstanceType(typ),
-			IamInstanceProfile: &ec2types.IamInstanceProfileSpecification{Name: aws.String(c.Env.RuntimeProfile)},
-			TagSpecifications:  []ec2types.TagSpecification{{ResourceType: ec2types.ResourceTypeInstance, Tags: tags}},
+			LaunchTemplate: &ec2types.LaunchTemplateSpecification{LaunchTemplateId: aws.String(c.Env.LaunchTemplateID), Version: aws.String("$Latest")},
+			InstanceType:   ec2types.InstanceType(typ),
+			SubnetId:       c.subnetFor(slot),
+			// The launch template carries the runtime profile; naming it here too
+			// is rejected (InvalidParameterCombination).
+			TagSpecifications: []ec2types.TagSpecification{{ResourceType: ec2types.ResourceTypeInstance, Tags: tags}},
 		})
 		if err == nil {
 			id = aws.ToString(out.Instances[0].InstanceId)
@@ -461,6 +492,10 @@ func (c *Controller) waitSSM(ctx context.Context, id string, max time.Duration) 
 	return fmt.Errorf("instance %s never came online in SSM", id)
 }
 
+func (c *Controller) clearUnhealthy(ctx context.Context, id string) {
+	_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id}, Tags: []ec2types.Tag{{Key: aws.String(TagUnhealthySince)}}})
+}
+
 func (c *Controller) tag(ctx context.Context, id, k, v string) { c.tags(ctx, id, k, v) }
 
 func (c *Controller) tags(ctx context.Context, id string, kv ...string) {
@@ -482,4 +517,12 @@ func (c *Controller) param(ctx context.Context, leaf string) string {
 func (c *Controller) putParam(ctx context.Context, leaf, v string) {
 	_, _ = c.SSM.PutParameter(ctx, &ssm.PutParameterInput{Name: aws.String(c.Env.Dep.Param(leaf)), Value: aws.String(v),
 		Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true)})
+}
+
+// subnetFor spreads slots across the public subnets (and so across AZs).
+func (c *Controller) subnetFor(slot int) *string {
+	if len(c.Env.SubnetIDs) == 0 {
+		return nil
+	}
+	return aws.String(c.Env.SubnetIDs[(slot-1)%len(c.Env.SubnetIDs)])
 }

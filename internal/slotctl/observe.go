@@ -37,6 +37,7 @@ const (
 type Probe struct {
 	SSMOnline bool // SSM agent ping Online
 	InDNS     bool // the slot's EIP is in endpoint DNS
+	GCSActive bool // gcs_manager and globus-gridftp-server are active on the node
 	DataConns int  // established GridFTP data connections (ports 50000-51000)
 }
 
@@ -57,7 +58,9 @@ func SlotFromInstance(inst ec2types.Instance, p Probe, now time.Time) (slots.Slo
 	case "pending", "running":
 		s.Tier = slots.Hot
 		s.DataConns = p.DataConns
-		s.Healthy = state == "running" && p.SSMOnline && p.InDNS
+		// DNS alone isn't enough: a slot's EIP stays in endpoint DNS after its
+		// instance dies without a disable, so the node must also be serving.
+		s.Healthy = state == "running" && p.SSMOnline && p.InDNS && p.GCSActive
 		if !s.Healthy {
 			s.UnhealthyFor = since(t[TagUnhealthySince], now)
 		}

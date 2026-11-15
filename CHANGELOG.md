@@ -72,6 +72,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release workflow for an existing tag uses the default branch's
   `.goreleaser.yaml`.
 
+### Fixed
+- **Slot controller, from the first live run on dst (#132):**
+  - EventBridge targets a `live` alias. Durable functions reject unqualified
+    invokes, and CDK grants no invoke permission for `$LATEST`.
+  - Slots launch in the deployment's public subnets, with the named
+    `dtn-runtime` profile that the controller swaps back to after setup.
+  - A revive whose controller run died is rebuilt after `unhealthy_after`.
+    Before, it counted as serving forever and blocked every other cold revive.
+    A slot that never finishes starting is restarted.
+  - Slot health also requires `gcs_manager` and `globus-gridftp-server` to be
+    active. A slot's Elastic IP can stay in endpoint DNS after its instance
+    dies.
+- `waker` waited for `globus-connect-server-manager`; on GCS 5.4 the unit is
+  `gcs_manager`, so the wait always timed out.
+
 ## [0.13.0] - 2026-11-15
 
 Validated live on the us-west-2 `src` and `dst` deployments. Upgrade notes:

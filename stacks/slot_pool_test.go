@@ -42,6 +42,24 @@ func TestSlotPoolStack(t *testing.T) {
 	tpl.HasResourceProperties(jsii.String("AWS::IAM::InstanceProfile"), map[string]any{"InstanceProfileName": "elastic-gcs-dtn-runtime-us-west-2-tst"})
 	tpl.HasResourceProperties(jsii.String("AWS::IAM::InstanceProfile"), map[string]any{"InstanceProfileName": "elastic-gcs-dtn-setup-us-west-2-tst"})
 
+	// Slots launch with the named runtime profile the controller swaps back to.
+	tpl.ResourceCountIs(jsii.String("AWS::IAM::InstanceProfile"), jsii.Number(2))
+	tpl.HasResourceProperties(jsii.String("AWS::EC2::LaunchTemplate"), map[string]any{
+		"LaunchTemplateData": assertions.Match_ObjectLike(&map[string]any{"IamInstanceProfile": map[string]any{
+			"Arn": map[string]any{"Fn::GetAtt": []any{assertions.Match_StringLikeRegexp(jsii.String("SlotRuntimeProfile")), "Arn"}}}}),
+	})
+
+	// Durable functions reject unqualified invokes: both controller rules must
+	// target the alias, and each needs an invoke permission on it.
+	tpl.HasResourceProperties(jsii.String("AWS::Lambda::Alias"), map[string]any{"Name": "live"})
+	tpl.ResourceCountIs(jsii.String("AWS::Lambda::Permission"), jsii.Number(3)) // 2 controller rules + demand monitor
+	for _, rule := range []string{"elastic-gcs-slot-controller-us-west-2-tst", "elastic-gcs-slot-desired-us-west-2-tst"} {
+		tpl.HasResourceProperties(jsii.String("AWS::Events::Rule"), map[string]any{
+			"Name":    rule,
+			"Targets": assertions.Match_ArrayWith(&[]any{assertions.Match_ObjectLike(&map[string]any{"Arn": map[string]any{"Ref": assertions.Match_StringLikeRegexp(jsii.String("SlotControllerLive"))}})}),
+		})
+	}
+
 	// Secret access: setup role only.
 	raw, _ := json.Marshal(tpl.ToJSON())
 	var doc struct {

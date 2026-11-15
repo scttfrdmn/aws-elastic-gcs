@@ -148,6 +148,7 @@ func main() {
 			Dep: dep, MaxDTNs: cfg.MaxDTNs,
 			LaunchTemplateID: os.Getenv("LAUNCH_TEMPLATE_ID"),
 			InstanceTypes:    strings.Split(os.Getenv("INSTANCE_TYPES"), ","),
+			SubnetIDs:        strings.Split(os.Getenv("SUBNET_IDS"), ","),
 			RuntimeProfile:   os.Getenv("RUNTIME_PROFILE"),
 			SetupProfile:     os.Getenv("SETUP_PROFILE"),
 			SetupRole:        os.Getenv("SETUP_ROLE"),
