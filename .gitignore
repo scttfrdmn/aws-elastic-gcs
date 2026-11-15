@@ -33,3 +33,4 @@ __pycache__/
 dist/
 node-slot*.json
 dtn-slot*.json
+.claude/worktrees/
