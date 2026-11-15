@@ -22,7 +22,7 @@ All work is tracked in GitHub:
   - v0.12: operational & security fixes
   - v0.13: refactor, test coverage & hardening
   - v0.14: slot controller replacing the ASG + warm pool (#65)
-- **Releases:** tags and GitHub Releases match `CHANGELOG.md` (latest: v0.11.0)
+- **Releases:** tags and GitHub Releases match `CHANGELOG.md`
 - **Site:** https://scttfrdmn.github.io/aws-elastic-gcs/ (built from `docs/` on every push to `main`)
 
 ## Key Repositories
