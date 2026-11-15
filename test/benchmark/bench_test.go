@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -355,40 +357,8 @@ func (e *benchEnv) runSSMCommandSoft(ctx context.Context, instanceID, cmd string
 
 // sendSSMCommand sends an SSM RunCommand and waits for completion.
 func (e *benchEnv) sendSSMCommand(ctx context.Context, instanceID, cmd string) (string, error) {
-	out, err := e.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{instanceID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {cmd},
-			"executionTimeout": {"60"},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("SendCommand: %w", err)
-	}
-	cmdID := aws.ToString(out.Command.CommandId)
-
-	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
-		inv, err := e.ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(cmdID),
-			InstanceId: aws.String(instanceID),
-		})
-		if err != nil {
-			continue
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			return strings.TrimSpace(aws.ToString(inv.StandardOutputContent)), nil
-		case ssmtypes.CommandInvocationStatusFailed,
-			ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled:
-			return "", fmt.Errorf("status=%s stderr=%s",
-				inv.Status, aws.ToString(inv.StandardErrorContent))
-		}
-	}
-	return "", fmt.Errorf("timed out waiting for SSM command")
+	res, err := ssmexec.RunOK(ctx, e.ssmClient, instanceID, cmd, ssmexec.Options{Wait: 2 * time.Minute})
+	return strings.TrimSpace(res.Stdout), err
 }
 
 // submitTestTransfer submits a transfer via the `globus` CLI and returns the task ID.

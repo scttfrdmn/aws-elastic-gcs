@@ -15,10 +15,10 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 func handler(ctx context.Context) error {
@@ -182,36 +182,13 @@ func handler(ctx context.Context) error {
 // disableNode runs `node disable` on the control node via SSM, waits for its IP
 // to leave endpoint DNS (bounded), and waits for the command to finish.
 func disableNode(ctx context.Context, client *ssm.Client, instanceID string) error {
-	const script = `/opt/elastic-gcs/scripts/control_node_boot.sh stop`
-	out, err := client.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:    []string{instanceID},
-		DocumentName:   aws.String("AWS-RunShellScript"),
-		Parameters:     map[string][]string{"commands": {script}, "executionTimeout": {"300"}},
-		TimeoutSeconds: aws.Int32(60),
-	})
+	res, err := ssmexec.RunOK(ctx, client, instanceID, "/opt/elastic-gcs/scripts/control_node_boot.sh stop",
+		ssmexec.Options{Wait: 4 * time.Minute, Poll: 5 * time.Second, Comment: "elastic-gcs: disable control node before idle stop"})
 	if err != nil {
-		return fmt.Errorf("SendCommand: %w", err)
+		return err
 	}
-	cmdID := aws.ToString(out.Command.CommandId)
-	deadline := time.Now().Add(4 * time.Minute)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		inv, err := client.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId: aws.String(cmdID), InstanceId: aws.String(instanceID),
-		})
-		if err != nil {
-			continue // invocation not registered yet
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			logger.Info("control node disabled", "output", aws.ToString(inv.StandardOutputContent))
-			return nil
-		case ssmtypes.CommandInvocationStatusFailed, ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled:
-			return fmt.Errorf("command %s: %s", inv.Status, aws.ToString(inv.StandardErrorContent))
-		}
-	}
-	return fmt.Errorf("command %s did not finish in time", cmdID)
+	logger.Info("control node disabled", "output", res.Stdout)
+	return nil
 }
 
 // dep identifies this deployment; set in main from AWS_REGION and DEPLOYMENT.

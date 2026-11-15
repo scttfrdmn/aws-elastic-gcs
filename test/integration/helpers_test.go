@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -19,7 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	sdkauth "github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/auth"
 	"github.com/scttfrdmn/globus-go-sdk/v3/pkg/services/transfer"
@@ -284,43 +285,11 @@ func (e *testEnv) warmPoolCount(ctx context.Context) int {
 // and returns stdout. Fails the test on error or non-zero exit.
 func (e *testEnv) runSSMCommand(ctx context.Context, t *testing.T, instanceID, cmd string) string {
 	t.Helper()
-	out, err := e.ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{instanceID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {cmd},
-			"executionTimeout": {"60"},
-		},
-	})
+	res, err := ssmexec.RunOK(ctx, e.ssmClient, instanceID, cmd, ssmexec.Options{Wait: 2 * time.Minute})
 	if err != nil {
-		t.Fatalf("SSM SendCommand on %s: %v", instanceID, err)
+		t.Fatalf("SSM command %q on %s: %v", cmd, instanceID, err)
 	}
-	cmdID := aws.ToString(out.Command.CommandId)
-
-	// Poll for result.
-	deadline := time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		time.Sleep(3 * time.Second)
-		inv, err := e.ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(cmdID),
-			InstanceId: aws.String(instanceID),
-		})
-		if err != nil {
-			continue
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			return strings.TrimSpace(aws.ToString(inv.StandardOutputContent))
-		case ssmtypes.CommandInvocationStatusFailed,
-			ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled:
-			t.Fatalf("SSM command %q on %s: status=%s stderr=%s",
-				cmd, instanceID, inv.Status,
-				aws.ToString(inv.StandardErrorContent))
-		}
-	}
-	t.Fatalf("timed out waiting for SSM command %q on %s", cmd, instanceID)
-	return ""
+	return strings.TrimSpace(res.Stdout)
 }
 
 // gcsNodeStatus holds the fields we care about from `node list -F json`.

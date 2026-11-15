@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **One SSM command runner** (#51). `internal/ssmexec` replaces seven
+  hand-rolled SendCommand/poll loops in the Lambdas, the CLI and the test
+  helpers.
+  - It honours the context deadline. The command's execution timeout follows the
+    wait time.
+  - A `Failed` command is now a result, not an error, and each caller decides
+    what that means. Before, the copies disagreed: some treated `Failed` as
+    success.
+  - `internal/gcscli` holds the shared credential preamble, node-list parsing and
+    UUID-validated node deletion. Node lists now read every result page, not just
+    the first.
+  - The waker waits for the GCS Manager with one on-node loop instead of an SSM
+    round trip every 5 s.
+
 ### Added
 - **Packaged operator CLI.** Each `v*` tag publishes `aws-elastic-gcs-ctl`
   through goreleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`):

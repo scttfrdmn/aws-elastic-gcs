@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -16,9 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
-	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcscli"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
@@ -27,17 +25,6 @@ const (
 	warmPoolEntryTagKey = "elastic-gcs:warm-pool-entry-time"
 	gcsNodeIDTagKey     = "elastic-gcs:gcs-node-id"
 )
-
-// gcsNodeResult is a subset of the `node list -F json` output.
-// Full shape: [{"code":"success","data":[{"id":"...","status":"active/inactive",...}],...}]
-type gcsNodeResult struct {
-	Data []gcsNode `json:"data"`
-}
-
-type gcsNode struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-}
 
 // handler terminates warm pool instances that have been stopped too long,
 // deletes their GCS node registrations, and sweeps any other orphaned nodes.
@@ -214,7 +201,7 @@ func evictStaleInstances(ctx context.Context, ec2Client *ec2.Client, ssmClient *
 						"node", nodeID,
 						"instance", instanceID,
 					)
-					if err := deleteGCSNode(ctx, ssmClient, controlNodeID, secretsPrefix, region, nodeID); err != nil {
+					if err := deleteGCSNode(ctx, ssmClient, controlNodeID, nodeID); err != nil {
 						logger.Warn("GCS node delete failed, will be caught by orphan sweep",
 							"node", nodeID,
 							"error", err.Error(),
@@ -302,23 +289,16 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 	}
 
 	// Get all GCS nodes from the endpoint via SSM on the control node.
-	nodeListJSON, err := runGCSCLI(ctx, ssmClient, controlNodeID, secretsPrefix, region,
-		"globus-connect-server node list -F json 2>/dev/null")
+	allNodes, err := gcscli.ListNodes(ctx, ssmClient, controlNodeID, dep)
 	if err != nil {
 		return fmt.Errorf("node list via SSM failed: %w", err)
 	}
-
-	var results []gcsNodeResult
-	if err := json.Unmarshal([]byte(nodeListJSON), &results); err != nil || len(results) == 0 {
-		return fmt.Errorf("failed to parse node list JSON (output: %.200s): %w", nodeListJSON, err)
-	}
-	allNodes := results[0].Data
 	logger.Info("GCS node list retrieved", "total_nodes", len(allNodes))
 
 	// Delete inactive GCS nodes that have no live EC2 instance.
 	var deleted, skipped int
 	for _, node := range allNodes {
-		if node.Status == "active" {
+		if node.Active() {
 			skipped++
 			continue // active nodes are always kept (control node + serving DTNs)
 		}
@@ -328,7 +308,7 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 			continue
 		}
 		logger.Info("deleting orphaned inactive GCS node", "node", node.ID)
-		if err := deleteGCSNode(ctx, ssmClient, controlNodeID, secretsPrefix, region, node.ID); err != nil {
+		if err := deleteGCSNode(ctx, ssmClient, controlNodeID, node.ID); err != nil {
 			logger.Warn("failed to delete orphan node", "node", node.ID, "error", err.Error())
 		} else {
 			deleted++
@@ -348,78 +328,14 @@ func sweepOrphanedNodes(ctx context.Context, ssmClient *ssm.Client, ec2Client *e
 // nodeID comes from the elastic-gcs:gcs-node-id EC2 tag (writable by DTNs) or
 // from GCS CLI output, and is interpolated into a root shell command, so it
 // must be validated as a UUID first.
-func deleteGCSNode(ctx context.Context, ssmClient *ssm.Client,
-	controlNodeID, secretsPrefix, region, nodeID string) error {
-
-	if err := gcsid.Validate(nodeID); err != nil {
-		logger.Error("refusing to delete GCS node with invalid ID", "error", err.Error())
-		return err
-	}
-	out, err := runGCSCLI(ctx, ssmClient, controlNodeID, secretsPrefix, region,
-		fmt.Sprintf("globus-connect-server node delete %s 2>&1 || true", nodeID))
+func deleteGCSNode(ctx context.Context, ssmClient *ssm.Client, controlNodeID, nodeID string) error {
+	out, err := gcscli.DeleteNode(ctx, ssmClient, controlNodeID, dep, nodeID)
 	if err != nil {
+		logger.Error("node delete failed", "node", nodeID, "error", err.Error())
 		return err
 	}
 	logger.Info("node delete completed", "node", nodeID, "output", strings.TrimSpace(out))
 	return nil
-}
-
-// runGCSCLI sends an SSM Run Command to the control node that authenticates
-// the GCS CLI via Secrets Manager credentials and runs the provided command.
-// Returns the command's stdout.
-func runGCSCLI(ctx context.Context, ssmClient *ssm.Client,
-	controlNodeID, secretsPrefix, region, gcsCommand string) (string, error) {
-
-	script := fmt.Sprintf(`
-export GCS_CLI_CLIENT_ID=$(aws secretsmanager get-secret-value \
-    --secret-id %s/globus-client-id \
-    --query SecretString --output text --region %s 2>/dev/null)
-export GCS_CLI_CLIENT_SECRET=$(aws secretsmanager get-secret-value \
-    --secret-id %s/globus-client-secret \
-    --query SecretString --output text --region %s 2>/dev/null)
-export GCS_CLI_ENDPOINT_ID=$(aws ssm get-parameter \
-    --name %s \
-    --query Parameter.Value --output text --region %s 2>/dev/null)
-%s`, secretsPrefix, region, secretsPrefix, region, dep.Param(names.ParamEndpointID), region, gcsCommand)
-
-	cmdOut, err := ssmClient.SendCommand(ctx, &ssm.SendCommandInput{
-		InstanceIds:  []string{controlNodeID},
-		DocumentName: aws.String("AWS-RunShellScript"),
-		Parameters: map[string][]string{
-			"commands":         {script},
-			"executionTimeout": {"60"},
-		},
-		Comment: aws.String("elastic-gcs: GCS node cleanup"),
-	})
-	if err != nil {
-		return "", fmt.Errorf("SSM SendCommand failed: %w", err)
-	}
-
-	commandID := aws.ToString(cmdOut.Command.CommandId)
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		inv, err := ssmClient.GetCommandInvocation(ctx, &ssm.GetCommandInvocationInput{
-			CommandId:  aws.String(commandID),
-			InstanceId: aws.String(controlNodeID),
-		})
-		if err != nil {
-			continue
-		}
-		switch inv.Status {
-		case ssmtypes.CommandInvocationStatusSuccess:
-			return aws.ToString(inv.StandardOutputContent), nil
-		case ssmtypes.CommandInvocationStatusFailed:
-			return aws.ToString(inv.StandardOutputContent),
-				fmt.Errorf("SSM command failed: %s", aws.ToString(inv.StandardErrorContent))
-		case ssmtypes.CommandInvocationStatusTimedOut,
-			ssmtypes.CommandInvocationStatusCancelled,
-			ssmtypes.CommandInvocationStatusCancelling:
-			return "", fmt.Errorf("SSM command in terminal state: %s", inv.Status)
-		}
-		// Pending / InProgress — keep polling
-	}
-	return "", fmt.Errorf("timed out waiting for SSM command %s", commandID)
 }
 
 // gcsNodeIDTag returns the elastic-gcs:gcs-node-id EC2 tag value, or "".
