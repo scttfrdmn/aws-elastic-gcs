@@ -44,7 +44,8 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
-const toolVersion = "v0.6.0"
+// toolVersion is set at release time by goreleaser (-X main.toolVersion=...).
+var toolVersion = "dev"
 
 // Well-known collection and endpoint IDs for test transfers.
 const (

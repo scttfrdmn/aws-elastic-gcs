@@ -1,0 +1,47 @@
+# Release the operator CLI on every v* tag: GitHub Release assets (archives,
+# .deb, .rpm, checksums), the Homebrew cask in scttfrdmn/homebrew-tap and the
+# Scoop manifest in scttfrdmn/scoop-bucket. Release notes are the tag's section
+# of CHANGELOG.md.
+#
+# Secrets: HOMEBREW_TAP_GITHUB_TOKEN and SCOOP_BUCKET_GITHUB_TOKEN (fine-grained
+# tokens with contents:write on those repos). Without them the cask/manifest
+# upload is skipped and everything else still publishes.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)publish packages for, e.g. v0.12.0
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Release notes from CHANGELOG.md
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          awk -v v="${tag#v}" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          test -s "$RUNNER_TEMP/notes.md" || { echo "::error::no CHANGELOG.md section for $tag"; exit 1; }
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean --release-notes ${{ runner.temp }}/notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}

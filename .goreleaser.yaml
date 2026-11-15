@@ -1,0 +1,117 @@
+# Release packaging for the operator CLI, aws-elastic-gcs-ctl.
+# Runs from .github/workflows/release.yml on every v* tag. The infrastructure
+# itself (CDK app, Lambdas, scripts) is deployed from a clone, not packaged.
+version: 2
+
+project_name: aws-elastic-gcs
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: ctl
+    main: ./cmd/aws-elastic-gcs-ctl
+    binary: aws-elastic-gcs-ctl
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.toolVersion={{ .Tag }}
+
+archives:
+  - id: ctl
+    ids: [ctl]
+    formats: [tar.gz]
+    name_template: >-
+      aws-elastic-gcs-ctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# Release notes come from CHANGELOG.md (--release-notes in the workflow).
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: scttfrdmn
+    name: aws-elastic-gcs
+  prerelease: auto
+  mode: keep-existing
+  footer: |
+    ### Install the operator CLI
+    ```bash
+    brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux
+    scoop bucket add scttfrdmn https://github.com/scttfrdmn/scoop-bucket
+    scoop install aws-elastic-gcs-ctl                      # Windows
+    ```
+    `.deb` and `.rpm` packages and plain archives are attached below; verify them
+    with `checksums.txt`. The infrastructure is deployed from a clone of this
+    repository (see the README).
+
+    **Full changelog:** https://github.com/scttfrdmn/aws-elastic-gcs/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+nfpms:
+  - id: packages
+    ids: [ctl]
+    package_name: aws-elastic-gcs-ctl
+    file_name_template: >-
+      aws-elastic-gcs-ctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [deb, rpm]
+    vendor: Scott Friedman
+    maintainer: Scott Friedman <scttfrdmn@users.noreply.github.com>
+    homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
+    description: Operator CLI for Elastic Globus Connect Server deployments on AWS
+    license: Apache-2.0
+    section: admin
+    bindir: /usr/bin
+
+# Homebrew cask in scttfrdmn/homebrew-tap (Casks/). Skipped when the
+# HOMEBREW_TAP_GITHUB_TOKEN secret isn't set. Linux users can also use the
+# .deb/.rpm packages.
+homebrew_casks:
+  - name: aws-elastic-gcs-ctl
+    ids: [ctl]
+    binaries: [aws-elastic-gcs-ctl]
+    repository:
+      owner: scttfrdmn
+      name: homebrew-tap
+      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
+    homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
+    description: Operator CLI for Elastic Globus Connect Server deployments on AWS
+    skip_upload: '{{ if eq (envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
+    hooks:
+      post:
+        # The binary is not notarized; clear the quarantine flag so it runs.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/aws-elastic-gcs-ctl"]
+          end
+
+# Scoop manifest in scttfrdmn/scoop-bucket. Skipped when the
+# SCOOP_BUCKET_GITHUB_TOKEN secret isn't set.
+scoops:
+  - name: aws-elastic-gcs-ctl
+    ids: [ctl]
+    repository:
+      owner: scttfrdmn
+      name: scoop-bucket
+      token: '{{ envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}'
+    homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
+    description: Operator CLI for Elastic Globus Connect Server deployments on AWS
+    license: Apache-2.0
+    skip_upload: '{{ if eq (envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "") "" }}true{{ else }}auto{{ end }}'
