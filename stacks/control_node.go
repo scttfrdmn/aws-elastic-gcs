@@ -20,8 +20,9 @@ import (
 // Globus-specific settings come from CDK context (cdk.json or -c flags).
 type ControlNodeStackProps struct {
 	awscdk.StackProps
-	Deployment      names.Deployment
-	RegionConfig    config.RegionConfig
+	Deployment names.Deployment
+	// Config is the resolved, validated deployment config (config.Resolve).
+	Config          config.Resolved
 	OpenDataBuckets []config.OpenDataBucket
 
 	// Globus endpoint configuration
@@ -29,18 +30,6 @@ type ControlNodeStackProps struct {
 	GlobusOwnerIdentity  string // Globus identity of endpoint owner (e.g. user@globus.org)
 	EndpointDisplayName  string // Human-readable endpoint name
 	OrganizationName     string // Organization shown in Globus endpoint listing
-
-	// AdminCIDR opens SSH (22) to this CIDR. Empty (the default) means no SSH
-	// ingress at all; use SSM Session Manager.
-	AdminCIDR string
-
-	// MaxDTNs is the maximum number of simultaneously active DTN nodes.
-	// TOTAL_SLOTS = MaxDTNs + WarmPoolSize identities are pre-created.
-	MaxDTNs int
-
-	// GCSVersion is the exact globus-connect-server54 package version to install
-	// (e.g. "5.4.101"). Must match the DTN AMI built by scripts/build_ami.sh.
-	GCSVersion string
 }
 
 // ControlNodeStack is the CDK stack for the GCS control node.
@@ -156,9 +145,9 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 
 	// SSH only when an admin CIDR is configured (#35). Access is normally via
 	// SSM Session Manager; there is no SSH ingress by default.
-	if props.AdminCIDR != "" {
+	if props.Config.AdminCIDR != "" {
 		sg.AddIngressRule(
-			awsec2.Peer_Ipv4(jsii.String(props.AdminCIDR)),
+			awsec2.Peer_Ipv4(jsii.String(props.Config.AdminCIDR)),
 			awsec2.Port_Tcp(jsii.Number(22)),
 			jsii.String("SSH admin access"),
 			jsii.Bool(false),
@@ -313,10 +302,10 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export ORGANIZATION_NAME=%q", orgName)),
 		jsii.String(fmt.Sprintf("export GLOBUS_OWNER_IDENTITY=%q", props.GlobusOwnerIdentity)),
 		jsii.String(fmt.Sprintf("export GLOBUS_SUBSCRIPTION_ID=%q", props.GlobusSubscriptionID)),
-		jsii.String(fmt.Sprintf("export GCS_VERSION=%q", props.GCSVersion)),
-		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.RegionConfig.WarmPoolSize)),
+		jsii.String(fmt.Sprintf("export GCS_VERSION=%q", props.Config.GCSVersion)),
+		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.Config.WarmPoolSize)),
 		// TOTAL_SLOTS = maxDTNs + warmPoolSize: every EIP slot needs a node identity.
-		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.MaxDTNs+props.RegionConfig.WarmPoolSize)),
+		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.Config.TotalSlots)),
 		// JSON-encode the buckets array — shell-safe quoting via printf
 		jsii.String(fmt.Sprintf("export OPEN_DATA_BUCKETS_JSON=%q", string(bucketsJSON))),
 		// The Rocky base AMI has no AWS CLI; install v2 so the init script can
@@ -367,10 +356,7 @@ fi
 	// Note: t4g (Graviton) is NOT usable until Globus publishes aarch64 EL9 packages.
 	// Instance type comes from regions.yaml (control_instance field).
 	// -------------------------------------------------------------------------
-	controlInstanceStr := props.RegionConfig.ControlInstance
-	if controlInstanceStr == "" {
-		controlInstanceStr = "t3a.large"
-	}
+	controlInstanceStr := props.Config.ControlInstance
 	// Rocky Linux 9 public AMIs from RESF (Rocky Enterprise Software Foundation).
 	// Owner 792107900819 publishes official Rocky Linux AMIs without Marketplace subscription.
 	ami := awsec2.MachineImage_Lookup(&awsec2.LookupMachineImageProps{
@@ -405,10 +391,10 @@ fi
 	}
 
 	// Key pair is optional — Session Manager access works without one
-	if props.RegionConfig.KeyPairName != "" {
+	if props.Config.KeyPairName != "" {
 		instanceProps.KeyPair = awsec2.KeyPair_FromKeyPairName(
 			stack, jsii.String("KeyPair"),
-			jsii.String(props.RegionConfig.KeyPairName),
+			jsii.String(props.Config.KeyPairName),
 		)
 	}
 

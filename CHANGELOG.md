@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the first.
   - The waker waits for the GCS Manager with one on-node loop instead of an SSM
     round trip every 5 s.
+- **One config resolver** (#49). `config.Resolve` turns a `regions.yaml` entry
+  plus CDK context into every derived value: warm pool, max DTNs, total slots,
+  TTL, throughput threshold, idle settings, instance types and GCS version. Both
+  stacks take only that result, so they can't disagree on slot counts.
+  - It validates input: exact GCS version, a real CIDR (and refuses
+    `0.0.0.0/0`), non-negative sizes and a numeric Spot price.
+  - Integer CDK context values are parsed with errors reported. They used to go
+    through `fmt.Sscanf` with errors ignored.
+  - With Spot, the warm pool counts as 0 slots.
+  - Templates for the existing deployments are unchanged.
 - **Shared names** (#50).
   - Tag keys, lifecycle hook names and the metric namespace come from
     `internal/names`. `dtn_boot.sh` receives them through the systemd unit
