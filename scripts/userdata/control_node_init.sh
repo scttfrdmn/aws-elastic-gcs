@@ -238,6 +238,17 @@ if globus-connect-server endpoint role create administrator "$GLOBUS_CLIENT_ID" 
 else
     OWNER_STEPS=true
 fi
+# Network use (#56): Transfer gives each task the lower of the two endpoints'
+# max concurrency, and Globus's default ("normal") is 4. Needs the role above.
+if [ -n "${NETWORK_USE_ARGS:-}" ]; then
+    # shellcheck disable=SC2086  # NETWORK_USE_ARGS is a list of flags
+    if [ "$OWNER_STEPS" = false ] && globus-connect-server endpoint update $NETWORK_USE_ARGS >/dev/null 2>&1; then
+        echo ">>> Endpoint network use set: $NETWORK_USE_ARGS"
+    else
+        echo ">>> After the owner steps below, set network use with:"
+        echo ">>>   aws-elastic-gcs-ctl endpoint network-use --apply --region $AWS_REGION --deployment <deployment>"
+    fi
+fi
 if [ "$OWNER_STEPS" = true ]; then
     echo ">>> ACTION REQUIRED (endpoint owner, $GLOBUS_OWNER_IDENTITY):"
     echo ">>>   globus login --gcs $ENDPOINT_ID"

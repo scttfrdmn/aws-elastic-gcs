@@ -106,6 +106,7 @@ func init() {
 	rootCmd.AddCommand(buildAMICmd())
 	rootCmd.AddCommand(collectionsCmd())
 	rootCmd.AddCommand(deprovisionCmd())
+	rootCmd.AddCommand(endpointCmd())
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "version",
 		Short: "Print version",
@@ -150,7 +151,11 @@ func endpointIDParamPath() string    { return dep.Param(names.ParamEndpointID) }
 // runGCSCLIOnControlNode sends an SSM command to the control node that sets
 // up GCS CLI auth from Secrets Manager and runs the given GCS command.
 func runGCSCLIOnControlNode(ctx context.Context, ssmClient *ssm.Client, controlNodeID, gcsCmd string) (string, error) {
-	return gcscli.Run(ctx, ssmClient, controlNodeID, dep, gcsCmd, 90*time.Second)
+	return runGCSCLIOnControlNodeWait(ctx, ssmClient, controlNodeID, gcsCmd, 90*time.Second)
+}
+
+func runGCSCLIOnControlNodeWait(ctx context.Context, ssmClient *ssm.Client, controlNodeID, gcsCmd string, wait time.Duration) (string, error) {
+	return gcscli.Run(ctx, ssmClient, controlNodeID, dep, gcsCmd, wait)
 }
 
 // listGCSNodes lists the endpoint's nodes via the control node.

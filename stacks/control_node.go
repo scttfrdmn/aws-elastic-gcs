@@ -306,6 +306,8 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.Config.WarmPoolSize)),
 		// TOTAL_SLOTS = maxDTNs + warmPoolSize: every EIP slot needs a node identity.
 		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.Config.TotalSlots)),
+		// Endpoint network use (#56): set during setup when the service account has a role.
+		jsii.String(fmt.Sprintf("export NETWORK_USE_ARGS=%q", props.Config.NetworkUse.Args())),
 		// JSON-encode the buckets array — shell-safe quoting via printf
 		jsii.String(fmt.Sprintf("export OPEN_DATA_BUCKETS_JSON=%q", string(bucketsJSON))),
 		// The Rocky base AMI has no AWS CLI; install v2 so the init script can

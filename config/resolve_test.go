@@ -30,6 +30,21 @@ func TestResolve(t *testing.T) {
 		{"unknown type falls back", RegionConfig{DTNInstance: "x9.huge"}, Defaults{}, func(r Resolved) bool {
 			return r.ThroughputThresholdBps == 500_000_000 && r.ThroughputDerivedFallback
 		}, false},
+		{"network use for 1 DTN", RegionConfig{MaxDTNs: 1}, Defaults{}, func(r Resolved) bool {
+			return r.NetworkUse == NetworkUse{32, 64, 8, 16}
+		}, false},
+		{"network use for 2 DTNs", RegionConfig{MaxDTNs: 2}, Defaults{}, func(r Resolved) bool {
+			return r.NetworkUse == NetworkUse{64, 128, 8, 16}
+		}, false},
+		{"network use capped at 128", RegionConfig{MaxDTNs: 8}, Defaults{}, func(r Resolved) bool {
+			return r.NetworkUse == NetworkUse{128, 128, 8, 16} &&
+				r.NetworkUse.Args() == "--network-use custom --preferred-concurrency 128 --max-concurrency 128 --preferred-parallelism 8 --max-parallelism 16"
+		}, false},
+		{"explicit network use kept", RegionConfig{MaxDTNs: 8, NetworkUse: NetworkUse{16, 32, 4, 8}}, Defaults{}, func(r Resolved) bool {
+			return r.NetworkUse == NetworkUse{16, 32, 4, 8}
+		}, false},
+		{"network use over 128", RegionConfig{NetworkUse: NetworkUse{MaxConcurrency: 256}}, Defaults{}, nil, true},
+		{"preferred over max", RegionConfig{NetworkUse: NetworkUse{PreferredConcurrency: 64, MaxConcurrency: 32}}, Defaults{}, nil, true},
 		{"bad gcs version", RegionConfig{}, Defaults{GCSVersion: "5.4"}, nil, true},
 		{"bad cidr", RegionConfig{}, Defaults{AdminCIDR: "10.0.0.0/33"}, nil, true},
 		{"world cidr", RegionConfig{}, Defaults{AdminCIDR: "0.0.0.0/0"}, nil, true},

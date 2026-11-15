@@ -39,3 +39,12 @@ regions:
   #   control_instance: t3a.large
   #   dtn_instance: c8in.2xlarge
   #   warm_pool_size: 4
+
+  # Endpoint network use (#56). Omit to derive from max_dtns: 32 preferred /
+  # 64 max concurrency per DTN, capped at Transfer's 128; parallelism 8/16.
+  # Apply to a running endpoint with: aws-elastic-gcs-ctl endpoint network-use --apply
+  #   network_use:
+  #     preferred_concurrency: 64
+  #     max_concurrency: 128
+  #     preferred_parallelism: 8
+  #     max_parallelism: 16

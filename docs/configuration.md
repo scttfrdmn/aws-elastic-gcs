@@ -36,6 +36,21 @@ All parameters live under `context` in `cdk.json`. Region-specific values are ne
 | `useSpot` | bool | `false` | Use Spot instances for DTNs. Saves ~60–80% on compute but disables warm pool (AWS constraint). Spot DTNs cold-start (2–3 min). |
 | `spotMaxPrice` | string | `""` | Maximum Spot price per hour (e.g. `"0.10"`). Empty = up to on-demand price. |
 
+### Network use (`regions.yaml` `network_use`)
+
+| Field | Default | Description |
+|---|---|---|
+| `preferred_concurrency` | `min(max, 32 × max_dtns)` | Files in flight Globus prefers per task |
+| `max_concurrency` | `min(128, 64 × max_dtns)` | Upper limit; Transfer rejects more than 128 |
+| `preferred_parallelism` | `8` | TCP streams per file |
+| `max_parallelism` | `16` | |
+
+A task's concurrency is the lower of the two endpoints' maximums, so these only
+raise the ceiling; the peer's settings still apply. The control node's first
+setup applies them once the service account has its role. For existing
+endpoints, use `aws-elastic-gcs-ctl endpoint network-use --apply`. See
+[operator tuning](performance/operator-guide.md).
+
 ### Access and alerts
 
 | Context key | Default | Description |
