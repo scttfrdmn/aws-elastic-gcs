@@ -51,36 +51,24 @@ echo ">>> Installing prerequisites..."
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     OS_ID="$ID"
-    OS_VERSION_ID="${VERSION_ID%%.*}"
 fi
 
 case "$OS_ID" in
-    amzn|rhel|rocky|almalinux)
+    rhel|rocky|almalinux)
+        # Verified installs (#46): UserData wrote the library and pinned keys and
+        # already installed the SSM agent and AWS CLI with signature checks.
+        # shellcheck source=/dev/null
+        source /opt/elastic-gcs/lib/verified_install.sh
         dnf install -y jq
-        # UserData installs AWS CLI v2 before downloading this script.
-        command -v aws >/dev/null || dnf install -y awscli
-        # Install EPEL (required for GCS dependencies)
-        dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION_ID}.noarch.rpm || true
-        # Install GCS repo and import its GPG key.
-        # The globus-repo RPM installs the key file but does not rpm --import it
-        # on Rocky/RHEL 9, causing GPG check failures. Import explicitly.
-        dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
-        rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
-        # Install GCS, pinned so every node in the endpoint runs the same version
+        install_epel
+        setup_globus_repo
+        # GCS, pinned so every node in the endpoint runs the same version.
+        # Packages and repo metadata are GPG-checked against the pinned key.
         dnf install -y "globus-connect-server54-${GCS_VERSION}"
         ;;
-    ubuntu|debian)
-        apt-get update
-        apt-get install -y jq curl
-        command -v aws >/dev/null || apt-get install -y awscli
-        # Install GCS repo
-        curl -LOs https://downloads.globus.org/globus-connect-server/stable/installers/repo/deb/globus-repo_latest_all.deb
-        dpkg -i globus-repo_latest_all.deb
-        apt-get update
-        apt-get install -y "globus-connect-server54=${GCS_VERSION}-*"
-        ;;
     *)
-        echo "ERROR: Unsupported OS: $OS_ID"
+        # The control stack launches Rocky Linux 9 only.
+        echo "ERROR: Unsupported OS: $OS_ID (the control node runs Rocky Linux 9)"
         exit 1
         ;;
 esac

@@ -85,14 +85,20 @@ echo ">>> Subnet: $SUBNET_ID  SG: $SG_ID  Profile: $IAM_PROFILE_NAME"
 # --- UserData: ONLY install SSM Agent so we can manage the rest via SSM ---
 # Doing package installs in UserData causes RPM lock races with cloud-init.
 # Instead we launch a bare instance, wait for SSM, then run installs via SSM.
-USERDATA=$(cat <<'USERDATA_EOF'
-#!/bin/bash
-# Minimal UserData — just get SSM agent running so we can take over via SSM
-dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm 2>/dev/null || true
-systemctl enable amazon-ssm-agent
-systemctl start amazon-ssm-agent
-USERDATA_EOF
-)
+# The SSM agent is signature-checked against the pinned key (#46): the
+# verified-install library and keys ride along gzip+base64 encoded.
+HERE=$(cd "$(dirname "$0")" && pwd)
+embed() { printf "echo '%s' | base64 -d | gunzip > %s\n" "$(gzip -c "$1" | base64 | tr -d '\n')" "$2"; }
+USERDATA="#!/bin/bash
+set -euo pipefail
+mkdir -p /opt/elastic-gcs/lib /opt/elastic-gcs/keys
+$(embed "$HERE/lib/verified_install.sh" /opt/elastic-gcs/lib/verified_install.sh)
+$(embed "$HERE/keys/amazon-ssm-agent.asc" /opt/elastic-gcs/keys/amazon-ssm-agent.asc)
+$(embed "$HERE/keys/aws-cli.asc" /opt/elastic-gcs/keys/aws-cli.asc)
+$(embed "$HERE/keys/globus-2024.asc" /opt/elastic-gcs/keys/globus-2024.asc)
+source /opt/elastic-gcs/lib/verified_install.sh
+install_ssm_agent $REGION
+"
 
 # --- Launch builder instance ---
 echo ">>> Launching builder instance (t3.large, Rocky Linux 9)..."
@@ -149,26 +155,21 @@ exec > /var/log/ami-build.log 2>&1
 
 echo "=== DTN AMI Build via SSM - $(date -u) ==="
 
+# Verified installs (#46): library and pinned keys were written by UserData.
+source /opt/elastic-gcs/lib/verified_install.sh
+
 echo "Installing tools..."
 dnf install -y jq unzip
 
-echo "Installing AWS CLI v2..."
-curl -s https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
-cd /tmp && unzip -q awscliv2.zip
-/tmp/aws/install
-ln -sf /usr/local/bin/aws /usr/bin/aws
+echo "Installing AWS CLI v2 (signature verified)..."
+install_aws_cli
 aws --version
-cd /
 
 echo "Installing EPEL..."
-. /etc/os-release
-OS_VER="${VERSION_ID%%.*}"
-dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VER}.noarch.rpm || true
-rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-9 || true
+install_epel
 
-echo "Installing GCS repo..."
-dnf install -y https://downloads.globus.org/globus-connect-server/stable/installers/repo/rpm/globus-repo-latest.noarch.rpm
-rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-Globus-2024 || true
+echo "Configuring the GCS repo with the pinned Globus key..."
+setup_globus_repo
 
 echo "Installing GCS '"$GCS_VERSION"'..."
 dnf install -y globus-connect-server54-'"$GCS_VERSION"'
