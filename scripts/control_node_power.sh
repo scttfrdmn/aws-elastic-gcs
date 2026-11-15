@@ -4,7 +4,8 @@
 #
 # usage: AWS_PROFILE=aws scripts/control_node_power.sh <region> <deployment> stop|start|status|install
 #
-# stop:  refuses unless the DTN pool is at 0 (desired 0, nothing InService);
+# stop:  refuses unless the DTN pool is at 0: for pool: asg, desired 0 and
+#        nothing InService; for pool: slots, desired-dtns 0 and no slot running;
 #        disables the control node's GCS node locally, waits for its IP to leave
 #        the endpoint's DNS, then stops the instance. The endpoint is offline
 #        (zero active nodes) until a DTN or the control node comes back.
@@ -24,6 +25,18 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REGION=${1:?region}; DEP=${2:?deployment}; ACTION=${3:?stop|start|status|install}
 P="/elastic-gcs/$REGION/$DEP"; ASG="elastic-gcs-dtn-$REGION-$DEP"
 aws_() { aws --region "$REGION" "$@"; }
+
+# pool prints "<desired> <serving>" for the deployment's DTNs: the ASG if there
+# is one, else the slot controller's desired-dtns and running slot instances.
+pool() {
+  local out
+  out=$(aws_ autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
+    --query 'AutoScalingGroups[0].[DesiredCapacity,length(Instances[?LifecycleState==`InService`])]' --output text)
+  if [ "$out" != None ] && [ -n "$out" ]; then echo "$out"; return; fi
+  echo "$(aws_ ssm get-parameter --name "$P/desired-dtns" --query Parameter.Value --output text 2>/dev/null || echo 0)" \
+    "$(aws_ ec2 describe-instances --filters "Name=tag:elastic-gcs:deployment,Values=$REGION-$DEP" Name=tag:elastic-gcs:pool,Values=slots \
+      Name=instance-state-name,Values=pending,running,stopping --query 'length(Reservations[].Instances[])' --output text)"
+}
 
 ID=$(aws_ ssm get-parameter --name "$P/control-node-id" --query Parameter.Value --output text)
 EIP=$(aws_ ec2 describe-addresses --filters "Name=instance-id,Values=$ID" --query 'Addresses[0].PublicIp' --output text)
@@ -60,14 +73,11 @@ wait_dns() {  # present|absent DOMAIN IP TIMEOUT
 case "$ACTION" in
 status)
   echo "control node $ID ($EIP): $(state); endpoint $EP"
-  aws_ autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
-    --query 'AutoScalingGroups[0].{desired:DesiredCapacity,in_service:length(Instances[?LifecycleState==`InService`])}' --output text \
-    | awk '{print "DTN pool: desired=" $1 " in_service=" $2}'
+  pool | awk '{print "DTN pool: desired=" $1 " serving=" $2}'
   ;;
 stop)
   [ "$(state)" = running ] || { echo "control node is $(state); nothing to do"; exit 0; }
-  read -r desired inservice < <(aws_ autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
-    --query 'AutoScalingGroups[0].[DesiredCapacity,length(Instances[?LifecycleState==`InService`])]' --output text)
+  read -r desired inservice < <(pool)
   if [ "$desired" != 0 ] || [ "$inservice" != 0 ]; then
     echo "refusing: DTN pool not idle (desired=$desired in_service=$inservice)"; exit 1
   fi
