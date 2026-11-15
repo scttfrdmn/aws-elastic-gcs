@@ -98,8 +98,8 @@ func NewDTNPoolStack(scope constructs.Construct, id string, props *DTNPoolStackP
 		RoleName:    jsii.String(dep.Resource("dtn")),
 	})
 
-	dtnRole.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(
-		jsii.String("AmazonSSMManagedInstanceCore")))
+	// SSM agent permissions without GetParameter on "*" (#45).
+	addSSMCore(dtnRole)
 	dtnRole.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(
 		jsii.String("CloudWatchAgentServerPolicy")))
 

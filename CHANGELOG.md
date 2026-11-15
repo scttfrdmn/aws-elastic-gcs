@@ -108,6 +108,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The warm-pool and Spot custom resources are scoped to the deployment's ASG.
   - **Upgrade:** refresh the warm pool after deploying, so existing DTNs get the
     role tag.
+- **No instance can read every SSM parameter** (#45).
+  `AmazonSSMManagedInstanceCore` is replaced by the same permissions minus
+  `ssm:GetParameter(s)` on `*`. The control node, DTNs and AMI builder read only
+  their deployment's parameters.
+- **The AMI builder has its own role and security group** (#45). `build_ami.sh`
+  launches the builder with `elastic-gcs-ami-builder-<region>-<deployment>`: an
+  SSM-agent-only role with no secret or parameter access, and an egress-only
+  security group. It used to borrow the control node's profile and the endpoint's
+  internet-facing group.
 
 ## [0.12.0] - 2026-11-15
 
