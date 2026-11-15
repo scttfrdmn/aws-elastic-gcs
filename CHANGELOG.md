@@ -8,8 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- The CLI publishes a Homebrew **formula** (`brews`, `Formula/`) instead of a
-  cask, matching `scttfrdmn/homebrew-tap` and `scttfrdmn/cargoship`. A missing tap
+- The CLI publishes a Homebrew **cask** (`homebrew_casks`, `Casks/`, macOS and
+  Linux). goreleaser deprecated binary-installing formulas (`brews`) in v2.10 and
+  v2.16. The tap's short-lived formula migrates to the cask via
+  `tap_migrations.json`. On macOS the cask clears the quarantine flag
+  (`install_steps`). Homebrew 7 needs `brew trust scttfrdmn/tap`. A missing tap
   or bucket token now fails the release instead of silently skipping. Re-running
   the release workflow for an existing tag uses the default branch's
   `.goreleaser.yaml`.

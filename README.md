@@ -29,7 +29,8 @@ See [docs/ephemeral-control-node.md](docs/ephemeral-control-node.md) for the ful
 ## Install the operator CLI
 
 ```bash
-brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux
+brew tap scttfrdmn/tap && brew trust scttfrdmn/tap     # Homebrew 7+ loads only trusted third-party taps
+brew install --cask aws-elastic-gcs-ctl                 # macOS / Linux
 scoop bucket add scttfrdmn https://github.com/scttfrdmn/scoop-bucket
 scoop install aws-elastic-gcs-ctl                      # Windows
 ```

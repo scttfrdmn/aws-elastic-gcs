@@ -57,7 +57,8 @@ release:
   footer: |
     ### Install the operator CLI
     ```bash
-    brew install scttfrdmn/tap/aws-elastic-gcs-ctl        # macOS / Linux (formula)
+    brew tap scttfrdmn/tap && brew trust scttfrdmn/tap     # Homebrew 7+ loads only trusted third-party taps
+    brew install --cask aws-elastic-gcs-ctl                 # macOS / Linux
     scoop bucket add scttfrdmn https://github.com/scttfrdmn/scoop-bucket
     scoop install aws-elastic-gcs-ctl                      # Windows
     ```
@@ -82,26 +83,30 @@ nfpms:
     section: admin
     bindir: /usr/bin
 
-# Homebrew formula in scttfrdmn/homebrew-tap (Formula/) and Scoop manifest in
-# scttfrdmn/scoop-bucket, the same setup as scttfrdmn/cargoship: repo secrets
-# HOMEBREW_TAP_GITHUB_TOKEN and SCOOP_BUCKET_GITHUB_TOKEN. A missing token fails
-# the release rather than silently skipping.
-brews:
+# Homebrew cask in scttfrdmn/homebrew-tap (Casks/, macOS and Linux) and Scoop
+# manifest in scttfrdmn/scoop-bucket. Casks replace goreleaser's deprecated
+# binary-installing formulas (brews, deprecated since v2.10/v2.16); inkcap
+# publishes to the same tap this way. Repo secrets HOMEBREW_TAP_GITHUB_TOKEN and
+# SCOOP_BUCKET_GITHUB_TOKEN; a missing token fails the release.
+homebrew_casks:
   - name: aws-elastic-gcs-ctl
     ids: [ctl]
+    binaries: [aws-elastic-gcs-ctl]
     repository:
       owner: scttfrdmn
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
     homepage: https://scttfrdmn.github.io/aws-elastic-gcs/
     description: Operator CLI for Elastic Globus Connect Server deployments on AWS
     license: Apache-2.0
     skip_upload: auto
-    test: |
-      system "#{bin}/aws-elastic-gcs-ctl", "version"
-    install: |
-      bin.install "aws-elastic-gcs-ctl"
+    hooks:
+      post:
+        # The binary isn't notarized: clear the quarantine flag so macOS runs it.
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/aws-elastic-gcs-ctl"]
+          end
 
 scoops:
   - name: aws-elastic-gcs-ctl
