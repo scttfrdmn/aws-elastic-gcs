@@ -69,9 +69,11 @@ func (p *dtnPool) dtnRole() awsiam.Role {
 		Sid:     jsii.String("EC2CreateTags"),
 		Effect:  awsiam.Effect_ALLOW,
 		Actions: jsii.Strings("ec2:CreateTags"),
-		// The instance making the request only (#43): a DTN can't rewrite another
-		// DTN's gcs-node-id tag and misdirect cache-eviction deletes.
-		Resources: jsii.Strings("${ec2:SourceInstanceARN}"),
+		// Instances of this ASG, two tag keys. IAM doesn't accept a policy
+		// variable such as ${ec2:SourceInstanceARN} as a resource, so a DTN could
+		// still retag another DTN of this pool; the worst case is a misdirected
+		// orphan-node delete, which the slot re-imports on its next boot (#43).
+		Resources: jsii.Strings(fmt.Sprintf("arn:aws:ec2:%s:%s:instance/*", p.dep.Region, *p.stack.Account())),
 		Conditions: &map[string]interface{}{
 			"StringEquals": map[string]interface{}{
 				"ec2:ResourceTag/aws:autoscaling:groupName": p.asgName,
