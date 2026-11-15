@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `docs/configuration.md`.
   - Profile defaults never exceed `max_dtns`, and explicit settings beat the
     profile.
+- `internal/identity`: one-time identity delivery for slots (#127, part of #42).
+  - The instance profile is swapped to a setup role and `node setup` runs over
+    SSM; then the profile is swapped back and every setup-role session issued
+    earlier is revoked.
+  - The swap back and the revocation always run, even when setup fails.
+  - Verified live: credentials copied during setup were refused about 5 s after
+    the revocation.
 - `internal/slots`: the slot controller's pure decision core (#125, design in
   #65).
   - `Plan(observed, desired, cfg)` returns start, revive, drain, stop, restart,

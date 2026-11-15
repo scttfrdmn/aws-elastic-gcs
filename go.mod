@@ -15,6 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.75.7
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.92.2
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.345.0
+	github.com/aws/aws-sdk-go-v2/service/iam v1.66.0
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.114.4
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.12
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.82.1
