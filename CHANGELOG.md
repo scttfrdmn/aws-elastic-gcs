@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CDK writes to `.cdk.out/` instead of `cdk.out/`. Go ignores dot-directories,
   so `go list ./...` and `go mod tidy` no longer pick up stale Lambda copies
   from synth output.
+- **`stacks/dtn_pool.go` split by concern** (#53): IAM, UserData, ASG and warm
+  pool, Lambdas, EventBridge rules, alarms and dashboard each have a file.
+  One `newGoLambda` helper replaces eight copies of the Lambda definition,
+  `egcsMetric` replaces seven of the metric, and a test keeps DTN UserData
+  under 16 KB. The synthesized templates are unchanged. Lambdas still use the
+  deprecated `LogRetention`: an explicit log group would collide with the
+  `/aws/lambda/...` groups deployed stacks already have.
 - **Pure decision logic with unit tests** (#52): `internal/scaling`
   (`DesiredDTNs`, `ScaleUp`, `AnyPositive`), `internal/idle` (`ShouldStop`),
   `internal/eviction` (`OrphanNodes`, `Stale`) and `internal/demand` (paginated
