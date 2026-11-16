@@ -47,7 +47,8 @@ the data path).
 "When instances are not in the same cluster placement group, bandwidth for
 single-flow traffic is limited to 5 Gbps"
 ([EC2 instance network bandwidth](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-network-bandwidth.html)).
-A flow is one 5-tuple. Measured: **4.4–4.8 Gbps per flow at every size**, while
+A flow is one 5-tuple. Measured: **4.4–4.8 Gbps per flow at every size** (4.78
+through the internet gateway on all eight types in P0b), while
 the same instances carry many flows far faster (11.9 Gbps on c8in.2xlarge,
 96 Gbps on c8in.16xlarge). This is per flow, not per instance, and not a kernel
 or buffer limit (1 ms RTT needs only ~0.6 MB of window). It doesn't bind the
@@ -69,6 +70,24 @@ So a c7i.2xlarge or a c6in.2xlarge DTN tops out at 5 Gbps across all its
 transfers, whatever its "up to" rating, while a c8in.2xlarge measured
 **11.9 Gbps** and a c8in.16xlarge **96 Gbps**. See
 [instance sizing](../instance-sizing.md).
+
+Measured (P0b, #151): the same instance pair over private IPs (no gateway) and
+over public IPs (through the gateway), multi-flow iperf3, in Gbps:
+
+| Type | vCPU | Private | Through the internet gateway | Rule |
+|---|---|---|---|---|
+| c7i.2xlarge | 8 | 12.4 | **4.78** | 5 Gbps |
+| c6in.2xlarge | 8 | 39.7 | **4.78** | 5 Gbps (12% of its private bandwidth) |
+| m7i.4xlarge | 16 | 12.4 | **4.78** | 5 Gbps |
+| c7i.8xlarge | 32 | 12.4 | **5.98** | 50% |
+| c6in.8xlarge | 32 | 49.8 | **23.9** | 50% |
+| c7i.16xlarge | 64 | 24.8 | **12.0** | 50% |
+| c6in.16xlarge | 64 | 103.5 | **48.0** | 50% |
+| c8in.2xlarge | 8 | 39.8 | **11.9** | baseline (exempt) |
+
+The limits are hard: repeats agree to three significant figures. AWS's wording
+("less than 32" / "more than 32" vCPUs) leaves 32 itself undefined; measured,
+**32 vCPUs gets the 50% rule**.
 
 ### 6. "Up to" ratings are burst, and big instances span network cards
 
