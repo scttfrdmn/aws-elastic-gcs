@@ -4,11 +4,11 @@
 #
 # usage: AWS_PROFILE=aws scripts/control_node_power.sh <region> <deployment> stop|start|status|install
 #
-# stop:  refuses unless the DTN pool is at 0: for pool: asg, desired 0 and
-#        nothing InService; for pool: slots, desired-dtns 0 and no slot running;
-#        disables the control node's GCS node locally, waits for its IP to leave
-#        the endpoint's DNS, then stops the instance. The endpoint is offline
-#        (zero active nodes) until a DTN or the control node comes back.
+# stop:  refuses unless the DTN pool is at 0 (desired-dtns 0 and no slot
+#        running); disables the control node's GCS node locally, waits for its
+#        IP to leave the endpoint's DNS, then stops the instance. The endpoint is
+#        offline (zero active nodes) until a DTN or the control node comes back,
+#        and Transfer rejects submissions to it meanwhile (#130).
 # start: starts the instance, waits for SSM, enables the GCS node locally and
 #        waits for its Elastic IP to reappear in endpoint DNS.
 #
@@ -17,23 +17,19 @@
 #        an existing control node. New control nodes get both from UserData.
 #        Safe to re-run.
 #
-# DTNs can still scale out while the control node is stopped: they enable
-# themselves locally on resume (#72). Lambdas that target the control node
-# (cache eviction, version check) fail until it is started again.
+# DTN slots can still start while the control node is stopped: they enable
+# themselves locally on boot. The slot controller starts the control node
+# before it would stop the last DTN.
 # =============================================================================
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REGION=${1:?region}; DEP=${2:?deployment}; ACTION=${3:?stop|start|status|install}
-P="/elastic-gcs/$REGION/$DEP"; ASG="elastic-gcs-dtn-$REGION-$DEP"
+P="/elastic-gcs/$REGION/$DEP"
 aws_() { aws --region "$REGION" "$@"; }
 
-# pool prints "<desired> <serving>" for the deployment's DTNs: the ASG if there
-# is one, else the slot controller's desired-dtns and running slot instances.
+# pool prints "<desired> <serving>" for the deployment's DTNs: the slot
+# controller's desired-dtns and the slot instances that are up.
 pool() {
-  local out
-  out=$(aws_ autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
-    --query 'AutoScalingGroups[0].[DesiredCapacity,length(Instances[?LifecycleState==`InService`])]' --output text)
-  if [ "$out" != None ] && [ -n "$out" ]; then echo "$out"; return; fi
   echo "$(aws_ ssm get-parameter --name "$P/desired-dtns" --query Parameter.Value --output text 2>/dev/null || echo 0)" \
     "$(aws_ ec2 describe-instances --filters "Name=tag:elastic-gcs:deployment,Values=$REGION-$DEP" Name=tag:elastic-gcs:pool,Values=slots \
       Name=instance-state-name,Values=pending,running,stopping --query 'length(Reservations[].Instances[])' --output text)"

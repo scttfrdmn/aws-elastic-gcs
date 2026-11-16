@@ -52,6 +52,8 @@ func TestSlotPoolStack(t *testing.T) {
 	// Durable functions reject unqualified invokes: both controller rules must
 	// target the alias, and each needs an invoke permission on it.
 	tpl.HasResourceProperties(jsii.String("AWS::Lambda::Alias"), map[string]any{"Name": "live"})
+	// Old versions are retained: in-flight durable executions are pinned to them.
+	tpl.HasResource(jsii.String("AWS::Lambda::Version"), map[string]any{"DeletionPolicy": "Retain", "UpdateReplacePolicy": "Retain"})
 	tpl.ResourceCountIs(jsii.String("AWS::Lambda::Permission"), jsii.Number(3)) // 2 controller rules + demand monitor
 	for _, rule := range []string{"elastic-gcs-slot-controller-us-west-2-tst", "elastic-gcs-slot-desired-us-west-2-tst"} {
 		tpl.HasResourceProperties(jsii.String("AWS::Events::Rule"), map[string]any{

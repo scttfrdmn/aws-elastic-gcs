@@ -1,9 +1,10 @@
 # Elastic GCS on AWS
 
 Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/)
-for AWS. Data transfer nodes (DTNs) wait stopped in a warm pool, costing only
-their disks. They start when there's demand, and the endpoint serves from them
-about two minutes later. When transfers finish, they stop again.
+for AWS. Data transfer nodes (DTNs) wait as stopped slots, costing only their
+disks and addresses. A slot controller starts them when there's demand, and the
+endpoint serves from them about 1.5 minutes later. When transfers finish, they
+drain and stop again.
 
 The driving use case is fronting the [AWS Open Data Registry](https://registry.opendata.aws/)
 so any researcher with a Globus account can pull public datasets. The
@@ -27,8 +28,8 @@ shape of the data.
 
 ## Running it
 
-- [Architecture](architecture.md): the cold, warm and hot tiers; node identities;
-  lifecycle hooks.
+- [Architecture](architecture.md): DTN slots and their cold, warm and hot tiers;
+  node identities; the slot controller.
 - [Configuration](configuration.md) and [instance sizing](instance-sizing.md).
 - [Operator guide](operator-guide.md) and
   [ephemeral control node](ephemeral-control-node.md), which covers idle cost.

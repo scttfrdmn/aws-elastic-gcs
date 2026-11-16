@@ -70,7 +70,6 @@ func init() {
 	rootCmd.AddCommand(nodesCmd())
 	rootCmd.AddCommand(logsCmd())
 	rootCmd.AddCommand(metricsCmd())
-	rootCmd.AddCommand(refreshCmd())
 	rootCmd.AddCommand(transferCmd())
 	rootCmd.AddCommand(buildAMICmd())
 	rootCmd.AddCommand(collectionsCmd())
@@ -116,7 +115,6 @@ func envOr(key, def string) string {
 }
 
 func secretsPrefix() string          { return dep.SecretsPrefix() }
-func asgName() string                { return dep.Resource("dtn") }
 func controlNodeIDParamPath() string { return dep.Param(names.ParamControlNodeID) }
 func endpointIDParamPath() string    { return dep.Param(names.ParamEndpointID) }
 
@@ -145,16 +143,14 @@ func instanceState(inst ec2types.Instance) string {
 }
 
 // lambdaFunctionBases maps the short Lambda names accepted by `logs` and
-// reported by `metrics` to their function-name prefix.
+// reported by `metrics` to their function-name prefix. version-check, waker
+// and idle-shutdown aren't deployed by the slots stack yet (#144, #130).
 var lambdaFunctionBases = map[string]string{
-	"lifecycle":      "elastic-gcs-lifecycle",
-	"scaleout":       "elastic-gcs-scaleout",
-	"scalein":        "elastic-gcs-scalein",
-	"demand-monitor": "elastic-gcs-demand-monitor",
-	"cache-eviction": "elastic-gcs-cache-eviction",
-	"version-check":  "elastic-gcs-version-check",
-	"waker":          "elastic-gcs-waker",
-	"idle-shutdown":  "elastic-gcs-idle-shutdown",
+	"slot-controller": "elastic-gcs-slot-controller",
+	"demand-monitor":  "elastic-gcs-demand-monitor",
+	"version-check":   "elastic-gcs-version-check",
+	"waker":           "elastic-gcs-waker",
+	"idle-shutdown":   "elastic-gcs-idle-shutdown",
 }
 
 func sortedLambdaNames() []string {

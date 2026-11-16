@@ -18,15 +18,10 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
-	astypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
-	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-
-	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/authorizers"
-	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/core"
-	"github.com/scttfrdmn/globus-go-sdk/v4/pkg/services/transfer"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
@@ -39,11 +34,10 @@ const (
 	testDestFile          = "/~/elastic-gcs-inttest.txt"
 )
 
-// testEnv holds shared AWS and Globus clients for integration tests.
+// testEnv holds shared AWS clients for integration tests.
 type testEnv struct {
 	region           string
 	dep              names.Deployment
-	asgName          string
 	secretsPrefix    string
 	controlNodeParam string
 	endpointIDParam  string
@@ -54,22 +48,15 @@ type testEnv struct {
 	gcsCLIClientID string
 	gcsEndpointID  string
 
-	cfg           aws.Config
-	asgClient     *autoscaling.Client
-	ssmClient     *ssm.Client
-	cwClient      *cloudwatch.Client
-	scaleOutAlarm string // CloudWatch alarm name driving scale-out
-	scaleInAlarm  string // CloudWatch alarm name driving scale-in
-
-	// transferClient uses client credentials for task monitoring (GetTask).
-	// Transfer submission uses the `globus` CLI (authenticated as the endpoint owner).
-	transferClient *transfer.Client
+	cfg       aws.Config
+	ec2Client *ec2.Client
+	ssmClient *ssm.Client
 }
 
 // newTestEnv initialises shared clients from environment variables.
 // Required env vars: GLOBUS_CLIENT_ID, GLOBUS_CLIENT_SECRET.
 // Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_DEPLOYMENT
-// (default "default"), ELASTIC_GCS_ASG_NAME.
+// (default "default").
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
@@ -78,13 +65,12 @@ func newTestEnv(t *testing.T) *testEnv {
 		region = "us-east-1"
 	}
 	clientID := requireEnv(t, "GLOBUS_CLIENT_ID")
-	clientSecret := requireEnv(t, "GLOBUS_CLIENT_SECRET")
+	requireEnv(t, "GLOBUS_CLIENT_SECRET")
 
 	dep, err := names.New(region, os.Getenv("ELASTIC_GCS_DEPLOYMENT"))
 	if err != nil {
 		t.Fatalf("ELASTIC_GCS_REGION/ELASTIC_GCS_DEPLOYMENT: %v", err)
 	}
-	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", dep.Resource("dtn"))
 	secretsPrefix := getEnvOrDefault("ELASTIC_GCS_SECRETS_PREFIX", dep.SecretsPrefix())
 	controlNodeParam := dep.Param(names.ParamControlNodeID)
 	endpointIDParam := dep.Param(names.ParamEndpointID)
@@ -107,34 +93,17 @@ func newTestEnv(t *testing.T) *testEnv {
 		gcsEndpointID = aws.ToString(epParam.Parameter.Value)
 	}
 
-	// Transfer client for task monitoring, with an auto-refreshing
-	// client-credentials authorizer (globus-go-sdk v4). Transfer submission
-	// goes through the `globus` CLI (user-authenticated).
-	transferScope := "urn:globus:auth:scope:transfer.api.globus.org:all"
-	tc, err := transfer.NewClient(context.Background(), &core.Config{
-		Authorizer: authorizers.NewClientCredentialsAuthorizer(clientID, clientSecret, []string{transferScope}),
-		Scopes:     []string{transferScope},
-	})
-	if err != nil {
-		t.Fatalf("transfer client: %v", err)
-	}
-
 	return &testEnv{
 		region:           region,
 		dep:              dep,
-		asgName:          asgName,
 		secretsPrefix:    secretsPrefix,
 		controlNodeParam: controlNodeParam,
 		endpointIDParam:  endpointIDParam,
 		gcsCLIClientID:   clientID,
 		gcsEndpointID:    gcsEndpointID,
 		cfg:              cfg,
-		asgClient:        autoscaling.NewFromConfig(cfg),
+		ec2Client:        ec2.NewFromConfig(cfg),
 		ssmClient:        ssmClient,
-		cwClient:         cloudwatch.NewFromConfig(cfg),
-		scaleOutAlarm:    dep.Resource("scaleout"),
-		scaleInAlarm:     dep.Resource("scalein"),
-		transferClient:   tc,
 	}
 }
 
@@ -167,106 +136,98 @@ func (e *testEnv) controlNodeID(ctx context.Context, t *testing.T) string {
 	return aws.ToString(out.Parameter.Value)
 }
 
-// scaleASG sets the ASG desired capacity.
-func (e *testEnv) scaleASG(ctx context.Context, t *testing.T, desired int32) {
+// ── Slot controller (#65) ─────────────────────────────────────────────────────
+
+// setDesired sets desired-dtns for the slot controller. It also refreshes
+// last-active, so demand_monitor keeps the value for scale_in_idle instead of
+// resetting it while no transfers are active.
+func (e *testEnv) setDesired(ctx context.Context, t *testing.T, desired int) {
 	t.Helper()
-	_, err := e.asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
-		AutoScalingGroupName: aws.String(e.asgName),
-		DesiredCapacity:      aws.Int32(desired),
-		HonorCooldown:        aws.Bool(false),
-	})
+	for _, kv := range [][2]string{
+		{names.ParamLastActive, time.Now().UTC().Format(time.RFC3339)},
+		{names.ParamDesiredDTNs, fmt.Sprint(desired)},
+	} {
+		if _, err := e.ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
+			Name: aws.String(e.dep.Param(kv[0])), Value: aws.String(kv[1]),
+			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true),
+		}); err != nil {
+			t.Fatalf("put %s=%s: %v", kv[0], kv[1], err)
+		}
+	}
+}
+
+// slotInstances returns this deployment's slot instances in the given EC2
+// states, mapped to their elastic-gcs:phase tag ("" once healthy).
+func (e *testEnv) slotInstances(ctx context.Context, states ...string) (map[string]string, error) {
+	out, err := e.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{Filters: []ec2types.Filter{
+		{Name: aws.String("tag:" + names.TagDeployment), Values: []string{e.dep.ID()}},
+		{Name: aws.String("tag:elastic-gcs:pool"), Values: []string{"slots"}},
+		{Name: aws.String("instance-state-name"), Values: states},
+	}})
 	if err != nil {
-		t.Fatalf("SetDesiredCapacity(%d): %v", desired, err)
+		return nil, err
 	}
-}
-
-// waitForASGInService polls until >= minCount InService instances exist, or deadline passes.
-// Returns the InService instance IDs.
-func (e *testEnv) waitForASGInService(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-			&autoscaling.DescribeAutoScalingGroupsInput{
-				AutoScalingGroupNames: []string{e.asgName},
-			})
-		if err != nil || len(out.AutoScalingGroups) == 0 {
-			continue
-		}
-		var ids []string
-		for _, inst := range out.AutoScalingGroups[0].Instances {
-			if inst.LifecycleState == astypes.LifecycleStateInService {
-				ids = append(ids, aws.ToString(inst.InstanceId))
+	ids := map[string]string{}
+	for _, r := range out.Reservations {
+		for _, i := range r.Instances {
+			phase := ""
+			for _, tag := range i.Tags {
+				if aws.ToString(tag.Key) == "elastic-gcs:phase" {
+					phase = aws.ToString(tag.Value)
+				}
 			}
-		}
-		if len(ids) >= minCount {
-			return ids
+			ids[aws.ToString(i.InstanceId)] = phase
 		}
 	}
-	t.Fatalf("timed out waiting for %d InService instances in %s after %s", minCount, e.asgName, timeout)
-	return nil
+	return ids, nil
 }
 
-// waitForWarmPool polls until >= minCount Warmed:Stopped instances exist in the warm pool.
-// Returns the instance IDs.
-func (e *testEnv) waitForWarmPool(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Second)
-		wp, err := e.asgClient.DescribeWarmPool(ctx,
-			&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(e.asgName)})
-		if err != nil {
-			continue
-		}
-		var ids []string
-		for _, inst := range wp.Instances {
-			if inst.LifecycleState == astypes.LifecycleStateWarmedStopped {
-				ids = append(ids, aws.ToString(inst.InstanceId))
-			}
-		}
-		if len(ids) >= minCount {
-			return ids
-		}
-	}
-	t.Fatalf("timed out waiting for %d Warmed:Stopped instances after %s", minCount, timeout)
-	return nil
-}
-
-// inServiceIDs returns the EC2 instance IDs currently InService in the ASG.
-func (e *testEnv) inServiceIDs(ctx context.Context) []string {
-	out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-		&autoscaling.DescribeAutoScalingGroupsInput{
-			AutoScalingGroupNames: []string{e.asgName},
-		})
-	if err != nil || len(out.AutoScalingGroups) == 0 {
+// servingSlotIDs returns the slot instances that are running and healthy (the
+// controller clears their starting/reviving phase).
+func (e *testEnv) servingSlotIDs(ctx context.Context) []string {
+	running, err := e.slotInstances(ctx, "running")
+	if err != nil {
 		return nil
 	}
 	var ids []string
-	for _, inst := range out.AutoScalingGroups[0].Instances {
-		if inst.LifecycleState == astypes.LifecycleStateInService {
-			ids = append(ids, aws.ToString(inst.InstanceId))
+	for id, phase := range running {
+		if phase == "" {
+			ids = append(ids, id)
 		}
 	}
 	return ids
 }
 
-// warmPoolCount returns the current number of Warmed:Stopped instances.
-func (e *testEnv) warmPoolCount(ctx context.Context) int {
-	wp, err := e.asgClient.DescribeWarmPool(ctx,
-		&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(e.asgName)})
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, inst := range wp.Instances {
-		if inst.LifecycleState == astypes.LifecycleStateWarmedStopped {
-			n++
+// waitForServingSlots polls until >= minCount slots are serving.
+func (e *testEnv) waitForServingSlots(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		if ids := e.servingSlotIDs(ctx); len(ids) >= minCount {
+			return ids
 		}
 	}
-	return n
+	t.Fatalf("timed out waiting for %d serving slots after %s", minCount, timeout)
+	return nil
 }
+
+// waitForNoRunningSlots polls until no slot instance is pending, running or
+// stopping (every slot is WARM or COLD).
+func (e *testEnv) waitForNoRunningSlots(ctx context.Context, t *testing.T, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(10 * time.Second)
+		running, err := e.slotInstances(ctx, "pending", "running", "stopping")
+		if err == nil && len(running) == 0 {
+			return
+		}
+	}
+	t.Fatalf("slots still running after %s", timeout)
+}
+
+// ── SSM and GCS ───────────────────────────────────────────────────────────────
 
 // runSSMCommand executes a shell command on an EC2 instance via SSM RunCommand
 // and returns stdout. Fails the test on error or non-zero exit.
@@ -328,6 +289,19 @@ func hasActiveGCSNode(nodes []gcsNodeStatus) bool {
 	return false
 }
 
+// activeNodeCount returns the number of GCS nodes with status "active".
+func activeNodeCount(nodes []gcsNodeStatus) int {
+	n := 0
+	for _, node := range nodes {
+		if strings.EqualFold(node.Status, "active") {
+			n++
+		}
+	}
+	return n
+}
+
+// ── Transfers ─────────────────────────────────────────────────────────────────
+
 // submitTestTransfer submits a file transfer via the `globus` CLI (authenticated
 // as the endpoint owner) and returns the Globus task ID.
 //
@@ -381,74 +355,10 @@ func (e *testEnv) getTaskInfo(ctx context.Context, t *testing.T, taskID string) 
 	return &info
 }
 
-// submitTestTransferWithDest submits a transfer with a custom destination path.
-// Use this when submitting multiple transfers rapidly to avoid collisions.
-// destPath example: "/~/elastic-gcs-autoscale-1234567890-0.txt"
-func (e *testEnv) submitTestTransferWithDest(ctx context.Context, t *testing.T, destPath string) string {
-	t.Helper()
-	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
-	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
-
-	globusBin, err := exec.LookPath("globus")
-	if err != nil {
-		globusBin = os.ExpandEnv("$HOME/.local/bin/globus")
-	}
-
-	out, err := exec.CommandContext(ctx,
-		globusBin, "transfer",
-		"-F", "json",
-		"--notify", "off",
-		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
-		srcCollection+":"+testSourceFile,
-		dstEndpointID+":"+destPath,
-	).CombinedOutput()
-	if err != nil {
-		t.Fatalf("globus transfer failed (exit %v):\n%s", err, out)
-	}
-
-	var result struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		t.Fatalf("parse globus transfer output: %v\nraw: %s", err, out)
-	}
-	if result.TaskID == "" {
-		t.Fatalf("globus transfer returned empty task_id:\n%s", out)
-	}
-	t.Logf("submitted transfer task %s (dest: %s)", result.TaskID, destPath)
-	return result.TaskID
-}
-
-// waitForASGDesiredChange polls DescribeAutoScalingGroups until DesiredCapacity
-// differs from fromDesired. Returns the new desired capacity.
-// Used to detect that the scaleout Lambda fired without any manual ASG call.
-func (e *testEnv) waitForASGDesiredChange(ctx context.Context, t *testing.T,
-	fromDesired int32, timeout time.Duration) int32 {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-			&autoscaling.DescribeAutoScalingGroupsInput{
-				AutoScalingGroupNames: []string{e.asgName},
-			})
-		if err != nil || len(out.AutoScalingGroups) == 0 {
-			continue
-		}
-		desired := aws.ToInt32(out.AutoScalingGroups[0].DesiredCapacity)
-		if desired != fromDesired {
-			return desired
-		}
-	}
-	t.Fatalf("timed out waiting for ASG %s desired to change from %d after %s",
-		e.asgName, fromDesired, timeout)
-	return fromDesired // unreachable
-}
-
 // trySubmitTransferWithDest attempts a transfer submission and returns
-// (taskID, nil) on success or ("", err) on failure without calling t.Fatal.
-// Used by keepAliveSubmit to tolerate transient endpoint failures (e.g. during
-// DNS propagation after scale-in when GCS DNS may still point to a stopped DTN).
+// (taskID, nil) on success or ("", err) on failure without calling t.Fatal,
+// to tolerate transient endpoint failures (e.g. during DNS propagation after
+// a node joins or leaves).
 func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string) (string, error) {
 	srcCollection := getEnvOrDefault("ELASTIC_GCS_COLLECTION_ID", collection1000Genomes)
 	dstEndpointID := getEnvOrDefault("ELASTIC_GCS_DEST_ENDPOINT", destEndpoint)
@@ -462,7 +372,7 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 		globusBin, "transfer",
 		"-F", "json",
 		"--notify", "off",
-		"--label", fmt.Sprintf("elastic-gcs-autoscale-%s", time.Now().Format("20060102-150405")),
+		"--label", fmt.Sprintf("elastic-gcs-inttest-%s", time.Now().Format("20060102-150405")),
 		srcCollection+":"+testSourceFile,
 		dstEndpointID+":"+destPath,
 	).CombinedOutput()
@@ -480,229 +390,6 @@ func (e *testEnv) trySubmitTransferWithDest(ctx context.Context, destPath string
 		return "", fmt.Errorf("empty task_id in: %s", out)
 	}
 	return result.TaskID, nil
-}
-
-// triggerScaleOut submits a single demand transfer and immediately forces the
-// scale-out alarm to fire. Returns the submitted task ID.
-//
-// Why SetAlarmState instead of PutMetricData:
-//   - Test transfers (1168 bytes) complete in ~3s; demand_monitor's 60s poll
-//     window almost never catches them as ACTIVE.
-//   - PutMetricData with standard resolution has up to 15-minute appearance lag
-//     in CloudWatch alarm evaluations — unreliable for any reasonable test timeout.
-//   - SetAlarmState(ALARM) is immediate: it triggers SNS→scaleout Lambda→ASG
-//     directly. This is the production chain that matters; correctness of the
-//     full path is confirmed by the step-4 transfer that MUST succeed on the DTN.
-//
-// The alarm is first reset to OK so the OK→ALARM transition always fires,
-// regardless of state left by a prior test run.
-func (e *testEnv) triggerScaleOut(ctx context.Context, t *testing.T) []string {
-	t.Helper()
-
-	// Reset alarm to OK to guarantee a state transition when we set it to ALARM.
-	// CloudWatch alarms only fire SNS actions on transitions, not while already
-	// in ALARM.
-	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
-		AlarmName:   aws.String(e.scaleOutAlarm),
-		StateValue:  cwtypes.StateValueOk,
-		StateReason: aws.String("reset by integration test before triggerScaleOut"),
-	}); err != nil {
-		t.Logf("triggerScaleOut: SetAlarmState(OK) warning: %v", err)
-	} else {
-		t.Logf("triggerScaleOut: scale-out alarm reset to OK")
-	}
-
-	// Submit one demand transfer. Retry for up to 3 minutes to cover GCS DNS
-	// propagation after a prior scale-in (Globus docs: "up to 2 minutes").
-	// The prior test's lifecycle hook calls `node disable`, but DNS may still
-	// route new connections to the just-stopped DTN for ~2 minutes after that.
-	destPath := fmt.Sprintf("/~/elastic-gcs-demand-%d.txt", time.Now().Unix())
-	var taskID string
-	for attempt := 1; attempt <= 12; attempt++ {
-		var err error
-		taskID, err = e.trySubmitTransferWithDest(ctx, destPath)
-		if err == nil {
-			break
-		}
-		t.Logf("triggerScaleOut: submission attempt %d failed: %v", attempt, err)
-		if attempt < 12 {
-			time.Sleep(15 * time.Second)
-		}
-	}
-	if taskID == "" {
-		t.Fatal("triggerScaleOut: all submission attempts failed")
-	}
-	t.Logf("triggerScaleOut: submitted demand transfer %s", taskID)
-
-	// Now fire the alarm. This is immediate — SNS notifies the scaleout Lambda
-	// which increments ASG DesiredCapacity without any manual call.
-	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
-		AlarmName:   aws.String(e.scaleOutAlarm),
-		StateValue:  cwtypes.StateValueAlarm,
-		StateReason: aws.String("integration test: active transfer demand detected"),
-	}); err != nil {
-		t.Logf("triggerScaleOut: SetAlarmState(ALARM) warning: %v", err)
-	} else {
-		t.Logf("triggerScaleOut: scale-out alarm set to ALARM (SNS→Lambda→ASG triggered)")
-	}
-
-	return []string{taskID}
-}
-
-// waitForScalingActivityComplete polls DescribeScalingActivities until all
-// recent ASG activities are complete (Progress=100). This is needed before
-// triggering scale-in: the ASG rejects SetDesiredCapacity with
-// ScalingActivityInProgress while the scale-out lifecycle hook is still
-// running (health check grace period, typically ~5 min after InService).
-func (e *testEnv) waitForScalingActivityComplete(ctx context.Context, t *testing.T, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(15 * time.Second)
-		out, err := e.asgClient.DescribeScalingActivities(ctx,
-			&autoscaling.DescribeScalingActivitiesInput{
-				AutoScalingGroupName: aws.String(e.asgName),
-				MaxRecords:           aws.Int32(5),
-			})
-		if err != nil {
-			continue
-		}
-		allDone := true
-		for _, act := range out.Activities {
-			if aws.ToInt32(act.Progress) < 100 {
-				allDone = false
-				t.Logf("waitForScalingActivityComplete: activity %s progress=%d%%",
-					aws.ToString(act.ActivityId)[:8], aws.ToInt32(act.Progress))
-				break
-			}
-		}
-		if allDone {
-			t.Log("waitForScalingActivityComplete: all scaling activities complete")
-			return
-		}
-	}
-	t.Fatalf("waitForScalingActivityComplete: timed out after %s", timeout)
-}
-
-// waitForCleanScaleInMetric polls CloudWatch GetMetricStatistics until
-// ActiveTransfers has been 0 (max) for the last 5 minutes. This mirrors the
-// active transfer guard in the scale-in Lambda: if this passes, the Lambda
-// will not abort the scale-in.
-//
-// Why this is needed: the Globus endpoint_manager/task_list API has a ~1-2
-// minute lag before removing SUCCEEDED tasks from ACTIVE. demand_monitor may
-// therefore publish non-zero ActiveTransfers for up to ~2 minutes after the
-// Globus CLI confirms tasks are terminal. The Lambda's 5-minute lookback then
-// blocks scale-in for up to ~7 minutes after transfer completion.
-//
-// We wait for this window to clear before calling triggerScaleIn so the Lambda
-// proceeds rather than silently skipping.
-func (e *testEnv) waitForCleanScaleInMetric(ctx context.Context, t *testing.T, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(30 * time.Second)
-		stats, err := e.cwClient.GetMetricStatistics(ctx, &cloudwatch.GetMetricStatisticsInput{
-			Namespace:  aws.String("ElasticGCS"),
-			MetricName: aws.String("ActiveTransfers"),
-			StartTime:  aws.Time(time.Now().Add(-5 * time.Minute)),
-			EndTime:    aws.Time(time.Now()),
-			Period:     aws.Int32(300),
-			Statistics: []cwtypes.Statistic{cwtypes.StatisticMaximum},
-			Dimensions: []cwtypes.Dimension{
-				{Name: aws.String("Region"), Value: aws.String(e.dep.Region)},
-				{Name: aws.String("Deployment"), Value: aws.String(e.dep.Name)},
-			},
-		})
-		if err != nil {
-			t.Logf("waitForCleanScaleInMetric: GetMetricStatistics warning: %v", err)
-			continue
-		}
-		// No datapoints = missing data, treated as 0 by the Lambda guard.
-		// Max = 0 = clean window.
-		if len(stats.Datapoints) == 0 || aws.ToFloat64(stats.Datapoints[0].Maximum) == 0 {
-			t.Logf("waitForCleanScaleInMetric: ActiveTransfers clear — Lambda guard will pass")
-			return
-		}
-		t.Logf("waitForCleanScaleInMetric: max=%.0f in last 5min, waiting...",
-			aws.ToFloat64(stats.Datapoints[0].Maximum))
-	}
-	t.Fatalf("waitForCleanScaleInMetric: timed out after %s", timeout)
-}
-
-// triggerScaleIn immediately forces the scale-in alarm to ALARM state,
-// driving the scale-in Lambda without waiting 15 minutes for demand_monitor
-// to organically produce three consecutive zero-demand periods.
-//
-// Why not wait for the organic path:
-//   - demand_monitor uses endpoint_manager/task_list which has a ~1-2 minute
-//     lag before marking SUCCEEDED tasks as terminal. This resets CloudWatch's
-//     3×5-minute evaluation window every test run.
-//   - Test transfers (1168 bytes, ~13s) complete far too quickly for organic
-//     scale-in to be reliable in any reasonable test timeout.
-//   - The production scale-in path works correctly for real transfers (minutes
-//     to hours), but is not suitable for automated testing with tiny files.
-//
-// What we do test:
-//   - The scale-in Lambda fires on OK→ALARM transition
-//   - The Lambda reduces ASG desired capacity
-//   - The lifecycle hook (disable→stop) completes and returns the instance to Warmed:Stopped
-//
-// The alarm is first reset to OK so the OK→ALARM transition always fires
-// regardless of state left by demand_monitor or a prior run.
-func (e *testEnv) triggerScaleIn(ctx context.Context, t *testing.T) {
-	t.Helper()
-
-	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
-		AlarmName:   aws.String(e.scaleInAlarm),
-		StateValue:  cwtypes.StateValueOk,
-		StateReason: aws.String("reset by integration test before triggerScaleIn"),
-	}); err != nil {
-		t.Logf("triggerScaleIn: SetAlarmState(OK) warning: %v", err)
-	} else {
-		t.Logf("triggerScaleIn: scale-in alarm reset to OK")
-	}
-
-	if _, err := e.cwClient.SetAlarmState(ctx, &cloudwatch.SetAlarmStateInput{
-		AlarmName:   aws.String(e.scaleInAlarm),
-		StateValue:  cwtypes.StateValueAlarm,
-		StateReason: aws.String("integration test: active transfers dropped to zero"),
-	}); err != nil {
-		t.Logf("triggerScaleIn: SetAlarmState(ALARM) warning: %v", err)
-	} else {
-		t.Logf("triggerScaleIn: scale-in alarm set to ALARM (SNS→scalein Lambda→ASG triggered)")
-	}
-}
-
-// waitForAllTasksTerminal polls until every task in taskIDs has reached a
-// terminal state (SUCCEEDED, FAILED, or CANCELLED). Used to detect when
-// active transfer demand drops to zero so the scale-in clock can start.
-func (e *testEnv) waitForAllTasksTerminal(ctx context.Context, t *testing.T,
-	taskIDs []string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	pending := make(map[string]bool, len(taskIDs))
-	for _, id := range taskIDs {
-		pending[id] = true
-	}
-	for time.Now().Before(deadline) && len(pending) > 0 {
-		time.Sleep(10 * time.Second)
-		for id := range pending {
-			info := e.getTaskInfo(ctx, t, id)
-			switch info.Status {
-			case "SUCCEEDED", "FAILED", "CANCELLED":
-				t.Logf("task %s: %s", id, info.Status)
-				delete(pending, id)
-			}
-		}
-	}
-	if len(pending) > 0 {
-		var ids []string
-		for id := range pending {
-			ids = append(ids, id)
-		}
-		t.Fatalf("tasks still pending after %s: %v", timeout, ids)
-	}
 }
 
 // waitForTransferSucceeded polls until the task reaches SUCCEEDED (or fails/cancels).

@@ -36,31 +36,31 @@ All work is tracked in GitHub:
 
 - **Language:** Go
 - **Infrastructure:** AWS CDK v2 (Go bindings)
-- **AWS Services:** EC2, Auto Scaling (with warm pools), Lambda, CloudWatch, Secrets Manager, S3, Elastic IPs, Systems Manager (SSM), EventBridge
+- **AWS Services:** EC2, Lambda (durable functions), CloudWatch, Secrets Manager, S3, Elastic IPs, Systems Manager (SSM), EventBridge, IAM
 - **Globus:** GCS v5.4+, S3 Connector, Globus Flows (for transfer event webhooks)
 - **Globus SDK:** github.com/scttfrdmn/globus-go-sdk/v3
 
 ## Architecture
 
-### Three-Tier Caching Model
+### DTN Slots and Three Tiers
+
+A deployment has `max_dtns` DTN slots. A slot is a pre-created node identity,
+an Elastic IP and (unless COLD) an instance, all owned by the slot controller.
 
 ```
-COLD (terminated)          WARM (stopped)              HOT (running)
-  No EC2 cost               EBS-only cost               Full compute cost
-  2-3 min scale-out         30-60s scale-out             0s (already serving)
+COLD (no instance)         WARM (stopped)              HOT (running)
+  No EC2 cost               EBS + Elastic IP            Full compute cost
+  ~2.5 min to serving       ~1.5 min to serving         0s (already serving)
        │                         │                            │
-       │  Launch from AMI        │  Resume instance           │  Already active
-       │  + node setup           │  + node enable             │
-       │  + import-node          │                            │
+       │  Launch from AMI        │  Start instance            │  Already active
+       │  + node setup           │  + node enable (boot unit) │
+       │  (--import-node)        │                            │
        ▼                         ▼                            ▼
-   ┌─────────┐  stop+hold   ┌─────────┐  transfer    ┌─────────┐
-   │  COLD   │ ──────────►  │  WARM   │ ──────────►  │   HOT   │
-   └─────────┘              └─────────┘              └─────────┘
-                                 ▲          cool-down     │
-                                 │          (15-30 min)   │
-                                 └────────────────────────┘
-                            cache eviction
-                            (72h timeout) ──► TERMINATE
+   ┌─────────┐   revive     ┌─────────┐    start       ┌─────────┐
+   │  COLD   │─────────────►│   HOT   │◄───────────────│  WARM   │
+   └─────────┘              └─────────┘───────────────►└─────────┘
+        ▲                                 drain + stop      │
+        └──────────── evict after cold_ttl (beyond warm_slots)
 ```
 
 ### Component Layout
@@ -70,21 +70,20 @@ COLD (terminated)          WARM (stopped)              HOT (running)
 │                     AWS Region (e.g. us-east-1)              │
 │                                                              │
 │  ┌──────────────┐     ┌──────────────────────────────────┐   │
-│  │ Control Node │     │  ASG + Warm Pool                 │   │
+│  │ Control Node │     │  DTN slots (controller-owned)    │   │
 │  │ (t3a.large)  │     │  ┌─────────┐  ┌─────────┐       │   │
-│  │              │     │  │  DTN 1   │  │  DTN 2   │ ...  │   │
-│  │ • GCS endpoint     │  │(stopped) │  │(stopped) │      │   │
-│  │ • Node identity    │  │ slot lock│  │ slot lock│      │   │
+│  │              │     │  │ slot 1  │  │ slot 2  │ ...   │   │
+│  │ • GCS endpoint     │  │HOT/WARM │  │  COLD   │       │   │
+│  │ • Node identity    │  │ + EIP   │  │         │       │   │
 │  │   pre-creation     │  └─────────┘  └─────────┘       │   │
-│  │ • Orchestration    │                                  │   │
 │  └──────┬───────┘     └──────────────────────────────────┘   │
 │         │                                                    │
-│  ┌──────▼───────┐     ┌──────────────────────────────────┐   │
-│  │   Lambda     │     │  S3 (Open Data Buckets)          │   │
-│  │ • Scale-out  │     │  • 1000genomes                   │   │
-│  │ • Scale-in   │     │  • noaa-nexrad-level2            │   │
-│  │ • Lifecycle  │     │  • openneuro.org                 │   │
-│  └──────────────┘     └──────────────────────────────────┘   │
+│  ┌──────▼──────────┐  ┌──────────────────────────────────┐   │
+│  │   Lambda        │  │  S3 (Open Data Buckets)          │   │
+│  │ • demand_monitor│  │  • 1000genomes                   │   │
+│  │ • slot_controller  │  • noaa-nexrad-level2            │   │
+│  │   (durable)     │  │  • openneuro.org                 │   │
+│  └─────────────────┘  └──────────────────────────────────┘   │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -178,26 +177,31 @@ aws-elastic-gcs/
 ├── mkdocs.yml                         # Project site (docs/ → GitHub Pages)
 ├── stacks/
 │   ├── control_node.go                # VPC, security group, control node EC2 + EIP, boot unit
-│   ├── dtn_pool.go                    # ASG + warm pool, Lambdas, EventBridge, alarms, dashboard
+│   ├── dtn_pool.go, slot_pool.go      # DTN stack: launch template, slot roles/profiles,
+│   │                                  # slot controller + triggers; dtn_lambdas.go: demand monitor
 │   └── iam_scope.go                   # IAM statements confined to one deployment
-├── lambda/                            # scaleout, scalein, lifecycle, cache_eviction,
-│                                      # demand_monitor, version_check, waker, idle_shutdown
+├── lambda/                            # slot_controller (durable), demand_monitor; version_check,
+│                                      # waker, idle_shutdown (not deployed yet: #144, #130)
 ├── internal/
+│   ├── slots/                         # Pure reconciler: Plan over HOT/WARM/COLD slots
+│   ├── slotctl/                       # Controller: observe slots, execute actions, lock
+│   ├── identity/                      # One-time node identity delivery (profile swap + revoke)
 │   ├── names/                         # All names/paths/tags from (region, deployment)
 │   ├── gcsid/                         # UUID validation before IDs reach shell commands
 │   └── logger/                        # Structured logging
 ├── cmd/aws-elastic-gcs-ctl/           # Operator CLI (status, nodes, collections, deprovision, ...)
 ├── config/                            # regions.yaml, open_data_buckets.yaml (+ examples)
 ├── scripts/
-│   ├── userdata/                      # control_node_init.sh, control_node_boot.sh,
-│   │                                  # elastic-gcs-control.service, dtn_boot.sh,
-│   │                                  # dtn_shutdown.sh, spot_interrupt_monitor.sh
+│   ├── userdata/                      # control_node_init.sh, control_node_boot.sh (node enable
+│   │                                  # on boot / disable on shutdown, also used by slots),
+│   │                                  # elastic-gcs-control.service
 │   ├── build_ami.sh                   # DTN AMI per GCS version → SSM parameter
+│   ├── configure_tls.sh, configure_gridftp.sh  # shared by the DTN AMI and control node
 │   ├── control_node_power.sh          # stop/start/install the control node between sessions
 │   ├── instance_sizing.py, throughput_model.py
 ├── docs/                              # Guides, performance study, blog, talk outline (the site)
 └── test/
-    ├── integration/                   # Live tests: node lifecycle, transfers, autoscaling
+    ├── integration/                   # Live tests: slot scale out/in, transfers
     └── benchmark/                     # timing tests, harness/ (two-deployment campaign), results/
 ```
 
@@ -207,12 +211,18 @@ Status lives on GitHub (issues, milestones, project board); see `CHANGELOG.md`
 for what each release contains. Stable facts worth knowing:
 - **Multiple deployments per region** (`regions.yaml` `deployment:`). The
   November 2026 benchmarks ran two deployments, `src` and `dst`, in us-west-2.
-- **DTN slots** are claimed with SSM parameter locks (`slot-lock/<N>`). First
-  boots are serialized by `setup-lock`, and resume runs `node update
-  --ip-address`, because DTNs have no EIPs.
-- **DNS gates.** A DTN signals the launch hook only once its IP is in endpoint
-  DNS (or out of it, for warm-pool first boots). Shutdown waits for the IP to
-  leave DNS.
+- **The slot controller** (#65; the ASG and warm pool were removed in #133)
+  is a Lambda durable function, invoked through its `live` alias every minute
+  and on `desired-dtns` changes. `demand_monitor` writes `desired-dtns`. Slot
+  instances and Elastic IPs are tagged `elastic-gcs:pool=slots` and belong to
+  the controller, not CloudFormation.
+- **Slot health** = running, SSM online, IP in endpoint DNS, and `gcs_manager`
+  plus `globus-gridftp-server` active. Revives run one at a time.
+- **GridFTP restarts.** GCS restarts GridFTP on every node at each node join or
+  leave; the `KillMode=process` drop-in (`configure_gridftp.sh`, #141) keeps
+  in-flight sessions alive, so drains are graceful.
+- **Zero nodes.** Transfer rejects submissions to an endpoint with no serving
+  node, so demand can't wake an endpoint from zero (#130).
 - **The control node** enables itself on boot and disables itself on shutdown
   (`elastic-gcs-control.service`). `scripts/control_node_power.sh` stops it
   between sessions.
@@ -222,28 +232,30 @@ for what each release contains. Stable facts worth knowing:
 
 ## Key Design Decisions
 
-### Why no EIPs for DTNs (slot locks instead)
-DTNs get a new public IP on every start, and resume runs `node update
---ip-address`. Slots are claimed through SSM parameter locks rather than EIP
-tags (#15). EIPs would avoid the IP update but cost $3.60/month per idle slot.
-Because of the IP update, every DTN holds the endpoint-admin client secret
-(#42). Stable per-slot addresses are part of the slot controller design (#65).
-The control node does have an EIP.
+### Why an Elastic IP per slot
+Each slot keeps one Elastic IP for its lifetime, so its node identity is always
+registered at the same address: a WARM start needs no `node update
+--ip-address`, and DTNs never need the endpoint-admin client secret (#42). An
+EIP costs ~$3.60/month while allocated; evicting a slot releases it. The first
+design used SSM slot locks and no EIPs (#15), which forced the IP update on
+every resume. The control node also has an EIP.
 
 ### Why Pre-Created Node Identities
 `node create --export-node` generates the node ID and encryption key without deploying services. This decouples identity provisioning from instance lifecycle. Benefits:
 - AMIs can be generic (no baked-in identity)
-- Node identity files stored in Secrets Manager, injected at boot
+- Node identity files stored in Secrets Manager, delivered once at node setup
+  (the controller swaps to a setup profile, then back, and revokes setup
+  sessions; the runtime role can't read secrets)
 - Failed instances can be replaced without creating new identities
-- The node slot concept maps cleanly to ASG desired capacity
+- One identity per slot
 
-### Why ASG Warm Pool (Not Custom Stop/Start)
-ASG warm pools are the native AWS mechanism for exactly this pattern. Benefits over custom EC2 stop/start:
-- Built-in lifecycle hooks for pre-stop and post-resume
-- `InstanceReusePolicy` automatically routes scale-in to stopped instead of terminated
-- `MaxGroupPreparedCapacity` caps warm pool size
-- Health checks and replacement are automatic
-- No custom state machine needed
+### Why a slot controller instead of an ASG warm pool
+The project first used an ASG with a warm pool and lifecycle hooks. It was
+replaced (#65) and removed (#133) because the ASG couldn't express what a GCS
+endpoint needs: per-slot identities and addresses, draining by GridFTP data
+connections, never stopping the last serving node, one-at-a-time identity
+delivery, and deploys that never resize or replace running DTNs. The
+controller's rules are a pure, table-tested function (`internal/slots.Plan`).
 
 ### Why t3a.large for Control Node
 GCS requires 8GB RAM minimum and publishes no aarch64 RPMs, so Graviton is out for the Rocky Linux AMI. t3a.large (2 vCPU, 8GB, x86-64) at $0.0752/hr (~$55/month) is the cheapest x86-64 type meeting the memory requirement. The control node does minimal work — it just needs to stay registered and respond to GCS Manager API calls. See `docs/instance-sizing.md`.
@@ -267,31 +279,34 @@ The DTN instance type should be configurable per-region in `config/regions.yaml`
 ### SSM Parameters
 - `/elastic-gcs/<region>/<deployment>/endpoint-id` — Globus endpoint UUID
 - `/elastic-gcs/<region>/<deployment>/control-node-id` — Control node EC2 instance ID
-- `/elastic-gcs/<region>/<deployment>/slot-lock/<N>` — DTN slot claim (value = instance ID)
-- `/elastic-gcs/<region>/<deployment>/setup-lock` — Serializes DTN first-boot `node setup`
+- `/elastic-gcs/<region>/<deployment>/desired-dtns` — DTNs the slot controller converges to (written by demand_monitor)
+- `/elastic-gcs/<region>/<deployment>/last-active` — Last time demand_monitor saw an active transfer
+- `/elastic-gcs/<region>/<deployment>/controller-lock` — One slot-controller execution at a time
+- `/elastic-gcs/<region>/<deployment>/endpoint-domain` — Endpoint DNS name, for health checks
 - `/elastic-gcs/<region>/dtn-ami/gcs-<version>` — DTN AMI for a GCS version (region-wide, shared by deployments)
 
 ### CDK Context / Config
-- Target regions
-- Open Data bucket list per region
-- Globus subscription ID
-- Globus endpoint owner identity
-- DTN instance types per region
-- Warm pool size (max prepared capacity)
-- Cool-down period (minutes)
-- Cache eviction TTL (hours)
+See `docs/configuration.md`. In short:
+- `regions.yaml`: deployments, instance types, `max_dtns`, and the slot and
+  cost settings (`cost_profile`, `warm_slots`, `cold_ttl`, `drain_timeout`,
+  `scale_in_idle`, `unhealthy_after`, `max_restarts`, `instance_types`,
+  `control_node`)
+- `open_data_buckets.yaml`: Open Data bucket list per region
+- `cdk.json` context: Globus subscription ID, endpoint owner, GCS version,
+  default `max_dtns`
 
 ## Testing Strategy
 
 ### Validated
-- Node lifecycle (disable → stop → resume → enable) via warm pool scale events
+- Slot controller on src and dst (#132): cold revive ~47 s to node setup done,
+  warm start ~95 s to in DNS, drain-then-stop under load with 0 task faults
 - End-to-end transfers, and the November 2026 two-deployment benchmark campaign
   (#58): `docs/performance/`, `test/benchmark/results/2026-11-us-west-2/`
-- Scale-out to ~2 min, measured until the node is in endpoint DNS
 
 ### Integration and benchmark tests
-- `test/integration/`: node lifecycle, transfer, autoscale (live AWS + Globus)
-- `test/benchmark/`: scale-out timing; `harness/` drives the two-deployment campaign
+- `test/integration/`: slot scale out/in, transfer (live AWS + Globus)
+- `test/benchmark/`: warm/hot/cold scale-out timing on slots; `harness/` drives
+  the two-deployment campaign
 
 ## Important Notes
 

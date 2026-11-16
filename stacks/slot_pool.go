@@ -27,7 +27,7 @@ func (p *dtnPool) buildSlots() {
 	setupProfile := awsiam.NewInstanceProfile(p.stack, jsii.String("SlotSetupProfile"), &awsiam.InstanceProfileProps{
 		Role: setupRole, InstanceProfileName: jsii.String(p.dep.Resource("dtn-setup")),
 	})
-	lt := p.dtnLaunchTemplate(runtimeRole, runtimeProfile, p.slotUserData(runtimeRole))
+	lt := p.dtnLaunchTemplate(runtimeProfile, p.slotUserData(runtimeRole))
 
 	ssmLogs := awslogs.NewLogGroup(p.stack, jsii.String("SSMCommandLogs"), &awslogs.LogGroupProps{
 		LogGroupName:  jsii.String("/elastic-gcs/" + p.dep.ID() + "/ssm-commands"),
@@ -67,6 +67,52 @@ func (p *dtnPool) buildSlots() {
 	awscdk.NewCfnOutput(p.stack, jsii.String("SlotControllerFunction"), &awscdk.CfnOutputProps{
 		Value: live.FunctionArn(), Description: jsii.String("Slot controller (Lambda durable function); invoke this qualified ARN"),
 	})
+}
+
+// dtnLaunchTemplate creates the DTN launch template.
+// Instance type from config (default c8in.2xlarge; see docs/instance-sizing.md).
+// Uses the same security group as the control node (GCS requires same ports).
+// It names the runtime profile directly: the slot controller swaps instances
+// between the named runtime and setup profiles (#127).
+func (p *dtnPool) dtnLaunchTemplate(profile awsiam.IInstanceProfile, ud awsec2.UserData) awsec2.LaunchTemplate {
+	// Use the DTN AMI that scripts/build_ami.sh built for this exact GCS version.
+	// It is resolved from a version-keyed SSM parameter at deploy time, not
+	// looked up at synth time, so the app synthesizes before any AMI exists (the
+	// control stack must be deployed first, because the AMI builder borrows its
+	// networking). Deploying this stack fails until `make ami` has written the
+	// parameter, so a DTN can never run a different GCS version than the pin.
+	dtnAMI := awsec2.MachineImage_FromSsmParameter(jsii.String(p.dep.AMIParam(p.cfg.GCSVersion)), nil)
+
+	ltProps := &awsec2.LaunchTemplateProps{
+		LaunchTemplateName: jsii.String(p.dep.Resource("dtn")),
+		InstanceType:       awsec2.NewInstanceType(jsii.String(p.cfg.DTNInstance)),
+		MachineImage:       dtnAMI,
+		SecurityGroup:      p.props.ControlStack.SecurityGroup,
+		InstanceProfile:    profile,
+		UserData:           ud,
+		RequireImdsv2:      jsii.Bool(true),
+		// One hop: containers or anything else forwarding through the DTN can't
+		// reach the instance role credentials (#48).
+		HttpPutResponseHopLimit: jsii.Number(1),
+		// 20GB gp3 root volume — DTNs need less storage than control node
+		BlockDevices: &[]*awsec2.BlockDevice{
+			{
+				DeviceName: jsii.String("/dev/sda1"),
+				Volume: awsec2.BlockDeviceVolume_Ebs(jsii.Number(20), &awsec2.EbsDeviceOptions{
+					VolumeType:          awsec2.EbsDeviceVolumeType_GP3,
+					Encrypted:           jsii.Bool(true),
+					DeleteOnTermination: jsii.Bool(true),
+				}),
+			},
+		},
+	}
+	if p.cfg.KeyPairName != "" {
+		ltProps.KeyPair = awsec2.KeyPair_FromKeyPairName(
+			p.stack, jsii.String("DTNKeyPair"),
+			jsii.String(p.cfg.KeyPairName),
+		)
+	}
+	return awsec2.NewLaunchTemplate(p.stack, jsii.String("DTNLaunchTemplate"), ltProps)
 }
 
 // slotRoles returns the DTN runtime role (no secret access, #42) and the setup
@@ -177,6 +223,9 @@ func (p *dtnPool) slotControllerFn(lt awsec2.LaunchTemplate, runtime, setup awsi
 			ExecutionTimeout: awscdk.Duration_Hours(jsii.Number(1)),
 			RetentionPeriod:  awscdk.Duration_Days(jsii.Number(3)),
 		},
+		// A durable execution runs (up to ExecutionTimeout) on the version it
+		// started on; a deploy must not delete that version underneath it.
+		CurrentVersionOptions: &awslambda.VersionOptions{RemovalPolicy: awscdk.RemovalPolicy_RETAIN},
 		Environment: &map[string]*string{
 			"DEPLOYMENT":         jsii.String(dep.Name),
 			"SSM_LOG_GROUP":      ssmLogs.LogGroupName(),

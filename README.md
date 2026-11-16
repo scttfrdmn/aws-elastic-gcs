@@ -1,6 +1,6 @@
 # Elastic GCS on AWS
 
-Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) infrastructure for AWS. Scales from a single control node (~$40/month idle) to multiple high-throughput Data Transfer Nodes in about two minutes (measured until the node is in endpoint DNS), then contracts back when transfers complete.
+Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) infrastructure for AWS. Scales from a single control node (~$59/month running, a few dollars stopped) to multiple high-throughput Data Transfer Nodes in about 1.5–2.5 minutes (measured until the node is in endpoint DNS), then contracts back when transfers complete.
 
 **Project site:** https://scttfrdmn.github.io/aws-elastic-gcs/ (guides, performance results, blog).
 
@@ -10,21 +10,22 @@ Auto-scaling [Globus Connect Server v5](https://docs.globus.org/globus-connect-s
 
 | | Always-on (2 DTNs) | Elastic GCS |
 |-|-------------------|-------------|
-| Idle cost | ~$400/mo | ~$4–56/mo |
-| Scale-out (warm) | — | ~2 min (in DNS) |
-| Scale-out (cold) | — | ~3–5 min |
+| Idle cost | ~$400/mo | ~$6–70/mo |
+| Scale-out (warm slot) | — | ~1.5 min (in DNS) |
+| Scale-out (cold slot) | — | ~2.5 min (in DNS) |
 | Max throughput | fixed | scales with demand |
 
 ### Cost tiers
 
 | Scenario | Monthly idle cost |
 |----------|-------------------|
-| Control node on 24/7, warm pool intact | ~$58 |
-| Control node idles off after 1h, warm pool intact | ~$12 |
-| Fully idle, warm pool intact (control node stopped) | ~$3.50 |
-| Fully idle, warm pool evicted after 72h | ~$1.40 |
+| Control node on 24/7, 2 warm slots (`cost_profile: balanced`) | ~$70 |
+| Control node stopped between sessions, 2 warm slots | ~$16 |
+| Control node stopped, no warm slots | ~$6 |
 
-See [docs/ephemeral-control-node.md](docs/ephemeral-control-node.md) for the full cost breakdown and idle-shutdown configuration.
+A warm slot costs about $5/month (EBS + Elastic IP). See
+[docs/architecture.md](docs/architecture.md#cost-model) for the cost model and
+[docs/configuration.md](docs/configuration.md) for the cost settings.
 
 ## Install the operator CLI
 
@@ -41,26 +42,32 @@ infrastructure itself is deployed from a clone of this repository (below).
 
 ## How It Works
 
-GCS nodes are pre-registered with unique identities stored in AWS Secrets Manager. DTN instances stay stopped in an ASG warm pool, paying only for EBS storage. When Globus transfer demand is detected, a Lambda resumes a stopped instance, runs `node enable`, and the DTN is serving, in endpoint DNS, in about two minutes.
+A deployment has a fixed number of DTN **slots**. Each slot has a GCS node
+identity pre-created by the control node and stored in AWS Secrets Manager, and
+an Elastic IP. A **slot controller** (a Lambda durable function) converges the
+slots to `desired-dtns`, which `demand_monitor` sets from active Globus
+transfers. It starts stopped (WARM) slots first; their node enables itself on
+boot and is serving, in endpoint DNS, in about 1.5 minutes. Otherwise it revives
+a COLD slot: launch from the DTN AMI, then a one-time `node setup` with the
+slot's identity.
 
-When transfers finish, a lifecycle hook runs `node disable` before the instance stops back to the warm pool.
+When transfers finish, the controller drains each slot (`node disable`, wait for
+its data connections to end) and stops it. Slots beyond `warm_slots` go COLD
+after `cold_ttl`.
 
 ```
-COLD (terminated)          WARM (stopped)              HOT (running)
-  No EC2 cost               EBS-only cost               Full compute cost
-  3–5 min scale-out         ~2 min scale-out            0s (already serving)
+COLD (no instance)         WARM (stopped)              HOT (running)
+  No EC2 cost               EBS + Elastic IP            Full compute cost
+  ~2.5 min to serving       ~1.5 min to serving         0s (already serving)
        │                         │                            │
-       │  Launch from AMI        │  Resume instance           │  Already active
+       │  Launch from AMI        │  Start instance            │  Already active
        │  + node setup           │  + node enable             │
        ▼                         ▼                            ▼
-   ┌─────────┐              ┌─────────┐              ┌─────────┐
-   │  COLD   │──stop+hold──►│  WARM   │──transfer───►│   HOT   │
-   └─────────┘              └─────────┘              └─────────┘
-                                 ▲          cool-down     │
-                                 │          (15–30 min)   │
-                                 └────────────────────────┘
-                            cache eviction
-                            (72h timeout) ──► TERMINATE
+   ┌─────────┐   revive     ┌─────────┐    start       ┌─────────┐
+   │  COLD   │─────────────►│   HOT   │◄───────────────│  WARM   │
+   └─────────┘              └─────────┘───────────────►└─────────┘
+        ▲                                 drain + stop      │
+        └──────────── evict after cold_ttl (beyond warm_slots)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for full details.
@@ -96,7 +103,7 @@ aws secretsmanager create-secret \
 
 # 4. Deploy
 make deploy-control REGION=us-east-1 DEPLOYMENT=default  # ~10 min (GCS endpoint setup)
-make deploy-dtn REGION=us-east-1 DEPLOYMENT=default      # ~3 min (ASG, Lambdas, dashboard)
+make deploy-dtn REGION=us-east-1 DEPLOYMENT=default      # ~3 min (slot controller, launch template, Lambdas)
 
 # 5. Validate
 make build
@@ -119,9 +126,9 @@ Elastic GCS — us-east-1
 Control Node   i-065c4e068da377b11     ● running       34.224.250.21
 Endpoint       09c97a5c-63e2-40a2-bcc9-caf96c0de230
 
-DTN Pool       desired=0    in-service=0    warm=2
-  i-09df2757f113b5448       slot=1    Warmed:Stopped          node=12ba8822
-  i-0b4cde7d88b82ece1       slot=3    Warmed:Stopped          node=030674af
+DTN Slots      desired=0    serving=0    warm=2
+  slot 1    i-09df2757f113b5448   stopped         phase=-           
+  slot 2    i-0b4cde7d88b82ece1   stopped         phase=-           
 
 GCS Nodes
   ○  030674af                        inactive
@@ -129,17 +136,16 @@ GCS Nodes
   ●  26ce140b                        active
 
 Active Transfers (5 min):  0
-Alarms:  scaleout ○ OK  scalein ● ALARM  version-drift ○ OK
 ```
 
 Commands:
 
 | Command | Description |
 |---------|-------------|
-| `status` | System overview: control node, DTN pool, GCS nodes, metrics, alarms |
-| `wake [--scale-out]` | Start the control node (and optionally scale out a DTN) |
-| `scale up [--to N] [--watch]` | Scale out the DTN pool |
-| `scale down [--to N] [--watch]` | Scale in the DTN pool |
+| `status` | System overview: control node, DTN slots, GCS nodes, active transfers |
+| `wake [--scale-out]` | Start the control node through the waker Lambda (not deployed by the slots stack yet, #130) |
+| `scale up [--to N] [--watch]` | Raise desired-dtns (held for `scale_in_idle`) |
+| `scale down [--to N] [--watch]` | Lower desired-dtns |
 | `nodes list` | List all GCS nodes with status |
 | `nodes delete <id>` | Delete a GCS node registration (accepts 8-char prefix) |
 | `nodes version-check` | Invoke version drift Lambda, show per-instance versions |
@@ -147,10 +153,9 @@ Commands:
 | `collections setup --config config/open_data_buckets.yaml` | Idempotently create gateways and collections |
 | `logs <lambda> [--since 1h] [--tail] [--json]` | Stream or fetch Lambda logs |
 | `metrics [--since 1h]` | ActiveTransfers sparkline + Lambda invocation counts |
-| `refresh [--force]` | Trigger ASG instance refresh (rolling DTN AMI update) |
 | `transfer test` | Submit a test transfer via the `globus` CLI |
 | `build-ami` | Build a new DTN AMI (wraps `scripts/build_ami.sh`) |
-| `deprovision [--confirm]` | Dry-run or execute full teardown (Globus nodes, CFN stacks, secrets) |
+| `deprovision [--confirm]` | Dry-run or execute full teardown (slot instances and Elastic IPs, Globus nodes, CFN stacks, secrets) |
 | `version` | Print tool version |
 
 ## Project Structure
@@ -160,16 +165,16 @@ elastic-gcs/
 ├── cdk.go / cdk.json         CDK app entrypoint and context
 ├── stacks/                   CDK stacks (network, control node, DTN pool)
 ├── lambda/                   Lambda function source (Go)
-│   ├── scaleout/
-│   ├── scalein/
-│   ├── lifecycle/
-│   ├── cache_eviction/
-│   ├── demand_monitor/
-│   └── version_check/
+│   ├── slot_controller/      durable function: converges DTN slots to desired-dtns
+│   ├── demand_monitor/       sets desired-dtns from active Globus transfers
+│   └── version_check/, waker/, idle_shutdown/   not deployed by the slots stack yet (#144, #130)
 ├── scripts/userdata/         EC2 boot/shutdown scripts
 │   ├── control_node_init.sh
-│   ├── dtn_boot.sh
-│   └── dtn_shutdown.sh
+│   ├── control_node_boot.sh  node enable on boot, disable on shutdown (control node and slots)
+│   └── elastic-gcs-control.service
+├── internal/slots/           pure slot reconciler (Plan)
+├── internal/slotctl/         controller: observe slots, execute actions
+├── internal/identity/        one-time node identity delivery (profile swap + revoke)
 ├── internal/logger/          Structured JSON logging (slog wrapper)
 ├── cmd/aws-elastic-gcs-ctl/      Operator CLI
 ├── config/                   regions.yaml, open_data_buckets.yaml

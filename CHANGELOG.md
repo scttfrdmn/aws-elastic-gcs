@@ -99,6 +99,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `waker` waited for `globus-connect-server-manager`; on GCS 5.4 the unit is
   `gcs_manager`, so the wait always timed out.
 
+### Removed
+- **The Auto Scaling group pool (#133).** The slot controller is the only DTN
+  pool; src and dst were migrated in #132.
+  - **Stacks:** the ASG, warm pool and its custom resources, lifecycle hooks,
+    the scale-out/scale-in alarms and SNS topics, and the dashboard. The DTN
+    stack builds the slot controller only.
+  - **Lambdas and packages:** `scaleout`, `scalein`, `lifecycle` and
+    `cache_eviction`; `internal/warmpool`, `internal/slotlock` and
+    `internal/eviction`. demand_monitor loses its ASG branch and always writes
+    `desired-dtns`.
+  - **Scripts:** `dtn_boot.sh`, `dtn_shutdown.sh` and
+    `spot_interrupt_monitor.sh`. Slots run `control_node_boot.sh` as their boot
+    unit.
+  - **Config:** `warm_pool_size`, `use_spot`, `spot_max_price`,
+    `idle_shutdown_minutes` and `min_uptime_minutes` are rejected with a pointer
+    to their replacement. `pool` is optional and accepts only `slots`. The
+    `elastic-gcs:warmPoolSize` and `elastic-gcs:cooldownMinutes` context keys
+    are gone. The control node pre-creates `max_dtns` node identities (it was
+    `max_dtns + warm_pool_size`).
+  - **CLI:** `refresh` (ASG instance refresh) is gone; slot rebuild and evict
+    come with #131. `status` shows slots and desired-dtns, `scale` sets
+    desired-dtns (and refreshes `last-active` so demand holds it), and
+    `deprovision` terminates slot instances and releases their Elastic IPs
+    before deleting the stacks.
+  - **Tests:** the ASG integration tests (autoscale, scale-out latency, node
+    lifecycle) are replaced by `TestSlotScaleOutIn`. The benchmark timing tests
+    and `harness/scale.sh`, `netem.sh` and `netsnap.sh` now drive slots.
+
+  Not deployed by the slots stack yet: `version_check` and its alarm, the
+  operator alert topic and the dashboard (#144); `idle_shutdown` and `waker`
+  (#130). Spot isn't supported on slots yet.
+
+  **Upgrade:** delete `warm_pool_size` (and `pool: asg`, if present) from
+  `config/regions.yaml`. Deploying the DTN stacks changes only demand_monitor's
+  environment and IAM. Deploying a control stack applies its new UserData
+  (`TOTAL_SLOTS = max_dtns`), which stops and starts the control node; existing
+  endpoints keep their identities.
+
 ## [0.13.0] - 2026-11-15
 
 Validated live on the us-west-2 `src` and `dst` deployments. Upgrade notes:

@@ -1,5 +1,18 @@
 # Ephemeral Control Node
 
+!!! warning "Not available on the slot controller yet"
+    The idle-shutdown and waker Lambdas described here belonged to the Auto
+    Scaling group stack, which was removed (#133). The slots stack doesn't deploy
+    them, and `idle_shutdown_minutes` / `min_uptime_minutes` are now rejected.
+    Control-node modes (`control_node: always | on_demand | none`, #130) replace
+    this design. Until then, stop and start the control node between sessions
+    with `scripts/control_node_power.sh <region> <deployment> stop|start`.
+
+    Note that Globus Transfer rejects submissions to an endpoint with no serving
+    node, so an endpoint whose control node is stopped and whose slots are all
+    stopped can't be woken by demand: wake it first. This page is kept as the
+    design reference for #130.
+
 Elastic GCS can automatically stop the control node EC2 instance when no
 transfers are active, reducing idle cost from ~$50/month to ~$4.50/month.
 This document covers the availability trade-offs, configuration, wake

@@ -28,9 +28,7 @@
 
     "adminCIDR": "",
 
-    "elastic-gcs:warmPoolSize": 2,
     "elastic-gcs:maxDTNs": 4,
-    "elastic-gcs:cooldownMinutes": 15,
     "elastic-gcs:cacheEvictionHours": 72
   }
 }

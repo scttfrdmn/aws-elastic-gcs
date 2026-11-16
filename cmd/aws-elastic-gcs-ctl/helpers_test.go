@@ -5,29 +5,7 @@ import (
 	"time"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
-
-	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
-
-func TestAlarmShortName(t *testing.T) {
-	d, err := names.New("us-east-1", "default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ name, want string }{
-		{d.Resource("scaleout"), "scaleout"},
-		{d.Resource("scaleout-throughput"), "scaleout"},
-		{d.Resource("scalein"), "scalein"},
-		{d.Resource("version-drift"), "version-drift"},
-		{"short", "short"},
-		{"a-b", "a-b"},
-		{"", ""},
-	} {
-		if got := alarmShortName(tc.name); got != tc.want {
-			t.Errorf("alarmShortName(%q) = %q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
 
 func TestInstanceState(t *testing.T) {
 	if got := instanceState(ec2types.Instance{}); got != "" {

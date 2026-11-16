@@ -18,13 +18,11 @@ Edit `config/regions.yaml` for your deployment:
 
 ```yaml
 regions:
-  us-east-1:
-    dtnInstanceType: c8in.2xlarge   # or m8in.xlarge / c8in.4xlarge; see instance-sizing.md
-    maxDTNs: 4
-    warmPoolSize: 2
-    useSpot: false
-    cacheEvictionTTL: 72
-    cooldownMinutes: 15
+  - name: us-east-1
+    deployment: default
+    dtn_instance: c8in.2xlarge   # or m8in.xlarge / c8in.4xlarge; see instance-sizing.md
+    max_dtns: 4                  # DTN slots
+    # cost_profile: balanced     # 2 warm slots, control node always on
 ```
 
 See [Configuration Reference](configuration.md) for all parameters.
@@ -92,13 +90,13 @@ Expected: Control Node `● running`, Endpoint UUID present.
 make deploy-dtn REGION=us-east-1 DEPLOYMENT=default
 ```
 
-This deploys: ASG + warm pool, Lambda functions, EventBridge rules, CloudWatch alarms and dashboard.
+This deploys: the DTN launch template, runtime and setup roles and instance profiles, the slot controller (a Lambda durable function, with its `live` alias), demand_monitor, and their EventBridge rules. No DTN instances are created: every slot starts COLD, and the controller creates instances and Elastic IPs as demand arrives.
 
 **Validation:**
 ```bash
 ./bin/aws-elastic-gcs-ctl status --region us-east-1
 ```
-Expected: DTN Pool shows `warm=2` (or your configured `warmPoolSize`) with `Warmed:Stopped` instances.
+Expected: DTN Slots shows `desired=0  serving=0  warm=0` and no slot instances.
 
 ---
 
@@ -110,7 +108,7 @@ Run through these checks after first deploy to confirm end-to-end function.
 ```bash
 ./bin/aws-elastic-gcs-ctl scale up --watch --region us-east-1
 ```
-Expected: `InService=1` within ~60 seconds.
+Expected: `serving=1` within ~2.5 minutes for the first (cold) revive, ~1.5 minutes from a warm slot. `scale` sets `desired-dtns` and refreshes `last-active`, so demand_monitor holds the value for `scale_in_idle` (default 15 minutes).
 
 ### Confirm GCS node active
 ```bash
@@ -126,23 +124,21 @@ This shells out to the `globus` CLI to transfer a small file from the 1000 Genom
 
 Expected: `Status: SUCCEEDED`.
 
-### Check version drift
-```bash
-./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
-```
-Expected: `GCSVersionDrift = 0` and all nodes showing the same version string.
-
 ### Check logs
 ```bash
-./bin/aws-elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
+./bin/aws-elastic-gcs-ctl logs slot-controller --since 30m --region us-east-1
 ```
-Expected: structured JSON log lines from the scale-out lifecycle hook.
+The controller's step results (each revive, start, drain and stop) are also in its durable execution history:
+```bash
+aws lambda list-durable-executions-by-function --function-name elastic-gcs-slot-controller-us-east-1-default --region us-east-1
+aws lambda get-durable-execution-history --durable-execution-arn <arn> --include-execution-data --region us-east-1
+```
 
 ### Scale back down
 ```bash
-./bin/aws-elastic-gcs-ctl scale down --watch --region us-east-1
+./bin/aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
 ```
-Expected: `InService=0` within ~30 seconds.
+Expected: the slot drains (`node disable`, data connections to 0) and stops within about a minute. The controller never stops the last DTN unless the control node is serving.
 
 ---
 
@@ -150,17 +146,9 @@ Expected: `InService=0` within ~30 seconds.
 
 ### Monitoring
 
-The CloudWatch dashboard `ElasticGCS-{region}` provides:
-- Active transfer count and DTN pool size (last 3h)
-- Scale event counts and lifecycle Lambda P99 latency (last 24h)
-- GCS version drift value and Lambda error counts
-
-Alarms:
-- `elastic-gcs-scaleout-{region}-{deployment}` — fires when `ActiveTransfers > 0` for 5 min
-- `elastic-gcs-scalein-{region}-{deployment}` — fires when `ActiveTransfers == 0` for 15 min
-- `elastic-gcs-version-drift-{region}-{deployment}` — fires when nodes run different GCS versions
-
-**Note:** The scalein alarm fires at idle (desired=0) as a false positive. The scalein Lambda is a no-op when desired is already 0.
+`aws-elastic-gcs-ctl status` and `metrics` show the slots, desired-dtns and the
+`ElasticGCS/ActiveTransfers` metric. The slots stack doesn't build alarms, an
+operator alert topic, a dashboard or the GCS version-drift check yet (#144).
 
 ### Manual Scaling
 
@@ -173,17 +161,17 @@ Alarms:
 ### Viewing Logs
 
 ```bash
-# Pretty-print last 1h of lifecycle Lambda logs
-./bin/aws-elastic-gcs-ctl logs lifecycle --since 1h --region us-east-1
+# Pretty-print last 1h of slot controller logs
+./bin/aws-elastic-gcs-ctl logs slot-controller --since 1h --region us-east-1
 
 # Stream live logs (polls every 2s)
 ./bin/aws-elastic-gcs-ctl logs demand-monitor --tail --region us-east-1
 
 # Raw JSON (pipe to jq)
-./bin/aws-elastic-gcs-ctl logs scaleout --since 2h --json --region us-east-1 | jq .
+./bin/aws-elastic-gcs-ctl logs demand-monitor --since 2h --json --region us-east-1 | jq .
 ```
 
-Available Lambda names: `lifecycle`, `scaleout`, `scalein`, `demand-monitor`, `cache-eviction`, `version-check`.
+Deployed Lambdas: `slot-controller`, `demand-monitor`. (`version-check`, `waker` and `idle-shutdown` return with #144 and #130.)
 
 ### GCS Version Upgrade
 
@@ -207,32 +195,30 @@ All nodes in a GCS endpoint **must run the same GCS version**. To upgrade:
    sudo globus-connect-server node enable
    ```
 
-4. **Trigger a rolling instance refresh** to replace warm pool instances with the new AMI:
+4. **Point the DTN stack at the new AMI and replace the slots' instances.** Set `globus:gcsVersion`, run `make deploy-dtn`, then terminate the stopped slot instances (see below) so each slot revives from the new AMI.
+
+5. **Verify** every node reports the new version:
    ```bash
-   ./bin/aws-elastic-gcs-ctl refresh --region us-east-1
+   ./bin/aws-elastic-gcs-ctl nodes list --region us-east-1
    ```
 
-5. **Verify**:
-   ```bash
-   ./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
-   ```
-   Expected: `GCSVersionDrift = 0` with the new version on all nodes.
+### Evicting a slot
 
-### Evicting and Refreshing Warm Pool Instances
-
-The cache eviction Lambda automatically terminates warm pool instances stopped longer than `cacheEvictionTTL` hours (default: 72h). To manually evict an instance:
+The controller evicts WARM slots beyond `warm_slots` after `cold_ttl` (default
+72h for `balanced`). To evict a slot by hand, for example to pick up a new AMI,
+terminate its stopped instance. The slot goes COLD and keeps its Elastic IP;
+the next scale-out revives it from the AMI (#131 adds `slots evict`):
 
 ```bash
-# Terminate the instance directly — ASG will replace it
-aws autoscaling terminate-instance-in-auto-scaling-group \
-  --instance-id i-xxxx \
-  --no-should-decrement-desired-capacity \
-  --region us-east-1
+aws ec2 describe-instances --region us-east-1 \
+  --filters Name=tag:elastic-gcs:deployment,Values=us-east-1-default Name=tag:elastic-gcs:pool,Values=slots \
+  --query 'Reservations[].Instances[].[InstanceId,State.Name,Tags[?Key==`elastic-gcs:slot`]|[0].Value]' --output text
+aws ec2 terminate-instances --instance-ids i-xxxx --region us-east-1
 ```
 
 ### Cleaning Up Stale GCS Nodes
 
-Orphaned GCS nodes (registered on the endpoint but no longer backed by an EC2 instance) appear as `○ inactive` in `status` with no corresponding warm pool instance.
+A WARM or COLD slot's node shows as `○ inactive` in `status`; that's expected, and the slot reuses it. A node is orphaned only if it isn't one of the slots' identities (for example after regenerating identities).
 
 ```bash
 # List all nodes
@@ -242,11 +228,9 @@ Orphaned GCS nodes (registered on the endpoint but no longer backed by an EC2 in
 ./bin/aws-elastic-gcs-ctl nodes delete <node-id-prefix> --region us-east-1
 ```
 
-The cache eviction Lambda also sweeps orphaned nodes automatically (when all warm pool instances carry the `elastic-gcs:gcs-node-id` tag).
-
 ### Regenerating Node Slot Identities
 
-If you replace the control node (e.g. instance failure), the new control node will regenerate node identities for any slots where Secrets Manager doesn't already have a valid identity. Warm pool instances that already booted retain their `node-id` file at `/var/lib/elastic-gcs/node-id` and will continue using their existing identity after resume.
+If you replace the control node (e.g. instance failure), the new control node will regenerate node identities for any slots where Secrets Manager doesn't already have a valid identity. Slot instances that already ran `node setup` keep their identity across stop and start.
 
 To force regeneration of all slot identities:
 ```bash
@@ -261,17 +245,28 @@ for i in $(seq 1 $TOTAL_SLOTS); do
 done
 ```
 
-Then terminate and replace all warm pool instances so they pick up the new identities.
+Then terminate every slot instance (see [Evicting a slot](#evicting-a-slot)) so each slot revives with its new identity.
 
 ---
 
 ## 4. Teardown / Destroy
 
-Follow these steps in order to avoid leaving orphaned GCS nodes or AWS resources.
+`./bin/aws-elastic-gcs-ctl deprovision --region us-east-1` does all of this in
+order (dry run without `--confirm`). Slot instances and Elastic IPs belong to
+the slot controller, not to CloudFormation, so stack deletion alone leaves them
+behind, and they hold the control stack's security group. By hand, follow these
+steps in order.
 
-### Step 1: Scale to zero
+### Step 1: Scale to zero and remove the slots
 ```bash
 ./bin/aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
+# Terminate every slot instance, then release the slots' Elastic IPs:
+aws ec2 describe-instances --region us-east-1 \
+  --filters Name=tag:elastic-gcs:deployment,Values=us-east-1-default Name=tag:elastic-gcs:pool,Values=slots \
+  --query 'Reservations[].Instances[].InstanceId' --output text
+aws ec2 describe-addresses --region us-east-1 \
+  --filters Name=tag:elastic-gcs:deployment,Values=us-east-1-default Name=tag:elastic-gcs:pool,Values=slots \
+  --query 'Addresses[].AllocationId' --output text
 ```
 
 ### Step 2: Remove all GCS nodes (except control node)
@@ -326,37 +321,35 @@ At this point AWS cost = $0 for this deployment (no running EC2, no allocated EI
 
 ## Troubleshooting
 
-### DTN fails to come InService
+### A slot doesn't become healthy
 
-1. Check lifecycle Lambda logs:
-   ```bash
-   ./bin/aws-elastic-gcs-ctl logs lifecycle --since 30m --region us-east-1
-   ```
-2. Check the instance boot log via SSM:
+1. Check the controller: its logs, and the step results in its durable execution history (see [Check logs](#check-logs)). A failed action is recorded as `error: ...` and re-planned the next round.
+2. Check the slot's node unit via SSM:
    ```bash
    aws ssm send-command --instance-ids i-xxx \
      --document-name AWS-RunShellScript \
-     --parameters 'commands=["journalctl -u elastic-gcs-boot --no-pager | tail -50"]'
+     --parameters 'commands=["journalctl -u elastic-gcs-node --no-pager | tail -50"]'
    ```
 3. Common causes:
    - Secrets Manager missing `node-slot-N` — control node didn't finish setup
    - GCS lock file owned by root — `chown gcsweb:gcsweb /var/lib/globus-connect-server/gcs-manager/locks/subscription_pause`
-   - SSM slot lock already held by a terminated instance — check `/elastic-gcs/{region}/{deployment}/slot-lock/{N}` parameters and delete stale ones
+   - A stale `controller-lock` from an execution that was stopped by hand — the next execution takes it over after it goes stale, or delete `/elastic-gcs/{region}/{deployment}/controller-lock`
+   - A revive whose execution died leaves the slot `reviving`; the controller rebuilds it after `unhealthy_after`
 
 ### `aws-elastic-gcs-ctl status` shows stale GCS nodes
 
 Run `./bin/aws-elastic-gcs-ctl nodes delete <node-id>`. If that fails, the GCS CLI on the control node may need auth — confirm `elastic-gcs/{region}/{deployment}/globus-client-id` and `globus-client-secret` are present in Secrets Manager.
 
-### `scalein ● ALARM` when desired=0
+### Transfers to the endpoint fail with "Error validating login"
 
-Expected behavior. The scalein alarm fires whenever `ActiveTransfers == 0` for 15 minutes, including when there are no DTNs running. The scalein Lambda is a no-op when desired capacity is already 0. This is cosmetically noisy but functionally correct.
+The endpoint has no serving node (control node stopped and no HOT slot).
+Transfer rejects the submission outright, so demand can't wake the endpoint
+(#130). Start the control node (`scripts/control_node_power.sh <region>
+<deployment> start`) or raise desired-dtns.
 
-### GCS version drift detected
+### GCS version drift
 
-1. Find which nodes are out of sync:
-   ```bash
-   ./bin/aws-elastic-gcs-ctl nodes version-check --region us-east-1
-   ```
+1. Find which nodes are out of sync: `./bin/aws-elastic-gcs-ctl nodes list --region us-east-1`
 2. Follow the GCS Version Upgrade procedure in Day-2 Operations.
 3. Do not run transfers while nodes are on different GCS versions — Globus does not support mixed-version endpoints.
 

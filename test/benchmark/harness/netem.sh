@@ -1,8 +1,10 @@
 #!/bin/bash
 # usage: netem.sh <delay_ms|off> — add one-way delay on dst DTNs for traffic to src DTN public IPs (RTT += delay); "off" clears it
+# shellcheck source=/dev/null
 . "${BENCH_ENV:-$(dirname "$0")/bench.env}"
 H="$(dirname "$0")"; R=$REGION
-ips() { for i in $(aws autoscaling describe-auto-scaling-groups --region $R --auto-scaling-group-names elastic-gcs-dtn-$R-$1 --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' --output text); do echo "$i $(aws ec2 describe-instances --region $R --instance-ids $i --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"; done; }
+# Running DTN slots of a deployment: "<instance-id> <public-ip>" per line.
+ips() { aws ec2 describe-instances --region $R --filters "Name=tag:elastic-gcs:deployment,Values=$R-$1" Name=tag:elastic-gcs:pool,Values=slots Name=instance-state-name,Values=running --query 'Reservations[].Instances[].[InstanceId,PublicIpAddress]' --output text; }
 SRC_IPS=$(ips src | awk '{print $2}' | tr '\n' ' ')
 for i in $(ips dst | awk '{print $1}'); do
   if [ "$1" = off ]; then CMD='IF=$(ip route show default | awk "{print \$5; exit}"); tc qdisc del dev $IF root 2>/dev/null; tc qdisc show dev $IF | head -1'

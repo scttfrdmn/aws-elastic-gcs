@@ -18,8 +18,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
-	astypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
@@ -40,15 +38,13 @@ const (
 type benchEnv struct {
 	region           string
 	dep              names.Deployment
-	asgName          string
 	controlNodeParam string
 	endpointIDParam  string
 
-	gcsCLIClientID     string
-	gcsEndpointID      string
+	gcsCLIClientID string
+	gcsEndpointID  string
 
 	cfg       aws.Config
-	asgClient *autoscaling.Client
 	ec2Client *ec2.Client
 	ssmClient *ssm.Client
 }
@@ -56,7 +52,7 @@ type benchEnv struct {
 // newBenchEnv initialises clients from environment variables.
 // Required: GLOBUS_CLIENT_ID (the GCS CLI credentials are read on the node).
 // Optional: ELASTIC_GCS_REGION (default us-east-1), ELASTIC_GCS_DEPLOYMENT
-// (default "default"), ELASTIC_GCS_ASG_NAME.
+// (default "default").
 func newBenchEnv(t *testing.T) *benchEnv {
 	t.Helper()
 
@@ -67,7 +63,6 @@ func newBenchEnv(t *testing.T) *benchEnv {
 	if err != nil {
 		t.Fatalf("ELASTIC_GCS_REGION/ELASTIC_GCS_DEPLOYMENT: %v", err)
 	}
-	asgName := getEnvOrDefault("ELASTIC_GCS_ASG_NAME", dep.Resource("dtn"))
 	controlNodeParam := dep.Param(names.ParamControlNodeID)
 	endpointIDParam := dep.Param(names.ParamEndpointID)
 
@@ -89,17 +84,15 @@ func newBenchEnv(t *testing.T) *benchEnv {
 	}
 
 	return &benchEnv{
-		region:             region,
-		dep:                dep,
-		asgName:            asgName,
-		controlNodeParam:   controlNodeParam,
-		endpointIDParam:    endpointIDParam,
-		gcsCLIClientID:     clientID,
-		gcsEndpointID:      gcsEndpointID,
-		cfg:                cfg,
-		asgClient:          autoscaling.NewFromConfig(cfg),
-		ec2Client:          ec2.NewFromConfig(cfg),
-		ssmClient:          ssmClient,
+		region:           region,
+		dep:              dep,
+		controlNodeParam: controlNodeParam,
+		endpointIDParam:  endpointIDParam,
+		gcsCLIClientID:   clientID,
+		gcsEndpointID:    gcsEndpointID,
+		cfg:              cfg,
+		ec2Client:        ec2.NewFromConfig(cfg),
+		ssmClient:        ssmClient,
 	}
 }
 
@@ -131,92 +124,141 @@ func (e *benchEnv) controlNodeID(ctx context.Context, t *testing.T) string {
 	return aws.ToString(out.Parameter.Value)
 }
 
-// scaleASG sets the ASG desired capacity.
-func (e *benchEnv) scaleASG(ctx context.Context, t *testing.T, desired int32) {
+// setDesired sets desired-dtns for the slot controller (#65). It also
+// refreshes last-active, so demand_monitor keeps the value for scale_in_idle
+// instead of resetting it while no transfers are active.
+func (e *benchEnv) setDesired(ctx context.Context, t *testing.T, desired int) {
 	t.Helper()
-	_, err := e.asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
-		AutoScalingGroupName: aws.String(e.asgName),
-		DesiredCapacity:      aws.Int32(desired),
-		HonorCooldown:        aws.Bool(false),
-	})
-	if err != nil {
-		t.Fatalf("SetDesiredCapacity(%d): %v", desired, err)
+	for _, kv := range [][2]string{
+		{names.ParamLastActive, time.Now().UTC().Format(time.RFC3339)},
+		{names.ParamDesiredDTNs, fmt.Sprint(desired)},
+	} {
+		if _, err := e.ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
+			Name: aws.String(e.dep.Param(kv[0])), Value: aws.String(kv[1]),
+			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true),
+		}); err != nil {
+			t.Fatalf("put %s=%s: %v", kv[0], kv[1], err)
+		}
 	}
 }
 
-// waitForWarmPool polls until >= minCount Warmed:Stopped instances exist.
-func (e *benchEnv) waitForWarmPool(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
+// slotInstances returns this deployment's slot instances in the given EC2
+// states, mapped to their elastic-gcs:phase tag ("" once healthy).
+func (e *benchEnv) slotInstances(ctx context.Context, states ...string) (map[string]string, error) {
+	out, err := e.ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{Filters: []ec2types.Filter{
+		{Name: aws.String("tag:" + names.TagDeployment), Values: []string{e.dep.ID()}},
+		{Name: aws.String("tag:elastic-gcs:pool"), Values: []string{"slots"}},
+		{Name: aws.String("instance-state-name"), Values: states},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]string{}
+	for _, r := range out.Reservations {
+		for _, i := range r.Instances {
+			phase := ""
+			for _, tag := range i.Tags {
+				if aws.ToString(tag.Key) == "elastic-gcs:phase" {
+					phase = aws.ToString(tag.Value)
+				}
+			}
+			ids[aws.ToString(i.InstanceId)] = phase
+		}
+	}
+	return ids, nil
+}
+
+// waitForStoppedSlots polls until >= minCount slots are stopped (WARM) and
+// none is running.
+func (e *benchEnv) waitForStoppedSlots(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(10 * time.Second)
-		wp, err := e.asgClient.DescribeWarmPool(ctx,
-			&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(e.asgName)})
+		running, err := e.slotInstances(ctx, "pending", "running", "stopping")
+		if err != nil || len(running) > 0 {
+			continue
+		}
+		stopped, err := e.slotInstances(ctx, "stopped")
 		if err != nil {
 			continue
 		}
-		var ids []string
-		for _, inst := range wp.Instances {
-			if inst.LifecycleState == astypes.LifecycleStateWarmedStopped {
-				ids = append(ids, aws.ToString(inst.InstanceId))
+		if len(stopped) >= minCount {
+			var ids []string
+			for id := range stopped {
+				ids = append(ids, id)
 			}
-		}
-		if len(ids) >= minCount {
 			return ids
 		}
 	}
-	t.Fatalf("timed out waiting for %d Warmed:Stopped instances after %s", minCount, timeout)
+	t.Fatalf("timed out waiting for %d stopped slots after %s", minCount, timeout)
 	return nil
 }
 
-// waitForASGInService polls until >= minCount InService instances exist.
-func (e *benchEnv) waitForASGInService(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
+// waitForServingSlots polls until >= minCount slots are running and healthy
+// (the controller clears their starting/reviving phase).
+func (e *benchEnv) waitForServingSlots(ctx context.Context, t *testing.T, minCount int, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(5 * time.Second)
-		out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-			&autoscaling.DescribeAutoScalingGroupsInput{
-				AutoScalingGroupNames: []string{e.asgName},
-			})
-		if err != nil || len(out.AutoScalingGroups) == 0 {
+		running, err := e.slotInstances(ctx, "running")
+		if err != nil {
 			continue
 		}
 		var ids []string
-		for _, inst := range out.AutoScalingGroups[0].Instances {
-			if inst.LifecycleState == astypes.LifecycleStateInService {
-				ids = append(ids, aws.ToString(inst.InstanceId))
+		for id, phase := range running {
+			if phase == "" {
+				ids = append(ids, id)
 			}
 		}
 		if len(ids) >= minCount {
 			return ids
 		}
 	}
-	t.Fatalf("timed out waiting for %d InService instances after %s", minCount, timeout)
+	t.Fatalf("timed out waiting for %d serving slots after %s", minCount, timeout)
 	return nil
 }
 
-// firstASGInstanceID waits for any non-warm-pool instance to appear in the ASG.
-func (e *benchEnv) firstASGInstanceID(ctx context.Context, t *testing.T, timeout time.Duration) string {
+// firstSlotInstanceID waits for a slot instance to be pending or running.
+func (e *benchEnv) firstSlotInstanceID(ctx context.Context, t *testing.T, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(3 * time.Second)
-		out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-			&autoscaling.DescribeAutoScalingGroupsInput{
-				AutoScalingGroupNames: []string{e.asgName},
-			})
-		if err != nil || len(out.AutoScalingGroups) == 0 {
+		ids, err := e.slotInstances(ctx, "pending", "running")
+		if err != nil {
 			continue
 		}
-		for _, inst := range out.AutoScalingGroups[0].Instances {
-			if id := aws.ToString(inst.InstanceId); id != "" {
-				return id
-			}
+		for id := range ids {
+			return id
 		}
 	}
-	t.Fatalf("no instance appeared in ASG within %s", timeout)
+	t.Fatalf("no slot instance started within %s", timeout)
 	return ""
+}
+
+// evictStoppedSlots terminates every stopped slot instance, so the next scale
+// out revives from cold (launch + node setup). The slots' Elastic IPs stay.
+func (e *benchEnv) evictStoppedSlots(ctx context.Context, t *testing.T) {
+	t.Helper()
+	stopped, err := e.slotInstances(ctx, "stopped")
+	if err != nil {
+		t.Fatalf("list stopped slots: %v", err)
+	}
+	var ids []string
+	for id := range stopped {
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := e.ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
+		t.Fatalf("terminate stopped slots: %v", err)
+	}
+	if err := ec2.NewInstanceTerminatedWaiter(e.ec2Client).Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: ids}, 10*time.Minute); err != nil {
+		t.Fatalf("wait for terminated slots: %v", err)
+	}
 }
 
 // waitForEC2Running polls until the instance reaches the EC2 "running" state.

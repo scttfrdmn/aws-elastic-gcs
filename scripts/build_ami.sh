@@ -4,9 +4,9 @@ set -euo pipefail
 # =============================================================================
 # DTN AMI Build Script
 # =============================================================================
-# Builds an AMI with GCS pre-installed for use by DTN warm pool instances.
-# The AMI contains NO node identity or endpoint config — those are injected
-# at boot time from Secrets Manager by the UserData / systemd service.
+# Builds an AMI with GCS pre-installed for the slot controller's DTN instances.
+# The AMI contains NO node identity or endpoint config — the slot controller
+# delivers a slot's identity once, at node setup (internal/identity).
 #
 # AMI contents:
 #   - GCS 5.4 (globus-connect-server54, pinned to $GCS_VERSION)

@@ -17,9 +17,9 @@ import (
 // carry both Region and Deployment dimensions (see Dimensions).
 const MetricNamespace = "ElasticGCS"
 
-// DTNMetricNamespace holds metrics DTNs publish about themselves (boot
-// latency). It is separate so the DTN role can be limited to it: DTNs must not
-// be able to forge the demand metrics that drive scaling (#43).
+// DTNMetricNamespace holds metrics DTNs publish about themselves. It is
+// separate so the DTN role can be limited to it: DTNs must not be able to
+// forge the demand metrics that drive scaling (#43).
 const DTNMetricNamespace = "ElasticGCS/DTN"
 
 // DefaultDeployment is used when regions.yaml doesn't name a deployment.
@@ -57,7 +57,7 @@ func New(region, name string) (Deployment, error) {
 func (d Deployment) ID() string { return d.Region + "-" + d.Name }
 
 // Resource names an AWS resource of the given kind, e.g. Resource("dtn") is
-// "elastic-gcs-dtn-us-west-2-src" (ASG, launch template, DTN IAM role).
+// "elastic-gcs-dtn-us-west-2-src" (the DTN launch template).
 func (d Deployment) Resource(kind string) string {
 	return fmt.Sprintf("elastic-gcs-%s-%s", kind, d.ID())
 }
@@ -101,8 +101,6 @@ func (d Deployment) Dimensions() map[string]string {
 const (
 	ParamEndpointID    = "endpoint-id"
 	ParamControlNodeID = "control-node-id"
-	ParamSlotLock      = "slot-lock"
-	ParamSetupLock     = "setup-lock"
 	// Slot controller (#128).
 	ParamDesiredDTNs    = "desired-dtns"    // written by demand_monitor
 	ParamControllerLock = "controller-lock" // single active controller execution
@@ -113,20 +111,13 @@ const (
 	TagRegion     = "elastic-gcs:region"
 	TagRole       = "elastic-gcs:role"
 
-	// Written by dtn_boot.sh (its IAM allows exactly these two keys).
-	TagSlot      = "elastic-gcs:slot"
-	TagGCSNodeID = "elastic-gcs:gcs-node-id"
-	// Written by the lifecycle Lambda when an instance enters the warm pool.
-	TagWarmPoolEntryTime = "elastic-gcs:warm-pool-entry-time"
+	// A DTN's slot number, set by the slot controller at launch.
+	TagSlot = "elastic-gcs:slot"
 
 	// Instance roles, in the TagRole tag. Lambdas that act on the control node
 	// (or on DTNs) require the matching role tag (#44).
 	RoleControl = "control"
 	RoleDTN     = "dtn"
-
-	// ASG lifecycle hooks (dtn_boot.sh gets HookReady via LIFECYCLE_HOOK).
-	HookReady   = "dtn-ready-hook"
-	HookDisable = "dtn-disable-hook"
 )
 
 // FromEnv builds the Deployment from AWS_REGION (set by the Lambda runtime)

@@ -25,26 +25,19 @@ type Resolved struct {
 	ControlInstance string
 	DTNInstance     string
 
-	// WarmPoolSize stopped DTNs (0 with Spot: AWS forbids warm pools for Spot).
-	WarmPoolSize int
-	// MaxDTNs is the most DTNs InService at once.
+	// MaxDTNs is the number of DTN slots (1..MaxDTNs), and so the most DTNs
+	// serving at once.
 	MaxDTNs int
-	// TotalSlots = MaxDTNs + WarmPoolSize: node identities pre-created by the
-	// control node, and slots 1..TotalSlots that DTNs claim.
+	// TotalSlots is the number of node identities the control node pre-creates
+	// at setup: one per slot, so MaxDTNs.
 	TotalSlots int
 
-	CacheEvictionHours int
-	// ThroughputThresholdBps triggers the multi-DTN scale-out alarm.
+	// ThroughputThresholdBps is the throughput one DTN is expected to carry;
+	// demand_monitor asks for ceil(total / threshold) DTNs.
 	ThroughputThresholdBps int64
 	// ThroughputDerivedFallback is true when the DTN type has no known sustained
 	// throughput and the 500 MB/s fallback was used (the stack warns).
 	ThroughputDerivedFallback bool
-
-	IdleShutdownMinutes int
-	MinUptimeMinutes    int
-
-	UseSpot      bool
-	SpotMaxPrice string
 
 	GCSVersion  string
 	AdminCIDR   string
@@ -53,7 +46,6 @@ type Resolved struct {
 	NetworkUse NetworkUse
 
 	// Slot controller (#65, #126).
-	Pool           string // asg | slots
 	CostProfile    string // balanced | minimal
 	WarmSlots      int
 	DrainTimeout   time.Duration
@@ -84,13 +76,11 @@ var costProfiles = map[string]struct {
 
 // Default values (docs/instance-sizing.md, docs/configuration.md).
 const (
-	DefaultControlInstance    = "t3a.large"
-	DefaultDTNInstance        = "c8in.2xlarge"
-	DefaultWarmPoolSize       = 2
-	DefaultCacheEvictionHours = 72
-	DefaultMinUptimeMinutes   = 30
-	DefaultGCSVersion         = "5.4.101"
-	fallbackThresholdBps      = 500_000_000
+	DefaultControlInstance = "t3a.large"
+	DefaultDTNInstance     = "c8in.2xlarge"
+	DefaultMaxDTNs         = 4
+	DefaultGCSVersion      = "5.4.101"
+	fallbackThresholdBps   = 500_000_000
 	// MaxTransferConcurrency is the most concurrent files Transfer allows per task.
 	MaxTransferConcurrency = 128
 )
@@ -117,45 +107,41 @@ var gcsVersionRe = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 // Per-deployment settings in regions.yaml win over CDK context defaults.
 func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 	r := Resolved{
-		ControlInstance:     or(rc.ControlInstance, DefaultControlInstance),
-		DTNInstance:         or(rc.DTNInstance, DefaultDTNInstance),
-		WarmPoolSize:        rc.WarmPoolSize,
-		MaxDTNs:             rc.MaxDTNs,
-		CacheEvictionHours:  d.CacheEvictionHours,
-		IdleShutdownMinutes: rc.IdleShutdownMinutes,
-		MinUptimeMinutes:    rc.MinUptimeMinutes,
-		UseSpot:             rc.UseSpot,
-		SpotMaxPrice:        rc.SpotMaxPrice,
-		GCSVersion:          or(d.GCSVersion, DefaultGCSVersion),
-		AdminCIDR:           d.AdminCIDR,
-		KeyPairName:         rc.KeyPairName,
+		ControlInstance: or(rc.ControlInstance, DefaultControlInstance),
+		DTNInstance:     or(rc.DTNInstance, DefaultDTNInstance),
+		MaxDTNs:         rc.MaxDTNs,
+		GCSVersion:      or(d.GCSVersion, DefaultGCSVersion),
+		AdminCIDR:       d.AdminCIDR,
+		KeyPairName:     rc.KeyPairName,
 	}
 	var errs []string
 	bad := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 
-	if rc.WarmPoolSize < 0 || rc.MaxDTNs < 0 || rc.IdleShutdownMinutes < 0 || rc.MinUptimeMinutes < 0 || rc.ThroughputScaleOutMBps < 0 {
-		bad("warm_pool_size, max_dtns, idle_shutdown_minutes, min_uptime_minutes and throughput_scaleout_mbps must be >= 0")
+	// Settings of the removed ASG pool (#133): fail loudly rather than deploy
+	// something other than what the file asks for.
+	if rc.Pool != "" && rc.Pool != "slots" {
+		bad("pool %q: the ASG pool was removed (#133); slots is the only pool, so drop the setting", rc.Pool)
 	}
-	if r.WarmPoolSize == 0 {
-		r.WarmPoolSize = DefaultWarmPoolSize
+	if rc.WarmPoolSize != 0 {
+		bad("warm_pool_size was removed with the ASG pool (#133); use warm_slots")
 	}
-	if r.UseSpot {
-		r.WarmPoolSize = 0 // AWS rejects warm pools with Spot
+	if rc.UseSpot || rc.SpotMaxPrice != "" {
+		bad("use_spot and spot_max_price were removed with the ASG pool (#133); Spot isn't supported on slots yet")
+	}
+	if rc.IdleShutdownMinutes != 0 || rc.MinUptimeMinutes != 0 {
+		bad("idle_shutdown_minutes and min_uptime_minutes were removed with the ASG pool (#133); see control_node (#130)")
+	}
+
+	if rc.MaxDTNs < 0 || rc.ThroughputScaleOutMBps < 0 {
+		bad("max_dtns and throughput_scaleout_mbps must be >= 0")
 	}
 	if r.MaxDTNs == 0 {
 		r.MaxDTNs = d.MaxDTNs
 	}
 	if r.MaxDTNs == 0 {
-		r.MaxDTNs = max(r.WarmPoolSize+1, 1)
+		r.MaxDTNs = DefaultMaxDTNs
 	}
-	r.TotalSlots = r.MaxDTNs + r.WarmPoolSize
-
-	if r.CacheEvictionHours <= 0 {
-		r.CacheEvictionHours = DefaultCacheEvictionHours
-	}
-	if r.IdleShutdownMinutes > 0 && r.MinUptimeMinutes == 0 {
-		r.MinUptimeMinutes = DefaultMinUptimeMinutes
-	}
+	r.TotalSlots = r.MaxDTNs
 
 	switch {
 	case d.ThroughputMBps > 0:
@@ -198,10 +184,6 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 	}
 
 	// Slot controller settings (#126).
-	r.Pool = or(rc.Pool, "asg")
-	if r.Pool != "asg" && r.Pool != "slots" {
-		bad("pool %q: want asg or slots", rc.Pool)
-	}
 	r.CostProfile = or(rc.CostProfile, "balanced")
 	prof, ok := costProfiles[r.CostProfile]
 	if !ok {
@@ -257,12 +239,6 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 			r.InstanceTypes = append(r.InstanceTypes, t)
 		}
 	}
-	if r.Pool == "slots" && r.UseSpot {
-		// Spot is a per-slot launch option under the slot controller; the
-		// warm-pool restriction (Spot forces warm_pool_size 0) doesn't apply.
-		r.WarmPoolSize = 0
-	}
-
 	if !gcsVersionRe.MatchString(r.GCSVersion) {
 		bad("globus:gcsVersion %q is not an exact version like 5.4.101", r.GCSVersion)
 	}
@@ -271,11 +247,6 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 			bad("adminCIDR %q is not a CIDR block", r.AdminCIDR)
 		} else if r.AdminCIDR == "0.0.0.0/0" {
 			bad("adminCIDR 0.0.0.0/0 opens SSH to the internet; use SSM Session Manager or a narrow CIDR")
-		}
-	}
-	if r.SpotMaxPrice != "" {
-		if _, err := strconv.ParseFloat(r.SpotMaxPrice, 64); err != nil {
-			bad("spot_max_price %q is not a number", r.SpotMaxPrice)
 		}
 	}
 	if len(errs) > 0 {
