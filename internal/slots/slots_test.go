@@ -91,3 +91,42 @@ func TestMinimalProfileEvictsAllAfterTTL(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestControlPath(t *testing.T) {
+	c := cfg
+	c.DemoteControlAfter = 2 * time.Minute
+	steady := func(n int) Slot { return Slot{N: n, Tier: Hot, Healthy: true, HealthyFor: 3 * time.Minute} }
+	cases := []struct {
+		name    string
+		obs     Observed
+		desired int
+		cfg     Config
+		want    []string
+	}{
+		{"a steady DTN demotes the serving control node",
+			Observed{Slots: []Slot{steady(1), warm(2), warm(3), cold(4)}, ControlServing: true, ControlRunning: true}, 1, c, []string{"demote-control:0"}},
+		{"not before the DTN has been healthy for demote_after",
+			Observed{Slots: []Slot{{N: 1, Tier: Hot, Healthy: true, HealthyFor: time.Minute}, warm(2), warm(3), cold(4)}, ControlServing: true, ControlRunning: true}, 1, c, []string{}},
+		{"demotion off (0) keeps the control node serving",
+			Observed{Slots: []Slot{steady(1), warm(2), warm(3), cold(4)}, ControlServing: true, ControlRunning: true}, 1, cfg, []string{}},
+		{"already demoted: nothing to do",
+			Observed{Slots: []Slot{steady(1), warm(2), warm(3), cold(4)}, ControlRunning: true}, 1, c, []string{}},
+		{"no healthy DTN restores a demoted control node at once",
+			Observed{Slots: []Slot{{N: 1, Tier: Hot, UnhealthyFor: time.Minute}, warm(2), warm(3), cold(4)}, ControlRunning: true}, 1, c, []string{"ensure-control:0"}},
+		{"a deliberately stopped control node stays stopped when idle",
+			Observed{Slots: []Slot{warm(1), warm(2), warm(3), cold(4)}}, 0, c, []string{}},
+		{"scale-in of the last DTN restores the control node once, then drains",
+			Observed{Slots: []Slot{steady(1), warm(2), warm(3), cold(4)}, ControlRunning: true}, 0, c, []string{"ensure-control:0"}},
+		{"no demotion while the last DTN is being scaled in",
+			Observed{Slots: []Slot{steady(1), warm(2), warm(3), cold(4)}, ControlServing: true, ControlRunning: true}, 0, c, []string{"begin-drain:1"}},
+		{"one unhealthy of two healthy DTNs keeps the control node demoted",
+			Observed{Slots: []Slot{steady(1), {N: 2, Tier: Hot, UnhealthyFor: time.Minute}, warm(3), cold(4)}, ControlRunning: true}, 2, c, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kinds(Plan(tc.obs, tc.desired, tc.cfg)); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -9,6 +9,7 @@
 //	elastic-gcs:phase           starting | reviving | draining | stopping | evicting
 //	elastic-gcs:phase-since     RFC 3339
 //	elastic-gcs:unhealthy-since RFC 3339 (HOT slots that failed a health check)
+//	elastic-gcs:healthy-since   RFC 3339 (HOT slots passing it; for control demotion)
 //	elastic-gcs:restarts        restarts since last healthy
 //	elastic-gcs:stopped-at      RFC 3339 (WARM slots, for cold_ttl)
 package slotctl
@@ -28,6 +29,7 @@ const (
 	TagPhase          = "elastic-gcs:phase"
 	TagPhaseSince     = "elastic-gcs:phase-since"
 	TagUnhealthySince = "elastic-gcs:unhealthy-since"
+	TagHealthySince   = "elastic-gcs:healthy-since"
 	TagRestarts       = "elastic-gcs:restarts"
 	TagStoppedAt      = "elastic-gcs:stopped-at"
 	TagPool           = "elastic-gcs:pool" // "slots" on controller-owned resources
@@ -39,6 +41,12 @@ type Probe struct {
 	InDNS     bool // the slot's EIP is in endpoint DNS
 	GCSActive bool // gcs_manager and globus-gridftp-server are active on the node
 	DataConns int  // established GridFTP data connections (ports 50000-51000)
+}
+
+// ControlState is the control node as the controller sees it.
+type ControlState struct {
+	Running bool // instance running
+	Serving bool // running and its EIP in endpoint DNS
 }
 
 // SlotFromInstance turns an instance (and, if running, its probe) into the
@@ -61,7 +69,9 @@ func SlotFromInstance(inst ec2types.Instance, p Probe, now time.Time) (slots.Slo
 		// DNS alone isn't enough: a slot's EIP stays in endpoint DNS after its
 		// instance dies without a disable, so the node must also be serving.
 		s.Healthy = state == "running" && p.SSMOnline && p.InDNS && p.GCSActive
-		if !s.Healthy {
+		if s.Healthy {
+			s.HealthyFor = since(t[TagHealthySince], now)
+		} else {
 			s.UnhealthyFor = since(t[TagUnhealthySince], now)
 		}
 		s.RestartAttempts, _ = strconv.Atoi(t[TagRestarts])
@@ -92,9 +102,9 @@ func SlotFromInstance(inst ec2types.Instance, p Probe, now time.Time) (slots.Slo
 // Observed builds the full view: every live slot instance, plus COLD records
 // for slots 1..maxDTNs without one. A slot with two live instances (shouldn't
 // happen) is reported by its lowest instance ID only.
-func Observed(insts []ec2types.Instance, probes map[string]Probe, controlServing bool, maxDTNs int, now time.Time) slots.Observed {
+func Observed(insts []ec2types.Instance, probes map[string]Probe, control ControlState, maxDTNs int, now time.Time) slots.Observed {
 	seen := map[int]bool{}
-	obs := slots.Observed{ControlServing: controlServing}
+	obs := slots.Observed{ControlServing: control.Serving, ControlRunning: control.Running}
 	for _, inst := range insts {
 		id := ""
 		if inst.InstanceId != nil {

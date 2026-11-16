@@ -62,6 +62,11 @@ func TestSlotPoolStack(t *testing.T) {
 		})
 	}
 
+	// The node unit's script download retries (IAM may lag a new role, #146).
+	if ltJSON, _ := json.Marshal(tpl.FindResources(jsii.String("AWS::EC2::LaunchTemplate"), nil)); !strings.Contains(string(ltJSON), "retrying in 10s") {
+		t.Error("slot UserData doesn't retry the node_boot.sh download")
+	}
+
 	// Secret access: setup role only.
 	raw, _ := json.Marshal(tpl.ToJSON())
 	var doc struct {

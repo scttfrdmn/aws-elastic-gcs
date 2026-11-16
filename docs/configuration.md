@@ -49,6 +49,7 @@ instance, in one of three tiers:
 | `drain_timeout` | `10m` | Scale-in: maximum wait for a disabled node's GridFTP data connections before stopping it. Sessions finish on the draining node (#141); Globus retries anything still in flight on other nodes |
 | `scale_in_idle` | `15m` | No active transfers for this long scales the pool to 0 |
 | `unhealthy_after` | `5m` | A running slot that isn't healthy (SSM online, in endpoint DNS, GCS services active) this long is restarted |
+| `control_demote_after` | `2m` | Once a DTN has been healthy this long, take the control node out of the data path (local `node disable`); it serves again as soon as no DTN is healthy. `off` keeps it serving alongside DTNs. Globus balances sessions across nodes without regard to capacity (#146) |
 | `max_restarts` | `2` | Restarts before an unhealthy slot is rebuilt (cold, then revived) |
 | `instance_types` | `[dtn_instance]` | DTN types in fallback order, used when EC2 reports no capacity for the first. `dtn_instance` is always first |
 | `control_node` | profile (`balanced`: `always`, `minimal`: `none`) | `always`, `on_demand` or `none` (#130). Transfer rejects submissions to an endpoint with zero serving nodes, so `on_demand` and `none` need an explicit wake before the first transfer |
