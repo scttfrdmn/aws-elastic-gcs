@@ -223,6 +223,9 @@ func (p *dtnPool) slotControllerFn(lt awsec2.LaunchTemplate, runtime, setup awsi
 			ExecutionTimeout: awscdk.Duration_Hours(jsii.Number(1)),
 			RetentionPeriod:  awscdk.Duration_Days(jsii.Number(3)),
 		},
+		// A durable execution runs (up to ExecutionTimeout) on the version it
+		// started on; a deploy must not delete that version underneath it.
+		CurrentVersionOptions: &awslambda.VersionOptions{RemovalPolicy: awscdk.RemovalPolicy_RETAIN},
 		Environment: &map[string]*string{
 			"DEPLOYMENT":         jsii.String(dep.Name),
 			"SSM_LOG_GROUP":      ssmLogs.LogGroupName(),
