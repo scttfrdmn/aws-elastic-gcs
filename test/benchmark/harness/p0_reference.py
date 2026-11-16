@@ -65,10 +65,14 @@ def parallel(n, fn, keys):
 
 def curl_get(bucket):
     def f(key):
-        r = sh(f"curl -s -o /dev/null -w '%{{size_download}} %{{time_total}} %{{http_code}}' "
+        r = sh(f"curl -s --connect-timeout 10 --max-time 600 -o /dev/null "
+               f"-w '%{{size_download}} %{{time_total}} %{{http_code}}' "
                f"https://{bucket}.s3.us-west-2.amazonaws.com/{key}")
-        b, t, code = r.stdout.split()
-        return int(b), float(t), code
+        try:
+            b, t, code = r.stdout.split()
+            return int(float(b)), float(t), code
+        except ValueError:
+            return 0, 0.0, "000"
     return f
 
 
@@ -82,7 +86,7 @@ def crt_env(target_gbps):
 def crt_get(bucket, env=""):
     def f(key):
         t0 = time.time()
-        r = sh(f"{env}aws s3 cp s3://{bucket}/{key} - --only-show-errors > /dev/null")
+        r = sh(f"{env}timeout 900 aws s3 cp s3://{bucket}/{key} - --only-show-errors > /dev/null")
         return r.returncode, time.time() - t0
     return f
 
@@ -90,7 +94,7 @@ def crt_get(bucket, env=""):
 def crt_put(bucket, size, prefix, env=""):
     def f(i):
         t0 = time.time()
-        r = sh(f"head -c {size} /dev/zero | {env}aws s3 cp - s3://{bucket}/{prefix}/{i} "
+        r = sh(f"head -c {size} /dev/zero | {env}timeout 900 aws s3 cp - s3://{bucket}/{prefix}/{i} "
                f"--expected-size {size} --only-show-errors")
         return r.returncode, time.time() - t0
     return f
@@ -164,8 +168,8 @@ def main():
     keys_64m = [f"p0/64m/{i:03d}" for i in range(128)]
 
     # Single connection per object (stock-connector-like), 1 GiB and 64 MiB objects.
-    for size, keys, ns in [(GIB, keys_1g, [1, 8, 32, 128] + ([512] if big else [])),
-                           (64 << 20, keys_64m, [1, 32, 128] + ([512] if big else []))]:
+    for size, keys, ns in [(GIB, keys_1g, [1, 8, 32, 128] + ([256] if big else [])),
+                           (64 << 20, keys_64m, [1, 32, 128] + ([256] if big else []))]:
         for n in ns:
             reps = a.reps if n == 1 else 1
             for r in range(reps):
@@ -203,7 +207,7 @@ def main():
                          "errors": sum(1 for x in res if x[0] != 0),
                          "agg_gbps": round(n * GIB * 8 / wall / 1e9, 3)})
     sh(f"aws s3 rm s3://{a.bucket}/{prefix}/ --recursive --only-show-errors")
-    for n in [128] + ([512] if big else []):
+    for n in [128] + ([256] if big else []):
         emit(a.out, {**base, "test": "get1_sustained", "object": GIB, "inflight": n, "bin_s": 10,
                      "gbps_bins": get1_sustained(a.bucket, n, keys_1g)})
     emit(a.out, {**base, "test": "done"})
