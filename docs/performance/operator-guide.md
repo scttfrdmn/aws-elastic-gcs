@@ -64,7 +64,20 @@ CPU, burning its burst credits.
   (`--use-explicit-host <dtn-ip>`). Pointing them at the control node returns
   `service_unavailable`.
 
-Automating this toggle is part of the slot controller (#65).
+The slot controller now does this toggle automatically (#146,
+`control_demote_after`, default 2 minutes). The manual commands above are only
+needed without it.
+
+### Kernel network tuning (DTNs)
+
+The DTN AMI ships ESnet fasterdata host tuning (`scripts/configure_network.sh`,
+#145): BBR with fq pacing, TCP buffers that autotune up to 32 MB (Rocky 9
+stops near 6 MB), and MTU probing. On a clean path it changes nothing, because a
+GridFTP process is limited near 0.26–0.29 Gbps by the S3 side, not by TCP. On
+a long, lossy path it keeps that rate where `cubic` collapses: at +100 ms and
+0.1% loss, 0.97 Gbps with BBR against 0.16 Gbps with `cubic` (see
+[methodology](methodology.md#kernel-network-tuning-145)). The control node stays
+on kernel defaults.
 
 ## 3. Size the pool for concurrent tasks, not bytes per second
 

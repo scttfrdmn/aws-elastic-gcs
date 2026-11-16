@@ -154,6 +154,39 @@ After #72, InService means the node is in endpoint DNS (true readiness).
 - **Second ENI not tested.** EC2 bandwidth is per network card, and only 96xlarge
   (c8in/m8in) and 48xlarge (c8gn) sizes have two cards.
 
+### Kernel network tuning (#145)
+
+Run 2026-11-16 to decide whether the DTN AMI should ship ESnet fasterdata
+tuning. This was an A/B on the same pair of c8in.2xlarge DTNs, one per side,
+with the control nodes out of the data path.
+- **Data:** Sentinel June–July, 504 files, 35 GB.
+- **Peer:** `dst` set to `normal` network use, as a typical remote endpoint; it
+  negotiated 4 × 8.
+- **Path:** `tc netem` on the `src` DTN's egress toward the `dst` DTN only, so
+  the data direction sees the delay and loss.
+- **Kernel tuning:** applied live with `configure_network.sh`. The 0.1% pair
+  flips only the sender's congestion control.
+- **Measurement:** steady state is `src` DTN NIC transmit rate over a 180 s
+  mid-transfer window.
+- **Verification:** `ss -ti` on the data connections showed 32 sockets on `bbr`
+  at 100.1–100.2 ms RTT.
+
+| Run | Path | Sender | Steady | Task |
+|---|---|---|---|---|
+| A0 | none | defaults (`cubic`, 6 MB) | 1.05 Gbps | SUCCEEDED, 0 faults |
+| B0 | none | tuned (`bbr`, fq, 32 MB) | 1.01 Gbps | SUCCEEDED, 0 faults |
+| A1 | +100 ms, 0.01% loss | defaults | 1.03 Gbps | SUCCEEDED, 0 faults |
+| B1 | +100 ms, 0.01% loss | tuned | 0.98 Gbps | SUCCEEDED, 0 faults |
+| B2 | +100 ms, 0.1% loss | `bbr` | **0.97 Gbps** | SUCCEEDED, 0 faults |
+| A2 | +100 ms, 0.1% loss | `cubic` | **0.16 Gbps** | cancelled after the window |
+
+- **Clean or mildly lossy paths:** tuning is neutral. With 4 GridFTP processes
+  the limit is about 0.26 Gbps per process on the S3 side. Each of the 32 streams
+  needs only about 31 Mbps, which `cubic` sustains at 100 ms with 0.01% loss.
+- **At 0.1% loss:** `cubic` falls to about 5 Mbps per stream, near the Mathis
+  bound, and 6× below BBR. BBR holds the application-limited rate, so the AMI
+  ships the tuning.
+
 ## Cost
 
 About **$103** benchmark-related in us-west-2 through 2026-11-13 (Cost Explorer,
