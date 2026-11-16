@@ -82,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - In-flight sessions on the control node finish (#141).
   - A control node stopped on purpose stays stopped.
 
+- **DTN network tuning (#145).** The DTN AMI ships ESnet fasterdata host
+  tuning (`scripts/configure_network.sh`): BBR with fq pacing, TCP buffers
+  autotuning up to 32 MB, and MTU probing. `build_ami.sh` refuses to publish an
+  AMI without it. The control node stays on kernel defaults.
+  - Measured A/B: neutral on clean paths (1.05 vs 1.01 Gbps).
+  - At +100 ms and 0.1% loss: 0.97 Gbps with BBR against 0.16 Gbps with
+    `cubic` (`docs/performance/methodology.md`).
+
 ### Fixed
 - **A transient first-boot failure no longer leaves a slot broken (#146).** On a
   new deployment's first revive, IAM hadn't propagated the new runtime role

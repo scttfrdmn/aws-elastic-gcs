@@ -12,8 +12,9 @@ set -euo pipefail
 #   - GCS 5.4 (globus-connect-server54, pinned to $GCS_VERSION)
 #   - SSM Agent (amazon-ssm-agent)
 #   - jq, awscli
-#   - TLS cipher policy (configure_tls.sh) and the GridFTP KillMode=process
-#     drop-in (configure_gridftp.sh, #141)
+#   - TLS cipher policy (configure_tls.sh), the GridFTP KillMode=process
+#     drop-in (configure_gridftp.sh, #141) and network tuning
+#     (configure_network.sh, #145)
 #
 # Usage:
 #   AWS_PROFILE=aws ./scripts/build_ami.sh [region] [deployment]
@@ -286,6 +287,9 @@ run_config() {
 run_config "TLS cipher policy" configure_tls.sh
 # Sessions survive GridFTP restarts on node joins/leaves and drains (#141).
 run_config "GridFTP session keep-alive" configure_gridftp.sh
+# ESnet fasterdata tuning: BBR + fq, larger TCP buffers (#145). DTNs only;
+# the control node stays on kernel defaults.
+run_config "network tuning" configure_network.sh
 
 # --- Stop the instance before imaging (ensures filesystem consistency) ---
 echo ">>> Stopping builder instance for AMI creation..."
