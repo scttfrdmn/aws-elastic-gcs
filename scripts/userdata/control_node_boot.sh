@@ -9,8 +9,9 @@
 #
 #   start: enable this GCS node locally and wait (bounded) for its IP to be in
 #          endpoint DNS. A booted control node always serves: with the DTN pool
-#          at 0 it is the endpoint's only node. Take it out of the data path
-#          again with `node disable` once DTNs are active.
+#          at 0 it is the endpoint's only node. The slot controller runs
+#          `stop` (without stopping the instance) to take it out of the data
+#          path while DTNs serve, and `start` to put it back (#146).
 #   stop:  disable this GCS node locally and wait (bounded) for its IP to leave
 #          endpoint DNS, so a stopped control node never leaves a dead IP behind.
 #

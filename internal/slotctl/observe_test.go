@@ -34,6 +34,8 @@ func TestSlotFromInstance(t *testing.T) {
 		ok   bool
 	}{
 		{"healthy hot", inst("i-1", "1", "running"), healthy, slots.Slot{N: 1, Tier: slots.Hot, Healthy: true, DataConns: 4}, true},
+		{"healthy carries how long", inst("i-1", "1", "running", TagHealthySince, ago(3*time.Minute)), healthy,
+			slots.Slot{N: 1, Tier: slots.Hot, Healthy: true, HealthyFor: 3 * time.Minute, DataConns: 4}, true},
 		{"starting becomes stable once healthy", inst("i-1", "1", "running", TagPhase, "starting"), healthy, slots.Slot{N: 1, Tier: slots.Hot, Healthy: true, DataConns: 4}, true},
 		{"unhealthy carries its duration and restarts", inst("i-1", "1", "running", TagUnhealthySince, ago(6*time.Minute), TagRestarts, "1"), Probe{SSMOnline: true},
 			slots.Slot{N: 1, Tier: slots.Hot, UnhealthyFor: 6 * time.Minute, RestartAttempts: 1}, true},
@@ -61,8 +63,8 @@ func TestSlotFromInstance(t *testing.T) {
 }
 
 func TestObservedAddsColdSlots(t *testing.T) {
-	obs := Observed([]ec2types.Instance{inst("i-2", "2", "stopped"), inst("i-dup", "2", "running")}, nil, true, 3, now)
-	if len(obs.Slots) != 3 || !obs.ControlServing {
+	obs := Observed([]ec2types.Instance{inst("i-2", "2", "stopped"), inst("i-dup", "2", "running")}, nil, ControlState{Running: true, Serving: true}, 3, now)
+	if len(obs.Slots) != 3 || !obs.ControlServing || !obs.ControlRunning {
 		t.Fatalf("%+v", obs)
 	}
 	tiers := map[int]slots.Tier{}

@@ -124,13 +124,13 @@ func (c *Controller) Gather(ctx context.Context) (slots.Observed, error) {
 			c.trackHealth(ctx, in, p.SSMOnline && p.InDNS && p.GCSActive, now)
 		}
 	}
-	serving := c.controlServing(ctx, inDNS)
-	return Observed(insts, probes, serving, c.Env.MaxDTNs, now), nil
+	return Observed(insts, probes, c.controlState(ctx, inDNS), c.Env.MaxDTNs, now), nil
 }
 
 // trackHealth sets elastic-gcs:unhealthy-since when a running slot first fails
-// its check. Once it passes, it clears that and the restart count, and ends a
-// starting or reviving phase, so a later failure is restarted, not rebuilt.
+// its check (clearing healthy-since). Once it passes, it sets healthy-since,
+// clears unhealthy-since and the restart count, and ends a starting or
+// reviving phase, so a later failure is restarted, not rebuilt.
 func (c *Controller) trackHealth(ctx context.Context, in ec2types.Instance, healthy bool, now time.Time) {
 	t := tagMap(in.Tags)
 	id := aws.ToString(in.InstanceId)
@@ -138,7 +138,13 @@ func (c *Controller) trackHealth(ctx context.Context, in ec2types.Instance, heal
 		if t[TagUnhealthySince] == "" {
 			c.tag(ctx, id, TagUnhealthySince, now.Format(time.RFC3339))
 		}
+		if t[TagHealthySince] != "" {
+			_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id}, Tags: []ec2types.Tag{{Key: aws.String(TagHealthySince)}}})
+		}
 		return
+	}
+	if t[TagHealthySince] == "" {
+		c.tag(ctx, id, TagHealthySince, now.Format(time.RFC3339))
 	}
 	var clear []ec2types.Tag
 	for _, k := range []string{TagUnhealthySince, TagRestarts} {
@@ -223,17 +229,18 @@ func parseNodeProbe(out string) Probe {
 	return p
 }
 
-func (c *Controller) controlServing(ctx context.Context, inDNS map[string]bool) bool {
+func (c *Controller) controlState(ctx context.Context, inDNS map[string]bool) ControlState {
 	id := c.param(ctx, names.ParamControlNodeID)
-	if id == "" || inDNS == nil {
-		return false
+	if id == "" {
+		return ControlState{}
 	}
 	out, err := c.EC2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}})
 	if err != nil || len(out.Reservations) == 0 || len(out.Reservations[0].Instances) == 0 {
-		return false
+		return ControlState{}
 	}
 	in := out.Reservations[0].Instances[0]
-	return in.State != nil && in.State.Name == ec2types.InstanceStateNameRunning && inDNS[aws.ToString(in.PublicIpAddress)]
+	running := in.State != nil && in.State.Name == ec2types.InstanceStateNameRunning
+	return ControlState{Running: running, Serving: running && inDNS != nil && inDNS[aws.ToString(in.PublicIpAddress)]}
 }
 
 // --- Execute ----------------------------------------------------------------
@@ -246,6 +253,8 @@ func (c *Controller) Execute(ctx context.Context, a slots.Action) error {
 		return nil // identities are created by the control node; COLD needs no resource
 	case slots.EnsureControl:
 		return c.ensureControl(ctx)
+	case slots.DemoteControl:
+		return c.demoteControl(ctx)
 	}
 	in, found, err := c.slotInstance(ctx, a.Slot)
 	if err != nil {
@@ -262,7 +271,7 @@ func (c *Controller) Execute(ctx context.Context, a slots.Action) error {
 			return c.withFallback(ctx, in, err)
 		}
 		c.tags(ctx, id, TagPhase, string(slots.Starting), TagPhaseSince, now)
-		c.clearUnhealthy(ctx, id)
+		c.clearHealth(ctx, id)
 		return nil
 	case slots.BeginDrain:
 		// Local disable: no Globus credentials on the DTN (#42). Then wait for
@@ -292,7 +301,7 @@ func (c *Controller) Execute(ctx context.Context, a slots.Action) error {
 			return c.withFallback(ctx, in, err)
 		}
 		c.tags(ctx, id, TagPhase, string(slots.Starting), TagPhaseSince, now)
-		c.clearUnhealthy(ctx, id) // the unhealthy clock restarts with the instance
+		c.clearHealth(ctx, id) // the health clocks restart with the instance
 		return nil
 	case slots.Rebuild, slots.Evict:
 		if found {
@@ -323,6 +332,20 @@ func (c *Controller) ensureControl(ctx context.Context) error {
 	}
 	_, err = ssmexec.RunOK(ctx, c.SSM, id, "/opt/elastic-gcs/scripts/control_node_boot.sh start",
 		ssmexec.Options{Wait: 4 * time.Minute, Comment: "elastic-gcs: control node must serve before the last DTN stops"})
+	return err
+}
+
+// demoteControl takes the control node out of the data path (#146): a local
+// node disable that waits for its EIP to leave endpoint DNS. The instance keeps
+// running, so ensureControl can put it back in seconds; with KillMode=process
+// (#141) its in-flight sessions finish.
+func (c *Controller) demoteControl(ctx context.Context) error {
+	id := c.param(ctx, names.ParamControlNodeID)
+	if id == "" {
+		return errors.New("no control node")
+	}
+	_, err := ssmexec.RunOK(ctx, c.SSM, id, "/opt/elastic-gcs/scripts/control_node_boot.sh stop",
+		ssmexec.Options{Wait: 4 * time.Minute, Comment: "elastic-gcs: DTNs serving, control node out of the data path"})
 	return err
 }
 
@@ -492,8 +515,10 @@ func (c *Controller) waitSSM(ctx context.Context, id string, max time.Duration) 
 	return fmt.Errorf("instance %s never came online in SSM", id)
 }
 
-func (c *Controller) clearUnhealthy(ctx context.Context, id string) {
-	_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id}, Tags: []ec2types.Tag{{Key: aws.String(TagUnhealthySince)}}})
+// clearHealth restarts both health clocks for an instance that is (re)starting.
+func (c *Controller) clearHealth(ctx context.Context, id string) {
+	_, _ = c.EC2.DeleteTags(ctx, &ec2.DeleteTagsInput{Resources: []string{id},
+		Tags: []ec2types.Tag{{Key: aws.String(TagUnhealthySince)}, {Key: aws.String(TagHealthySince)}}})
 }
 
 func (c *Controller) tag(ctx context.Context, id, k, v string) { c.tags(ctx, id, k, v) }

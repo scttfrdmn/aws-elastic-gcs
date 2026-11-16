@@ -141,6 +141,8 @@ func main() {
 		ColdTTL:        envDur("COLD_TTL", 72*time.Hour),
 		UnhealthyAfter: envDur("UNHEALTHY_AFTER", 5*time.Minute),
 		MaxRestarts:    envInt("MAX_RESTARTS", 2),
+		// "0s" (control_demote_after: off) keeps the control node serving.
+		DemoteControlAfter: envDur("DEMOTE_CONTROL_AFTER", 2*time.Minute),
 	}
 	ctl := &slotctl.Controller{
 		EC2: ec2.NewFromConfig(awsCfg), SSM: ssm.NewFromConfig(awsCfg), IAM: iam.NewFromConfig(awsCfg),

@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the release workflow for an existing tag uses the default branch's
   `.goreleaser.yaml`.
 
+- **The control node leaves the data path while DTNs serve (#146).** Globus
+  balances sessions across nodes without regard to capacity, so the t3a.large
+  control node took half of each task's sessions next to a c8in DTN.
+  - The slot controller disables it locally once a DTN has been healthy for
+    `control_demote_after` (new setting, default `2m`; `off` disables).
+  - It re-enables it as soon as no DTN is healthy, and before the last DTN
+    drains.
+  - In-flight sessions on the control node finish (#141).
+  - A control node stopped on purpose stays stopped.
+
 ### Fixed
 - **Slot controller, from the first live run on dst (#132):**
   - EventBridge targets a `live` alias. Durable functions reject unqualified

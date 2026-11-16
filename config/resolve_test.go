@@ -51,8 +51,16 @@ func TestResolve(t *testing.T) {
 		{"slot defaults (balanced)", RegionConfig{MaxDTNs: 8}, Defaults{}, func(r Resolved) bool {
 			return r.CostProfile == "balanced" && r.WarmSlots == 2 && r.ControlNode == "always" && r.Dashboard &&
 				r.DrainTimeout == 10*time.Minute && r.ColdTTL == 72*time.Hour && r.UnhealthyAfter == 5*time.Minute &&
-				r.ScaleInIdle == 15*time.Minute && r.MaxRestarts == 2 && len(r.InstanceTypes) == 1 && r.InstanceTypes[0] == "c8in.2xlarge"
+				r.ScaleInIdle == 15*time.Minute && r.MaxRestarts == 2 && len(r.InstanceTypes) == 1 && r.InstanceTypes[0] == "c8in.2xlarge" &&
+				r.ControlDemoteAfter == 2*time.Minute
 		}, false},
+		{"control demotion off", RegionConfig{MaxDTNs: 4, ControlDemoteAfter: "off"}, Defaults{}, func(r Resolved) bool {
+			return r.ControlDemoteAfter == 0
+		}, false},
+		{"control demotion after 5m", RegionConfig{MaxDTNs: 4, ControlDemoteAfter: "5m"}, Defaults{}, func(r Resolved) bool {
+			return r.ControlDemoteAfter == 5*time.Minute
+		}, false},
+		{"control demotion bad value", RegionConfig{MaxDTNs: 4, ControlDemoteAfter: "soon"}, Defaults{}, nil, true},
 		{"minimal profile", RegionConfig{MaxDTNs: 4, CostProfile: "minimal"}, Defaults{}, func(r Resolved) bool {
 			return r.WarmSlots == 0 && r.ControlNode == "none" && !r.Dashboard && r.ColdTTL == 24*time.Hour
 		}, false},

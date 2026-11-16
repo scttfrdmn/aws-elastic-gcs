@@ -60,6 +60,7 @@ type Slot struct {
 
 	// HOT slots only.
 	Healthy         bool          // running, active in GCS, SSM online
+	HealthyFor      time.Duration // how long it has been healthy
 	UnhealthyFor    time.Duration // how long it has been unhealthy
 	RestartAttempts int           // restarts since it was last healthy
 	DataConns       int           // active GridFTP data connections
@@ -74,6 +75,10 @@ type Observed struct {
 	// ControlServing reports whether the control node is running with its GCS
 	// node enabled, i.e. the endpoint stays reachable without any DTN.
 	ControlServing bool
+	// ControlRunning reports whether the control node instance is running,
+	// serving or not. A stopped control node was stopped on purpose (between
+	// sessions) and is started only by the last-DTN guard.
+	ControlRunning bool
 }
 
 // Config holds the reconciler's settings (from config.Resolve).
@@ -84,6 +89,11 @@ type Config struct {
 	ColdTTL        time.Duration // idle time before an extra WARM slot goes COLD
 	UnhealthyAfter time.Duration // unhealthy this long -> restart
 	MaxRestarts    int           // restarts before a rebuild
+	// DemoteControlAfter: once a DTN has been healthy this long, take the
+	// control node out of the data path (#146). Globus spreads sessions across
+	// all nodes regardless of capacity, so a small control node next to DTNs
+	// slows every task. 0 keeps the control node serving.
+	DemoteControlAfter time.Duration
 }
 
 // Kind of action.
@@ -97,14 +107,15 @@ const (
 	Restart       Kind = "restart"        // stop + start an unhealthy slot
 	Rebuild       Kind = "rebuild"        // terminate (COLD) + revive
 	Evict         Kind = "evict"          // WARM -> COLD
-	EnsureControl Kind = "ensure-control" // make the control node serve first
+	EnsureControl Kind = "ensure-control" // make the control node serve
+	DemoteControl Kind = "demote-control" // take the control node out of the data path
 	CreateSlot    Kind = "create-slot"    // slot N doesn't exist yet: COLD record
 )
 
 // Action is one step for the controller to execute.
 type Action struct {
 	Kind   Kind
-	Slot   int // 0 for EnsureControl
+	Slot   int // 0 for EnsureControl and DemoteControl
 	Reason string
 }
 
@@ -210,7 +221,10 @@ func Plan(obs Observed, desired int, cfg Config) []Action {
 		}
 	}
 
-	// 5. Eviction: keep the first WarmSlots warm slots.
+	// 5. The control node's place in the data path (#146).
+	acts = append(acts, controlPath(obs, slots, desired, cfg, acts)...)
+
+	// 6. Eviction: keep the first WarmSlots warm slots.
 	keptWarm := 0
 	for _, s := range slots {
 		if s.Tier != Warm || s.Phase != Stable || startedNow(acts, s.N) {
@@ -225,6 +239,35 @@ func Plan(obs Observed, desired int, cfg Config) []Action {
 		}
 	}
 	return acts
+}
+
+// controlPath keeps the control node serving exactly when no DTN can: it is
+// restored at once when no slot is healthy (if it is running; a stopped one
+// waits for the last-DTN guard), and demoted once a slot has been healthy for
+// DemoteControlAfter while DTNs are wanted. Demotion is a local node disable,
+// so its sessions finish (#141) while new ones go to the DTNs.
+func controlPath(obs Observed, slots []Slot, desired int, cfg Config, planned []Action) []Action {
+	for _, a := range planned {
+		if a.Kind == EnsureControl {
+			return nil // the last-DTN guard already restores it
+		}
+	}
+	healthy, steady := 0, 0
+	for _, s := range slots {
+		if s.Tier == Hot && s.Phase == Stable && s.Healthy {
+			healthy++
+			if cfg.DemoteControlAfter > 0 && s.HealthyFor >= cfg.DemoteControlAfter {
+				steady++
+			}
+		}
+	}
+	switch {
+	case healthy == 0 && obs.ControlRunning && !obs.ControlServing:
+		return []Action{{EnsureControl, 0, "no healthy DTN: the control node serves again"}}
+	case obs.ControlServing && desired > 0 && steady > 0:
+		return []Action{{DemoteControl, 0, fmt.Sprintf("%d DTN(s) serving: control node out of the data path", healthy)}}
+	}
+	return nil
 }
 
 // scaleInCandidate picks the HOT, stable, healthy slot with the fewest data

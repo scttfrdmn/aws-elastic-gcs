@@ -123,8 +123,20 @@ copied credentials stop working about 5 s later).
 slots); health (restart an unhealthy slot, rebuild after `max_restarts`, rebuild
 an abandoned revive); scale out (WARM slots first, one COLD revive at a time);
 scale in (one slot at a time, fewest data connections; never the last DTN unless
-the control node is serving — it starts the control node first); evict WARM
-slots beyond `warm_slots` after `cold_ttl`.
+the control node is serving — it starts the control node first); the control
+node's place in the data path (below); evict WARM slots beyond `warm_slots`
+after `cold_ttl`.
+
+**The control node leaves the data path while DTNs serve (#146).** Globus
+spreads a task's sessions across every enabled node in endpoint DNS with no
+regard to capacity, so a t3a.large control node next to c8in DTNs would carry an
+equal share of every task. Once a DTN has been healthy for
+`control_demote_after` (default 2 minutes) and DTNs are wanted, the controller
+runs a local `node disable` on the control node; its in-flight sessions finish
+(`KillMode=process`, #141) and new ones go to the DTNs. It is enabled again at
+once when no DTN is healthy, and before the last DTN drains. A control node
+stopped on purpose (`control_node_power.sh stop`) is left stopped until the
+last-DTN guard needs it.
 
 A slot is healthy when it is running, its SSM agent is online, its IP is in
 endpoint DNS, and `gcs_manager` and `globus-gridftp-server` are active.

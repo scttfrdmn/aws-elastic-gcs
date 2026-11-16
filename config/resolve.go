@@ -51,11 +51,13 @@ type Resolved struct {
 	DrainTimeout   time.Duration
 	ColdTTL        time.Duration
 	UnhealthyAfter time.Duration
-	MaxRestarts    int
-	ScaleInIdle    time.Duration
-	InstanceTypes  []string // DTN types in fallback order; [0] == DTNInstance
-	ControlNode    string   // always | on_demand | none
-	Dashboard      bool
+	// ControlDemoteAfter: 0 means never demote the control node (#146).
+	ControlDemoteAfter time.Duration
+	MaxRestarts        int
+	ScaleInIdle        time.Duration
+	InstanceTypes      []string // DTN types in fallback order; [0] == DTNInstance
+	ControlNode        string   // always | on_demand | none
+	Dashboard          bool
 }
 
 // Cost profiles (#65): presets for the idle-cost settings; any setting given
@@ -223,6 +225,11 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 	r.DrainTimeout = dur("drain_timeout", rc.DrainTimeout, 10*time.Minute)
 	r.ColdTTL = dur("cold_ttl", rc.ColdTTL, coldDefault)
 	r.UnhealthyAfter = dur("unhealthy_after", rc.UnhealthyAfter, 5*time.Minute)
+	if rc.ControlDemoteAfter == "off" {
+		r.ControlDemoteAfter = 0
+	} else {
+		r.ControlDemoteAfter = dur("control_demote_after", rc.ControlDemoteAfter, 2*time.Minute)
+	}
 	r.ScaleInIdle = dur("scale_in_idle", rc.ScaleInIdle, 15*time.Minute)
 	r.MaxRestarts = 2
 	if rc.MaxRestarts != nil {
