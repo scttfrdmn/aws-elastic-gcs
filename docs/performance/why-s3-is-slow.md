@@ -60,10 +60,14 @@ flow) and ENA Express (25 Gbps, same AZ) don't apply to remote endpoints.
 Traffic through an internet gateway, which is how a remote Globus peer is
 reached, has a **per-instance** limit separate from the per-flow one: instance
 types "with less than 32 vCPUs" are "limited to 5 Gbps"; larger ones to "50% of
-the available bandwidth"; **C8in, M8in, R8in and their variants are limited only
-to their baseline bandwidth** (same AWS page). So a c7i.2xlarge DTN tops out at
-5 Gbps across all its transfers, whatever its "up to 12.5 Gbps" rating, while a
-c8in.2xlarge measured **11.9 Gbps** and a c8in.16xlarge **96 Gbps**. See
+the available bandwidth"; and only the types AWS lists by name, **"C8in, C8ine,
+M8in, M8ine, M8idn, R8in, R8idn"**, are "limited to the baseline bandwidth for
+the instance type" (same AWS page). It is the 8th-generation network-optimized
+types specifically, not the `n` suffix: earlier network-optimized families
+(c5n, m5n, c6in, m6in, r6in) follow the 5 Gbps / 50% rule like any other type.
+So a c7i.2xlarge or a c6in.2xlarge DTN tops out at 5 Gbps across all its
+transfers, whatever its "up to" rating, while a c8in.2xlarge measured
+**11.9 Gbps** and a c8in.16xlarge **96 Gbps**. See
 [instance sizing](../instance-sizing.md).
 
 ### 6. "Up to" ratings are burst, and big instances span network cards
@@ -91,7 +95,7 @@ drew S3 `503 SlowDown` at ~50 files/s with concurrency 128, far below S3's
 | one connection per file (stock connector) | large files most | same; until then, raise concurrency |
 | 128 files in flight per task | single big tasks | more concurrent tasks; more, larger files per task |
 | 5 Gbps per TCP flow (AWS) | fast per-file paths | GridFTP parallelism ≥ 4–5 once files move faster than 5 Gbps |
-| 5 Gbps per instance to the internet (most types < 32 vCPU) | DTN choice | use c8in/m8in/r8in DTNs |
+| 5 Gbps per instance to the internet (most types < 32 vCPU) | DTN choice | use the listed 8th-gen network-optimized types (c8in, m8in, r8in, …); not c6in/m6in |
 | "up to" burst ratings | sustained transfers | size on baseline, not "up to" |
 | peer settings (`normal` = 4 × 8) | most real transfers | ask peers to raise `network_use`; the slower endpoint sets the pace |
 | small files and request rate | many-file datasets | bundle files; spread destinations across prefixes |
