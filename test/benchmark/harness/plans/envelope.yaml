@@ -1,0 +1,204 @@
+# Run plan for the envelope study (#151): stock GCS 5.4 transfers to and from S3.
+# Phases run in the order P0 -> P1/P1b -> P3 -> P2:
+#   study.py plan plans/envelope.yaml                 # offline: schedule, time, bytes, cost
+#   study.py run  plans/envelope.yaml --phase P1      # live
+# Each sweep varies one factor around the phase's base point. Lists under
+# `fixed` are crossed with the sweep (the interaction checks); scalars just
+# set the factor. A value may be a mapping, which sets several factors at
+# once (composite levels such as "8 x 2xlarge"). `refine: true` turns on
+# adaptive knee-finding for numeric sweeps; `headline: true` repeats every
+# point of the sweep n = 3 times. Dataset refs are datasets/<NAME>.yaml,
+# optionally with overrides ("F1K+fanout=4"); synth.py builds the same refs.
+#
+# Collections and buckets come from bench.env (see bench.env.example); route
+# templates are filled from it plus {campaign}, {uid} (the point's run id),
+# {dataset_prefix} (synth/<NAME>-<hash>) and {dataset_dir} (<NAME>-<hash>).
+
+campaign: 2026-11-us-west-2-envelope
+seed: 151
+
+measure:
+  mode: steady          # steady: cancel after the window; fixed: cancel after fixed_s
+  window_s: 10          # rolling window for the slope test
+  hold_s: 10            # slope ~ 0 (p > alpha) for this long = steady state
+  measure_s: 45         # measurement window after onset
+  alpha: 0.05
+  min_frac: 0.5         # a stable window must be >= 50% of the running max
+  min_level_gbps: 0.05  # ... and above this (idle while Transfer lists files isn't steady)
+  poll_s: 15            # how often samples are pulled while a task runs
+  max_point_s: 900      # give up on steady state after this long
+  fixed_s: 300
+  settle_s: 60          # fixed mode: ignore the first settle_s
+
+repeats: {headline: 3, knee: 3, random_frac: 0.2}
+refine: {threshold: 0.10, max_rounds: 6}
+
+# Prior throughput model, used only by --dry-run estimates:
+# per-file r(s) = s / (t0 + s / b); T = min(k * min(c, 128) * r, n * node_frac * NIC).
+prior: {t0_s: 0.3, b_gbps: 0.35, node_frac: 0.75, ramp_s: 40, noise_cv: 0.04}
+
+routes:
+  s3_to_s3:                         # read S3 (src synth bucket) -> write S3 (dst bench bucket)
+    sender: src
+    src: SRC_SYNTH_COL
+    src_path: "/{SYNTH_BUCKET}/{dataset_prefix}/"
+    dst: DST_COL
+    dst_path: "/{DST_BENCH_BUCKET}/envelope/{campaign}/{uid}/"
+    s3_read: {bucket: "{SYNTH_BUCKET}", prefix: "{dataset_prefix}/"}
+    s3_write: {bucket: "{DST_BENCH_BUCKET}", prefix: "envelope/{campaign}/{uid}/"}
+    cleanup:
+      - {kind: s3, bucket: "{DST_BENCH_BUCKET}", prefix: "envelope/{campaign}/{uid}/"}
+  s3_to_posix:                      # read only: S3 -> gp3 sink on the dst DTN
+    sender: src
+    src: SRC_SYNTH_COL
+    src_path: "/{SYNTH_BUCKET}/{dataset_prefix}/"
+    dst: DST_POSIX_COL
+    dst_path: "{DST_POSIX_BASE}/sink/{uid}/"
+    s3_read: {bucket: "{SYNTH_BUCKET}", prefix: "{dataset_prefix}/"}
+    cleanup:
+      - {kind: posix, side: dst, path: "{DST_POSIX_FS}/sink/{uid}"}
+  posix_to_s3:                      # write only: gp3 on the src DTN -> S3
+    sender: src
+    src: SRC_POSIX_COL
+    src_path: "{SRC_POSIX_BASE}/{dataset_dir}/"
+    drop_caches: src                # reads come from the volume, not the page cache
+    dst: DST_COL
+    dst_path: "/{DST_BENCH_BUCKET}/envelope/{campaign}/{uid}/"
+    s3_write: {bucket: "{DST_BENCH_BUCKET}", prefix: "envelope/{campaign}/{uid}/"}
+    cleanup:
+      - {kind: s3, bucket: "{DST_BENCH_BUCKET}", prefix: "envelope/{campaign}/{uid}/"}
+
+datasets:                           # real datasets (everything else is datasets/*.yaml)
+  nasa-power:
+    src_col: SRC_COL                # the RODA (anonymous S3) collection
+    src_path: "/nasa-power/merra2/temporal/power_merra2_annual_temporal_lst.zarr/"
+    files: 123676
+    bytes: 4341430337
+
+phases:
+  - name: P0-net
+    kind: iperf3
+    description: "iperf3 between DTN public IPs per instance size (L1 ceiling, IGW rules)"
+    block_by: [instance_type_src]   # an instance-type change costs ~5 min; randomize within each type
+    # Same-region public-IP traffic costs about $0.02/GB, so the large types run
+    # short: 96xlarge at 600 Gbps moves 1.1 TB in 15 s. iperf3 reports its own
+    # mean after a 3 s omit; the NIC samples are kept for the record.
+    base: {instance_type: c8in.2xlarge, procs: 4, flows: 8, duration_s: 60}
+    sweeps:
+      - factor: size
+        headline: true
+        values:
+          - {instance_type: c8in.2xlarge, procs: 2, duration_s: 60}
+          - {instance_type: c8in.4xlarge, procs: 4, duration_s: 60}
+          - {instance_type: c8in.8xlarge, procs: 4, duration_s: 45}
+          - {instance_type: c8in.16xlarge, procs: 8, duration_s: 30}
+          - {instance_type: c8in.32xlarge, procs: 16, duration_s: 20}
+          - {instance_type: c8in.48xlarge, procs: 16, duration_s: 15}
+          - {instance_type: c8in.96xlarge, procs: 32, duration_s: 15}
+      - factor: flows
+        values: [1, 2, 4, 8, 16, 32]
+        fixed: {procs: 1}
+
+  - name: P0-s3
+    kind: s3probe
+    description: "CRT GET/PUT vs size, and objects in flight per instance (L1/L5 ceilings)"
+    metric: gbps
+    block_by: [instance_type_src]
+    base: {instance_type: c8in.2xlarge, op: get, dataset: F64M, inflight: 1}
+    sweeps:
+      - factor: dataset
+        headline: true
+        values: [F1M, F16M, F64M, F256M, F1G, F4G, F16G]
+        fixed: {op: [get, put], inflight: 1}
+      - factor: inflight
+        values: [1, 2, 4, 8, 16, 32, 64, 128]
+        refine: true
+        fixed: {op: [get, put], dataset: [F64M, F1G]}
+      - factor: instance_type
+        values: [c8in.2xlarge, c8in.4xlarge, c8in.8xlarge, c8in.16xlarge, c8in.32xlarge, c8in.48xlarge, c8in.96xlarge]
+        fixed: {op: [get, put], dataset: F1G, inflight: 128}
+
+  - name: P1
+    description: "per-file rate r(s), one c8in.2xlarge per side (H1); its runs also feed P1b (access logs)"
+    base: {route: s3_to_posix, dataset: F64M, c: 4, p: 4, n: 1, k: 1, instance_type: c8in.2xlarge}
+    sweeps:
+      - factor: c
+        values: [1, 2, 4, 8]
+        fixed:
+          dataset: [F1M, F16M, F64M, F256M, F1G, F4G, F16G]
+          route: [s3_to_posix, posix_to_s3, s3_to_s3]
+    headline:
+      - {c: 8, dataset: F1G}
+      - {c: 1, dataset: F1G}
+
+  - name: P3
+    description: "layout and small files: files/s, requests per file, 503s (H7)"
+    metric: files_per_s
+    measure: {mode: fixed, fixed_s: 300, settle_s: 60}
+    base: {route: s3_to_s3, dataset: F1K, c: 32, p: 4, n: 1, k: 1, instance_type: c8in.2xlarge}
+    sweeps:
+      - factor: dataset             # source layouts: HOT, hashed fanout 4/64/256, DATED
+        values:
+          - "F1K+naming=sequential+fanout=1"
+          - "F1K+fanout=4"
+          - F1K
+          - "F1K+fanout=256"
+          - "F1K+naming=dated+depth=4"
+          - "F1M+naming=sequential+fanout=1"
+          - "F1M+fanout=4"
+          - "F1M+fanout=64"
+          - "F1M+fanout=256"
+          - DATED
+          - nasa-power
+        fixed: {c: [16, 128]}
+      - factor: c
+        values: [8, 16, 32, 64, 128]
+        refine: true
+        metric: files_per_s
+        fixed: {dataset: [F1K, F1M, "F1K+naming=sequential+fanout=1"]}
+      - factor: dst_fanout
+        values: [1, 4, 16, 64]
+        fixed: {dataset: [F1K, F1M], c: 64}
+
+  - name: P2
+    description: "scaling and knobs (H2-H6). Edit the 'best configuration' rows after P1/P3."
+    block_by: [instance_type_src]
+    base: {route: s3_to_s3, dataset: F1G, c: 32, p: 4, n: 1, k: 1, instance_type: c8in.2xlarge}
+    sweeps:
+      - factor: c
+        values: [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
+        refine: true
+        fixed: {n: [1, 4], dataset: [F64M, F1G]}
+      - factor: p                   # H2: parallelism at RTT 0 and +100 ms (netem on the sender)
+        values: [1, 2, 4, 8, 16]
+        fixed: {c: [8, 32], rtt_ms: [0, 100]}
+      - factor: n                   # DTNs per side
+        values: [1, 2, 3, 4, 5, 6, 8]
+        refine: true
+        fixed: {c: [128, 64]}
+      - factor: instance_type       # H5: oversized DTNs remove L1
+        values: [c8in.2xlarge, c8in.4xlarge, c8in.8xlarge, c8in.16xlarge, c8in.32xlarge, c8in.48xlarge, c8in.96xlarge]
+        fixed: {c: 128, k: [1, 4]}
+      - factor: equal_nic           # equal total NIC per side
+        values:
+          - {instance_type: c8in.2xlarge, n: 8}
+          - {instance_type: c8in.4xlarge, n: 4}
+          - {instance_type: c8in.8xlarge, n: 2}
+        fixed: {c: 128}
+      - factor: k                   # H4: concurrent tasks, 8 x 2xlarge per side
+        values: [1, 2, 3, 4, 8]
+        refine: true
+        fixed: {c: 128, n: 8, instance_type: c8in.2xlarge}
+      - factor: k                   # H4: concurrent tasks, one 48xlarge per side
+        values: [1, 2, 3, 4, 8]
+        refine: true
+        fixed: {c: 128, n: 1, instance_type: c8in.48xlarge}
+      - factor: verify_checksum     # H6: checksum x encryption, small and large instances
+        values: [true, false]
+        fixed: {encrypt_data: [false, true], instance_type: [c8in.2xlarge, c8in.16xlarge], c: 64}
+      - factor: dataset             # object size at the best configuration
+        values: [F64M, F256M, F1G, F4G, F16G, MIX]
+        fixed: {n: 4, c: 128}
+    headline:
+      - {c: 128, n: 4, dataset: F1G}
+      - {c: 32, n: 1, dataset: F1G}

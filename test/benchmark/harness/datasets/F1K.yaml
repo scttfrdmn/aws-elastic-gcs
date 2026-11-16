@@ -1,0 +1,9 @@
+# 1 KiB x 100,000 (0.1 GiB): small files and request-rate limits (#151 section 5)
+name: F1K
+description: "1 KiB x 100,000 (0.1 GiB): small files and request-rate limits"
+size: 1KiB
+count: 100000
+naming: hashed
+fanout: 64
+depth: 1
+target: s3

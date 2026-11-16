@@ -1,0 +1,9 @@
+# 16 GiB x 16 (256 GiB): multipart server-side copies of a 512 MiB seed (#151 section 5)
+name: F16G
+description: "16 GiB x 16 (256 GiB): multipart server-side copies of a 512 MiB seed"
+size: 16GiB
+count: 16
+naming: hashed
+fanout: 16
+depth: 1
+target: s3

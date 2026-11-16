@@ -1,0 +1,10 @@
+# F1M in a dated year/month/day/hour layout (#151 section 5), 64 objects per
+# hour directory, like many Open Data observation archives.
+name: DATED
+description: "F1M with a dated layout (16 GiB)"
+size: 1MiB
+count: 16384
+naming: dated
+depth: 4
+dated: {start: "2024-01-01T00:00:00", per_dir: 64}
+target: s3

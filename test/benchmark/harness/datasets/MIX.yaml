@@ -1,0 +1,16 @@
+# Lognormal mix (#151 section 5): median 32 MiB, sigma 2, 20,000 objects, capped at 1 TiB.
+# Sizes are quantized to 64 geometric levels between min and max, so the
+# dataset needs at most 64 seeds; objects above seed_max are multipart copies.
+# Note: this lognormal's mean is about 236 MiB, so 20,000 draws would be about
+# 4.3 TiB, over the study's 1.5 TiB storage ceiling. Draws stop at the 1 TiB
+# cap instead (about 4,900 objects); the size distribution is unchanged.
+name: MIX
+description: "lognormal (median 32 MiB, sigma 2), 20,000 objects, about 1 TiB capped"
+size: {dist: lognormal, median: 32MiB, sigma: 2.0, min: 1KiB, max: 16GiB}
+count: 20000
+total_bytes: 1TiB
+naming: hashed
+fanout: 16
+depth: 2
+target: s3
+content: {seed_max: 1GiB, part_size: 512MiB, quantize_bins: 64}

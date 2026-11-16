@@ -1,0 +1,9 @@
+# 16 MiB x 4,096 (64 GiB) (#151 section 5)
+name: F16M
+description: "16 MiB x 4,096 (64 GiB)"
+size: 16MiB
+count: 4096
+naming: hashed
+fanout: 16
+depth: 1
+target: s3

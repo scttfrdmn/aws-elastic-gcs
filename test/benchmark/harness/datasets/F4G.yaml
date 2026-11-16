@@ -1,0 +1,9 @@
+# 4 GiB x 64 (256 GiB): multipart server-side copies of a 512 MiB seed (#151 section 5)
+name: F4G
+description: "4 GiB x 64 (256 GiB): multipart server-side copies of a 512 MiB seed"
+size: 4GiB
+count: 64
+naming: hashed
+fanout: 16
+depth: 1
+target: s3
