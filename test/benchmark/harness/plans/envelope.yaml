@@ -21,16 +21,16 @@ measure:
   mode: steady          # steady: cancel after the window; fixed: cancel after fixed_s
   window_s: 10          # rolling window for the slope test
   hold_s: 10            # slope ~ 0 (p > alpha) for this long = steady state
-  measure_s: 45         # measurement window after onset
+  measure_s: 30         # measurement window after onset (30 one-second samples per CI)
   alpha: 0.05
   min_frac: 0.5         # a stable window must be >= 50% of the running max
   min_level_gbps: 0.05  # ... and above this (idle while Transfer lists files isn't steady)
-  poll_s: 15            # how often samples are pulled while a task runs
+  poll_s: 5             # how often samples are pulled while a task runs (short: stop points sooner)
   max_point_s: 900      # give up on steady state after this long
   fixed_s: 300
   settle_s: 60          # fixed mode: ignore the first settle_s
 
-repeats: {headline: 3, knee: 3, random_frac: 0.2}
+repeats: {headline: 3, knee: 2, random_frac: 0.1}   # trimmed to budget (#151)
 refine: {threshold: 0.10, max_rounds: 6}
 
 # Prior throughput model, used only by --dry-run estimates:
@@ -165,20 +165,23 @@ phases:
     block_by: [instance_type_src]
     base: {route: s3_to_s3, dataset: F1G, c: 32, p: 4, n: 1, k: 1, instance_type: c8in.2xlarge}
     sweeps:
-      - factor: c
+      - factor: c                   # full grid where it's cheap (one DTN per side)
         values: [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128]
         refine: true
-        fixed: {n: [1, 4], dataset: [F64M, F1G]}
+        fixed: {n: 1}               # F1G; object size has its own sweep
+      - factor: c                   # 4 DTNs: confirm T(c) = c*r up to the cap (budget, #151)
+        values: [16, 32, 64, 128]
+        fixed: {n: 4}
       - factor: p                   # H2: parallelism at RTT 0 and +100 ms (netem on the sender)
         values: [1, 2, 4, 8, 16]
-        fixed: {c: [8, 32], rtt_ms: [0, 100]}
+        fixed: {c: 32, rtt_ms: [0, 100]}
       - factor: n                   # DTNs per side
         values: [1, 2, 3, 4, 5, 6, 8]
         refine: true
-        fixed: {c: [128, 64]}
+        fixed: {c: 128}
       - factor: instance_type       # H5: oversized DTNs remove L1
         values: [c8in.2xlarge, c8in.4xlarge, c8in.8xlarge, c8in.16xlarge, c8in.32xlarge, c8in.48xlarge, c8in.96xlarge]
-        fixed: {c: 128, k: [1, 4]}
+        fixed: {c: 128}             # k = 1; H4 on large NICs is the 48xlarge k sweep
       - factor: equal_nic           # equal total NIC per side
         values:
           - {instance_type: c8in.2xlarge, n: 8}
@@ -186,18 +189,19 @@ phases:
           - {instance_type: c8in.8xlarge, n: 2}
         fixed: {c: 128}
       - factor: k                   # H4: concurrent tasks, 8 x 2xlarge per side
-        values: [1, 2, 3, 4, 8]
-        refine: true
+        values: [1, 4]
         fixed: {c: 128, n: 8, instance_type: c8in.2xlarge}
       - factor: k                   # H4: concurrent tasks, one 48xlarge per side
-        values: [1, 2, 3, 4, 8]
-        refine: true
+        values: [1, 2, 4]
         fixed: {c: 128, n: 1, instance_type: c8in.48xlarge}
-      - factor: verify_checksum     # H6: checksum x encryption, small and large instances
+      - factor: verify_checksum     # H6: checksum x encryption on a small instance
         values: [true, false]
-        fixed: {encrypt_data: [false, true], instance_type: [c8in.2xlarge, c8in.16xlarge], c: 64}
+        fixed: {encrypt_data: [false, true], instance_type: c8in.2xlarge, c: 64}
+      - factor: encrypt_data        # H6: encryption CPU cost without CPU pressure
+        values: [false, true]
+        fixed: {instance_type: c8in.16xlarge, c: 64}
       - factor: dataset             # object size at the best configuration
-        values: [F64M, F256M, F1G, F4G, F16G, MIX]
+        values: [F64M, F256M, F1G, F4G, F16G]
         fixed: {n: 4, c: 128}
     headline:
       - {c: 128, n: 4, dataset: F1G}
