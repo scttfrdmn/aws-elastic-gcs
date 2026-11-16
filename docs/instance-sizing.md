@@ -64,8 +64,9 @@ S3 reads go through the S3 gateway endpoint and aren't IGW-limited, so for
 S3 → remote transfers the IGW figure is what a DTN can sustain. The `*8in`
 families are the only types under 32 vCPUs that exceed 5 Gbps to the internet.
 
-**Bigger DTNs cost nothing extra while idle.** A stopped warm-pool DTN costs only
-its 20 GiB gp3 root volume (~$1.60/month), whatever the instance type. Instance
+**Bigger DTNs cost nothing extra while idle.** A WARM (stopped) slot costs only
+its 20 GiB gp3 root volume (~$1.60/month) and its Elastic IP (~$3.65/month),
+whatever the instance type. Instance
 type only affects cost while a DTN is running, and a faster DTN finishes sooner.
 
 **Egress dwarfs instance cost.** Per TB moved to the internet:
@@ -81,8 +82,9 @@ and transfer time. Check whether your institution qualifies for the AWS Global
 Data Egress Waiver before quoting costs.
 
 **Spot isn't worth it for DTNs.** `c8in.2xlarge` Spot was $0.25–0.27/hr
-(about 52% off), but Spot disables the warm pool, so every scale-out takes the
-2–3 minute cold path. That saves ~$0.05/TB on a ~$50–90/TB transfer.
+(about 52% off). That saves ~$0.05/TB on a ~$50–90/TB transfer, and a Spot
+interruption ends every session on the node. The slot controller doesn't
+support Spot yet.
 
 ## Intel vs AMD vs Graviton
 
@@ -172,7 +174,7 @@ step, not cost:
 | Over-provisioning between steps | Less | More (but ~$0.044/Gbps-h, so small) |
 | Node failure / Spot loss | Smaller share of capacity | Larger share |
 | Nodes, slots, warm instances per Gbps | More | Fewer |
-| Scale-out events to reach a target | More (each is an alarm transition today, #26) | Fewer |
+| Node joins to reach a target (each restarts GridFTP listeners endpoint-wide, #141) | More | Fewer |
 | Single-file throughput (one file = one node) | Lower | Higher |
 | Per-task ceiling (concurrency × node Gbps) | Lower | Higher |
 
@@ -182,20 +184,20 @@ destination, and 4 nodes reach 50 Gbps.
 Configure the fleet for its peak, not for one node:
 
 - **`max_dtns`:** set to `ceil(peak aggregate Gbps / per-node Gbps)`. For example,
-  50 Gbps of `c8in.2xlarge` → 4. Node identities are pre-created for
-  `max_dtns + warm_pool_size` slots.
-- **`warm_pool_size`:** only warm instances resume in 30–60 s; the rest launch
-  cold (2–3 min). A warm slot costs ~$1.60/month, so size the warm pool to
-  `max_dtns` (4 × $1.60 = $6.40/month), not the default 2.
-- **Scale-out math:** today each throughput-alarm transition adds one DTN, so
-  reaching N nodes takes N transitions (#26). The fix is to set desired capacity
-  to `ceil(aggregate throughput / per-node sustained)` directly. Smaller nodes
-  make this more important.
-- **Capacity resilience:** warm pools support on-demand mixed-instance policies.
-  At large `max_dtns`, pair equal-throughput types so the per-node scaling math
-  still holds. For example, `c8in.2xlarge` first, then `m8in.2xlarge` (both
-  12.5 Gbps; m8in is 23% more expensive and used only if c8in capacity runs
-  short).
+  50 Gbps of `c8in.2xlarge` → 4. The control node pre-creates one node identity
+  per slot.
+- **`warm_slots`:** WARM slots start in about 1.5 minutes; COLD slots revive
+  one at a time (about 1 minute each, plus DNS). A warm slot costs ~$5/month
+  (EBS + Elastic IP), so `warm_slots: max_dtns` (4 × ~$5 = ~$20/month) makes the
+  whole fleet fast to reach, against the default 2.
+- **Scale-out math:** demand_monitor sets desired-dtns to
+  `ceil(aggregate throughput / throughput_scaleout_mbps)` directly (#26), and
+  the controller starts every WARM slot needed at once.
+- **Capacity resilience:** `instance_types` is a fallback list used when EC2
+  reports no capacity for the first type. Pair equal-throughput types so the
+  per-node scaling math still holds. For example, `c8in.2xlarge` first, then
+  `m8in.2xlarge` (both 12.5 Gbps; m8in is 23% more expensive and used only if
+  c8in capacity runs short).
 - **Quota:** the default on-demand standard-instance quota (2,048 vCPUs in this
   account) allows ~250 `c8in.2xlarge`. It is not a constraint.
 - **The ceiling is usually the other end.** Fan-out per task is capped by

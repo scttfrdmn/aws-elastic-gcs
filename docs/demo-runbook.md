@@ -11,36 +11,31 @@
 
 - [ ] `aws sso login --profile aws` — ensure AWS credentials are fresh
 - [ ] `globus whoami` — confirm authenticated as `scofri@globusid.org`
+- [ ] Control node running: `scripts/control_node_power.sh us-east-1 default start` (Transfer rejects submissions to an endpoint with no serving node, #130)
 - [ ] `aws-elastic-gcs-ctl status --region us-east-1` — check baseline state (see expected output below)
-- [ ] Warm pool has ≥ 1 `Warmed:Stopped` instance — if evicted, run `make deploy-dtn REGION=us-east-1` to restore
+- [ ] At least one WARM slot (a stopped slot instance). If every slot is COLD, run `aws-elastic-gcs-ctl scale up --to 1 --watch`, then `scale down --to 0 --watch`, once before the session
 - [ ] Terminal font ≥ 16pt, dark background, 120-column width
-- [ ] Browser tab open to CloudWatch dashboard for `elastic-gcs-us-east-1`
 - [ ] Browser tab open to `https://app.globus.org/file-manager`
 
 ### Expected baseline state
 
 ```
-Elastic GCS — us-east-1
+Elastic GCS — us-east-1-default
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Control Node   i-065c4e068da377b11     ● running       34.224.250.21
 Endpoint       09c97a5c-63e2-40a2-bcc9-caf96c0de230
 
-DTN Pool       desired=0    in-service=0    warm=2
-  i-09df2757f113b5448       slot=1    Warmed:Stopped          node=12ba8822
-  i-0b4cde7d88b82ece1       slot=3    Warmed:Stopped          node=030674af
+DTN Slots      desired=0    serving=0    warm=2
+  slot 1    i-09df2757f113b5448   stopped         phase=-           52.0.0.11
+  slot 2    i-0b4cde7d88b82ece1   stopped         phase=-           52.0.0.12
 
 GCS Nodes
   ○  030674af                        inactive
   ○  12ba8822                        inactive
-  ●  26ce140b                        active
+  ●  26ce140b                        active      (control)
 
 Active Transfers (5 min):  0
-Alarms:  scaleout ○ OK  scalein ● ALARM  version-drift ○ OK
 ```
-
-> **Note:** The control node is shown running here. If `idle_shutdown` is enabled, it may
-> be stopped — run `aws-elastic-gcs-ctl wake` ~40s before the demo starts, or start the demo
-> from step 2 with "we're about to wake the endpoint."
 
 ---
 
@@ -53,56 +48,37 @@ aws-elastic-gcs-ctl status --region us-east-1
 ```
 
 **Say:** *"This is a live Globus Connect Server endpoint fronting the AWS 1000 Genomes
-Open Data bucket. Right now it's idle — the control node is running, but both DTN slots
-are stopped in the warm pool, paying only for EBS storage. At this scale, idle cost is
-about $4–12 per month."*
+Open Data bucket. Right now it's idle — the control node is serving, and both DTN slots
+are stopped, paying only for their disks and addresses: about $5 a month each."*
 
-**Point out:** DTN Pool `in-service=0`, both nodes `inactive`, `Active Transfers: 0`.
+**Point out:** `serving=0`, both slot nodes `inactive`, `Active Transfers: 0`.
 
 ---
 
-### Step 2 — Wake the endpoint and trigger scale-out (~60 seconds)
+### Step 2 — Ask for a DTN (~10 seconds)
 
 ```bash
-aws-elastic-gcs-ctl wake --scale-out --region us-east-1
+aws-elastic-gcs-ctl scale up --to 1 --region us-east-1
 ```
 
-**Say:** *"Watch what happens when I request a DTN. The waker Lambda starts the
-control node — already running in this case — and sets the ASG desired capacity to 1.
-The warm-pool instance starts resuming immediately."*
-
-**Expected output:**
-```
-Invoking waker Lambda (elastic-gcs-waker-us-east-1-default)...
-
-Control node ready (2s, already running)
-  Warm pool populated — DTN scale-out will take ~60s
-  Scale-out triggered (desired=1)
-```
-
-> **If control node was stopped:** output shows `~40s` for control node boot, then
-> `Scale-out triggered`. Total warm path time is ~100s.
+**Say:** *"In production the demand monitor does this when it sees active transfers.
+Here I'm setting desired DTNs by hand. The slot controller — a Lambda durable function —
+picks it up within seconds and starts a stopped slot."*
 
 ---
 
-### Step 3 — Watch the DTN come InService (~60 seconds of live polling)
+### Step 3 — Watch the slot start serving (~90 seconds of live polling)
 
 ```bash
 watch -n 5 aws-elastic-gcs-ctl status --region us-east-1
 ```
 
-**Say:** *"The instance is resuming from the warm pool. On cold boot from AMI this would
-take 3–5 minutes. From the warm pool it's about 60 seconds — the OS is already booted,
-the GCS agent is pre-installed, we just run `node enable` and update DNS."*
+**Say:** *"The slot keeps its node identity and its Elastic IP while stopped, so all it has
+to do on boot is `node enable` and wait for its address in endpoint DNS. A cold slot —
+no instance at all — takes about a minute longer: launch from the AMI, then a one-time
+`node setup` with credentials it can only read for those few seconds."*
 
-**Watch for:** `in-service=1`, then `● active` on the DTN node.
-
-**Quit watch when DTN node shows active**, then:
-
-```bash
-# Ctrl-C out of watch
-aws-elastic-gcs-ctl status --region us-east-1
-```
+**Watch for:** the slot `running` with `phase=starting`, then `phase=-` and `● active` on its node.
 
 ---
 
@@ -128,38 +104,31 @@ Submitting test transfer...
 
 ---
 
-### Step 5 — Show CloudWatch dashboard (~45 seconds of talk)
+### Step 5 — Show demand (~30 seconds)
 
-Switch to browser: CloudWatch dashboard `elastic-gcs-us-east-1`.
+```bash
+aws-elastic-gcs-ctl metrics --since 30m --region us-east-1
+```
 
-**Point out:**
-- `ActiveTransfers` spike at transfer time
-- ASG scale-out event in the `DTN Pool` widget
-- Lambda invocation for `demand_monitor` and `lifecycle`
+**Point out:** the `ActiveTransfers` sparkline and the slot controller and demand
+monitor invocations.
 
-**Say:** *"The demand monitor publishes ActiveTransfers every minute. If it sees INACTIVE
-tasks — transfers queued against a stopped endpoint — it auto-wakes the system. You can
-submit a transfer before the endpoint is up and the system wakes itself."*
+**Say:** *"The demand monitor polls Globus every minute and sets how many DTNs we need
+from the aggregate throughput of active tasks. Scale-in waits until nothing has been
+active for 15 minutes."*
 
 ---
 
-### Step 6 — Scale back in (~45 seconds)
+### Step 6 — Scale back in (~60 seconds)
 
 ```bash
 aws-elastic-gcs-ctl scale down --to 0 --watch --region us-east-1
 ```
 
-**Say:** *"Now scale-in. The lifecycle hook calls `node disable` before the instance stops
-— GCS removes it from DNS, transfers drain, then the instance goes back to the warm pool.
-No data left on the instance; the node identity is preserved in Secrets Manager for next time."*
-
-**Expected output:**
-```
-Setting desired=0...
-Waiting for warm pool...
-  [30s] i-09df2757... Warmed:Stopped  ✓
-Done (1m 08s)
-```
+**Say:** *"Now scale-in. The controller disables the node — GCS takes it out of DNS so new
+work goes elsewhere — waits for its data connections to finish, then stops it. In-flight
+sessions finish on the draining node. The identity and the address stay with the slot
+for next time."*
 
 ---
 
@@ -169,13 +138,12 @@ Done (1m 08s)
 aws-elastic-gcs-ctl status --region us-east-1
 ```
 
-**Say:** *"Back to idle. Two warm DTNs sitting stopped, costing a few dollars a month in EBS.
-The control node is running — if I enable idle shutdown, it stops after 30 minutes of
-inactivity too, dropping to ~$3.50/month total idle cost. Compare that to keeping two
-c8in.2xlarge DTNs always on: about $800/month. For a dataset that researchers access occasionally
-— workshop days, grant deadlines — elastic is the right model."*
+**Say:** *"Back to idle. Two warm slots cost about $10 a month. Stopping the control node
+between sessions brings the whole endpoint to about $16 a month. Compare that to keeping
+two c8in.2xlarge DTNs always on: about $800/month. For a dataset that researchers access
+occasionally — workshop days, grant deadlines — elastic is the right model."*
 
-**Point to slide:** cost comparison table from `docs/ephemeral-control-node.md`.
+**Point to slide:** cost comparison table from `docs/architecture.md`.
 
 ---
 
@@ -184,31 +152,32 @@ c8in.2xlarge DTNs always on: about $800/month. For a dataset that researchers ac
 | Step | Expected time | Notes |
 |------|--------------|-------|
 | 1 — Show idle state | 45s talk | No commands running |
-| 2 — Wake + scale-out | 10s (CLI returns) | ~60s happening in background |
-| 3 — DTN InService | 50–70s | Watch loop |
+| 2 — Scale up | 5s (CLI returns) | |
+| 3 — Slot serving | ~90s | Watch loop (warm slot) |
 | 4 — Transfer | 15–30s | SUCCEEDED |
-| 5 — CloudWatch | 45s | Browser tab |
-| 6 — Scale-in | 60–90s | Watch loop |
+| 5 — Metrics | 30s | |
+| 6 — Scale-in | ~60s | Watch loop |
 | 7 — Cost story | 30s talk | |
-| **Total** | **~5.5–7 min** | |
+| **Total** | **~5–6 min** | |
 
 ---
 
 ## Contingency paths
 
-### Control node is stopped (not running)
+### Control node is stopped
 
-Run `aws-elastic-gcs-ctl wake --scale-out` **5 minutes before** the session starts.
-Or demonstrate the wake from stopped as the opening step — it takes ~40s and is
-a good story in itself.
+Start it **5 minutes before** the session:
+`scripts/control_node_power.sh us-east-1 default start` (about 2 minutes, until its
+address is in endpoint DNS). With no serving node, Transfer rejects submissions.
 
-### Warm pool evicted (all DTNs terminated, >72h idle)
+### Every slot is COLD
 
-The scale-out will launch from AMI — ~3–5 minutes, not 60s. Options:
+The scale-out revives a slot from the AMI — about 2.5 minutes to serving, not 1.5.
+Options:
 
-1. If you have time: let it run, narrate the cold boot, show the contrast
-2. If tight on time: skip steps 2–4, use pre-recorded [terminal cast] of warm path
-3. Prevention: run `aws-elastic-gcs-ctl wake` once in the 72h before the demo
+1. If you have time: let it run, narrate the cold revive, show the contrast
+2. If tight on time: skip steps 2–4, use a pre-recorded terminal cast of the warm path
+3. Prevention: scale up and back down once before the session, which leaves a WARM slot
 
 ### Globus auth expired
 
@@ -228,26 +197,21 @@ aws ssm get-parameter --name /elastic-gcs/us-east-1/default/endpoint-id --query 
 If this doesn't match `09c97a5c-63e2-40a2-bcc9-caf96c0de230`, update the constant in
 `cmd/aws-elastic-gcs-ctl/main.go` and rebuild.
 
-### DTN node doesn't activate within 3 minutes
+### Slot doesn't start serving within 3 minutes
 
-Check boot logs via SSM:
+Check the controller and the slot's node unit:
 ```bash
+aws-elastic-gcs-ctl logs slot-controller --since 10m --region us-east-1
 aws ssm send-command \
-  --instance-ids <DTN_INSTANCE_ID> \
+  --instance-ids <SLOT_INSTANCE_ID> \
   --document-name AWS-RunShellScript \
-  --parameters 'commands=["journalctl -u elastic-gcs-boot --no-pager -n 50"]' \
+  --parameters 'commands=["journalctl -u elastic-gcs-node --no-pager -n 50"]' \
   --output text --query 'Command.CommandId'
-# then: aws ssm get-command-invocation --command-id <id> --instance-id <DTN_INSTANCE_ID>
+# then: aws ssm get-command-invocation --command-id <id> --instance-id <SLOT_INSTANCE_ID>
 ```
 
-Common causes: slot-lock conflict (another instance holds the slot), Secrets Manager
-permission error, GCS version mismatch. See [docs/operator-guide.md](operator-guide.md).
-
-### CloudWatch dashboard not showing data
-
-The custom metrics namespace is `elastic-gcs`. If no data appears:
-- `demand_monitor` Lambda runs every minute — check its logs: `aws-elastic-gcs-ctl logs demand_monitor --since 5m`
-- Confirm `ENDPOINT_ID` env var on the Lambda matches the active endpoint
+Common causes: Secrets Manager permission error, GCS version mismatch. See
+[docs/operator-guide.md](operator-guide.md).
 
 ---
 
@@ -257,17 +221,27 @@ The custom metrics namespace is `elastic-gcs`. If no data appears:
 # Scale to 0 if not already done
 aws-elastic-gcs-ctl scale down --to 0 --region us-east-1
 
-# Verify warm pool restored
+# Verify the slots are stopped again
 aws-elastic-gcs-ctl status --region us-east-1
 ```
 
-Leave the control node running (it will auto-shutdown after 30 min if idle shutdown is enabled).
+Stop the control node when you're done: `scripts/control_node_power.sh us-east-1 default stop`.
 
 ---
 
 ## Benchmark numbers (for slides)
 
-From `make benchmark REGION=us-east-1 TIER=warm` (5 iterations, 2026-02-28):
+Slot controller, us-west-2, c8in.2xlarge (November 2026, #132):
+
+| Path | Time |
+|------|------|
+| Cold revive: launch → node setup done | ~47 s (node setup ~18 s) |
+| Warm start: desired 0→1 → healthy and in DNS | ~95 s |
+| Real demand: task submitted → cold slot healthy and in DNS | ~147 s |
+| Drain under load → stopped, 0 task faults | ~3 min (sessions finished first) |
+
+Earlier ASG warm-pool numbers (`make benchmark TIER=warm`, 2026-02-28, before the
+slot controller):
 
 | Phase | Min | Mean | P95 | Max |
 |-------|-----|------|-----|-----|
@@ -277,7 +251,7 @@ From `make benchmark REGION=us-east-1 TIER=warm` (5 iterations, 2026-02-28):
 | first transfer (T3→T4) | 13s | 20s | 45s | 45s |
 | **Total** | **50s** | **64s** | **90s** | **90s** |
 
-Hot path (DTN already InService), 3 iterations:
+Hot path (DTN already serving), 3 iterations:
 
 | Phase | Min | Mean | P95 | Max |
 |-------|-----|------|-----|-----|
@@ -285,6 +259,5 @@ Hot path (DTN already InService), 3 iterations:
 | first bytes → SUCCEEDED | 11s | 11s | 11s | 11s |
 | **Total** | **16s** | **16s** | **17s** | **17s** |
 
-Cold path (launch from AMI): not yet measured (requires `ELASTIC_GCS_TEST_COLD_PATH=true`; estimated ~3–5 min from prior manual tests).
-
-Raw JSON in `test/benchmark/results/`. Re-run closer to the conference to refresh numbers.
+`make benchmark TIER=warm|hot|cold` now drives the slot controller; re-run closer
+to the conference to refresh the numbers. Raw JSON in `test/benchmark/results/`.

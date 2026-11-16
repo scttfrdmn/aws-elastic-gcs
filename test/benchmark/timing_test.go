@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 )
@@ -88,12 +87,12 @@ func TestBenchmarkWarmPath(t *testing.T) {
 	e := newBenchEnv(t)
 	iterations := iterCount(5)
 
-	t.Log("ensuring ASG desired=0 with warm pool ready...")
-	e.scaleASG(ctx, t, 0)
-	warmIDs := e.waitForWarmPool(ctx, t, 1, 5*time.Minute)
-	t.Logf("warm pool ready: %v", warmIDs)
+	t.Log("ensuring desired-dtns=0 with a WARM (stopped) slot ready...")
+	e.setDesired(ctx, t, 0)
+	warmIDs := e.waitForStoppedSlots(ctx, t, 1, 15*time.Minute)
+	t.Logf("warm slots ready: %v", warmIDs)
 
-	t.Cleanup(func() { e.scaleASG(context.Background(), t, 0) })
+	t.Cleanup(func() { e.setDesired(context.Background(), t, 0) })
 
 	baselineActive := e.countActiveGCSNodes(ctx, t)
 	t.Logf("baseline active GCS nodes: %d", baselineActive)
@@ -101,9 +100,9 @@ func TestBenchmarkWarmPath(t *testing.T) {
 	var results []iterResult
 	for iter := 0; iter < iterations; iter++ {
 		if iter > 0 {
-			t.Logf("--- iteration %d/%d: resetting to desired=0...", iter+1, iterations)
-			e.scaleASG(ctx, t, 0)
-			e.waitForWarmPool(ctx, t, 1, 5*time.Minute)
+			t.Logf("--- iteration %d/%d: resetting to desired-dtns=0...", iter+1, iterations)
+			e.setDesired(ctx, t, 0)
+			e.waitForStoppedSlots(ctx, t, 1, 15*time.Minute)
 			time.Sleep(5 * time.Second)
 		}
 		t.Logf("=== warm iteration %d/%d ===", iter+1, iterations)
@@ -123,12 +122,12 @@ func TestBenchmarkWarmPath(t *testing.T) {
 func (e *benchEnv) measureWarmIteration(ctx context.Context, t *testing.T, baselineActive int) []phaseTiming {
 	t.Helper()
 
-	// T0: SetDesiredCapacity(1)
+	// T0: desired-dtns=1 (the controller starts a WARM slot)
 	t0 := time.Now()
-	e.scaleASG(ctx, t, 1)
+	e.setDesired(ctx, t, 1)
 
 	// T1: EC2 instance state = running
-	instanceID := e.firstASGInstanceID(ctx, t, 2*time.Minute)
+	instanceID := e.firstSlotInstanceID(ctx, t, 3*time.Minute)
 	t1 := e.waitForEC2Running(ctx, t, instanceID, 2*time.Minute)
 
 	// T2: SSM agent PingStatus = Online
@@ -156,8 +155,8 @@ func (e *benchEnv) measureWarmIteration(ctx context.Context, t *testing.T, basel
 
 // ── Hot path ──────────────────────────────────────────────────────────────────
 
-// TestBenchmarkHotPath measures transfer latency when a DTN is already InService
-// — i.e. the "hot" path where there is no scale-out overhead.
+// TestBenchmarkHotPath measures transfer latency when a DTN slot is already
+// serving — i.e. the "hot" path where there is no scale-out overhead.
 //
 // Run: make benchmark REGION=us-east-1 TIER=hot
 func TestBenchmarkHotPath(t *testing.T) {
@@ -170,11 +169,11 @@ func TestBenchmarkHotPath(t *testing.T) {
 	e := newBenchEnv(t)
 	iterations := iterCount(3)
 
-	// Ensure a DTN is InService.
-	t.Log("ensuring DTN is InService...")
-	e.scaleASG(ctx, t, 1)
-	inSvc := e.waitForASGInService(ctx, t, 1, 3*time.Minute)
-	t.Logf("DTN InService: %v", inSvc)
+	// Ensure a DTN slot is serving.
+	t.Log("ensuring a DTN slot is serving...")
+	e.setDesired(ctx, t, 1)
+	inSvc := e.waitForServingSlots(ctx, t, 1, 5*time.Minute)
+	t.Logf("DTN slot serving: %v", inSvc)
 
 	// Wait for GCS node to activate.
 	baselineActive := 1 // control node is always active
@@ -187,7 +186,7 @@ func TestBenchmarkHotPath(t *testing.T) {
 		t.Logf("  waiting for DTN GCS node... (%d/12)", i+1)
 	}
 
-	t.Cleanup(func() { e.scaleASG(context.Background(), t, 0) })
+	t.Cleanup(func() { e.setDesired(context.Background(), t, 0) })
 
 	var results []iterResult
 	for iter := 0; iter < iterations; iter++ {
@@ -220,8 +219,10 @@ func TestBenchmarkHotPath(t *testing.T) {
 
 // ── Cold path ─────────────────────────────────────────────────────────────────
 
-// TestBenchmarkColdPath measures scale-out from a full cold launch (from AMI).
-// This terminates warm pool instances and is destructive — opt-in only.
+// TestBenchmarkColdPath measures scale-out from a full cold revive (launch from
+// the AMI, then node setup). It terminates stopped slot instances before each
+// iteration, so it is destructive — opt-in only. The controller recreates
+// WARM slots over later scale-ins.
 //
 // Prerequisites: ELASTIC_GCS_TEST_COLD_PATH=true
 // Run: make benchmark REGION=us-east-1 TIER=cold ELASTIC_GCS_TEST_COLD_PATH=true
@@ -238,53 +239,18 @@ func TestBenchmarkColdPath(t *testing.T) {
 	e := newBenchEnv(t)
 	iterations := iterCount(3)
 
-	// Drain the warm pool to force cold launches from AMI.
-	t.Log("draining warm pool to force cold launch path (DESTRUCTIVE)...")
-	e.scaleASG(ctx, t, 0)
-	_, err := e.asgClient.DeleteWarmPool(ctx, &autoscaling.DeleteWarmPoolInput{
-		AutoScalingGroupName: aws.String(e.asgName),
-		ForceDelete:          aws.Bool(true),
-	})
-	if err != nil {
-		t.Fatalf("DeleteWarmPool: %v", err)
-	}
-
-	// Wait for warm pool to drain.
-	for i := 0; i < 24; i++ {
-		time.Sleep(15 * time.Second)
-		wp, err := e.asgClient.DescribeWarmPool(ctx,
-			&autoscaling.DescribeWarmPoolInput{AutoScalingGroupName: aws.String(e.asgName)})
-		if err != nil || len(wp.Instances) == 0 {
-			t.Log("warm pool drained")
-			break
-		}
-		t.Logf("  warm pool draining: %d instances remain", len(wp.Instances))
-	}
-
-	t.Cleanup(func() {
-		t.Log("NOTE: warm pool was deleted; redeploy CDK stack to restore it")
-	})
+	t.Cleanup(func() { e.setDesired(context.Background(), t, 0) })
 
 	baselineActive := e.countActiveGCSNodes(ctx, t)
 
 	var results []iterResult
 	for iter := 0; iter < iterations; iter++ {
-		if iter > 0 {
-			t.Logf("--- iteration %d/%d: scaling back to 0...", iter+1, iterations)
-			e.scaleASG(ctx, t, 0)
-			// Wait for the instance to terminate (no warm pool to catch it).
-			for i := 0; i < 20; i++ {
-				time.Sleep(15 * time.Second)
-				out, err := e.asgClient.DescribeAutoScalingGroups(ctx,
-					&autoscaling.DescribeAutoScalingGroupsInput{
-						AutoScalingGroupNames: []string{e.asgName},
-					})
-				if err == nil && len(out.AutoScalingGroups) > 0 &&
-					len(out.AutoScalingGroups[0].Instances) == 0 {
-					break
-				}
-			}
-		}
+		// Scale in, then evict the stopped slots so the next scale-out revives
+		// from cold (DESTRUCTIVE).
+		t.Logf("--- iteration %d/%d: scaling to 0 and evicting stopped slots...", iter+1, iterations)
+		e.setDesired(ctx, t, 0)
+		e.waitForStoppedSlots(ctx, t, 0, 15*time.Minute)
+		e.evictStoppedSlots(ctx, t)
 		t.Logf("=== cold iteration %d/%d ===", iter+1, iterations)
 
 		phases := e.measureColdIteration(ctx, t, baselineActive)
@@ -301,12 +267,12 @@ func TestBenchmarkColdPath(t *testing.T) {
 func (e *benchEnv) measureColdIteration(ctx context.Context, t *testing.T, baselineActive int) []phaseTiming {
 	t.Helper()
 
-	// T0: SetDesiredCapacity(1) — instance will launch from AMI
+	// T0: desired-dtns=1 — the controller revives a COLD slot from the AMI
 	t0 := time.Now()
-	e.scaleASG(ctx, t, 1)
+	e.setDesired(ctx, t, 1)
 
 	// T1: EC2 instance state = running
-	instanceID := e.firstASGInstanceID(ctx, t, 5*time.Minute)
+	instanceID := e.firstSlotInstanceID(ctx, t, 5*time.Minute)
 	t1 := e.waitForEC2Running(ctx, t, instanceID, 5*time.Minute)
 
 	// T2: SSM agent online

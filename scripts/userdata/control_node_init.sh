@@ -16,8 +16,7 @@ set -euo pipefail
 #   - ENDPOINT_DISPLAY_NAME: Display name for the endpoint
 #   - ORGANIZATION_NAME: Organization name for the endpoint
 #   - AWS_REGION: Current AWS region
-#   - WARM_POOL_SIZE: Warm pool size (passed but not used directly by script)
-#   - TOTAL_SLOTS: Total EIP slots = maxDTNs + warmPoolSize (node identities created)
+#   - TOTAL_SLOTS: DTN slots = max_dtns (one node identity per slot)
 #   - SECRETS_PREFIX: Secrets Manager prefix (e.g. elastic-gcs/us-west-2/src)
 #   - PARAM_PREFIX: SSM Parameter Store prefix (e.g. /elastic-gcs/us-west-2/src)
 #   - GCS_VERSION: exact GCS package version to install (e.g. 5.4.101)
@@ -210,7 +209,7 @@ fi
 # --- 6. Pre-create DTN node identities ---
 # (Storage gateway and collection setup is a post-deploy step.
 #  Run: aws-elastic-gcs-ctl collections setup --config config/open_data_buckets.yaml)
-# TOTAL_SLOTS = maxDTNs + warmPoolSize: every possible slot needs an identity.
+# TOTAL_SLOTS = max_dtns: every DTN slot needs an identity.
 # Idempotency: when the endpoint was reused, an existing slot secret with a
 # node_id belongs to it and is kept, rather than orphaning a node on every
 # control node replacement. When this run created a new endpoint, every existing

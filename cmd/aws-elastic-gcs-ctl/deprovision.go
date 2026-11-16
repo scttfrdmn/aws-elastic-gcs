@@ -8,17 +8,18 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cloudformationtypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 )
 
 // deprovisionInventory holds the complete resource list gathered before teardown.
@@ -34,10 +35,11 @@ type deprovisionInventory struct {
 	// gcsInitErr is non-empty if the GCS Manager API client could not be built.
 	// GCS resources will be empty and the SSM fallback will be used if possible.
 	gcsInitErr string
-	// ASG
-	asgExists       bool
-	asgInstanceIDs  []string // InService
-	warmInstanceIDs []string // Warmed:Stopped
+	// DTN slots: instances and Elastic IPs owned by the slot controller, not by
+	// CloudFormation, so stack deletion doesn't remove them.
+	slots       []slotInstance
+	slotEIPs    []string // allocation IDs
+	slotEIPAddr []string // public IPs, for display
 	// CloudFormation
 	cfnStackNames []string
 	// Secrets Manager
@@ -57,9 +59,10 @@ func deprovisionCmd() *cobra.Command {
 		Use:   "deprovision",
 		Short: "Completely tear down the Elastic GCS deployment (--confirm to execute)",
 		Long: `Performs an ordered, complete teardown of all Elastic GCS resources in the
-specified region — Globus endpoint nodes/collections/gateways, CloudFormation
-stacks, Secrets Manager secrets, SSM parameters, CloudWatch log groups, and
-the DTN AMI with its EBS snapshots.
+specified region — DTN slot instances and their Elastic IPs (owned by the slot
+controller, not CloudFormation), Globus endpoint nodes/collections/gateways,
+CloudFormation stacks, Secrets Manager secrets, SSM parameters, CloudWatch log
+groups, and the DTN AMI with its EBS snapshots.
 
 Without --confirm this performs a dry run: inventories all resources and prints
 what would be deleted, then exits without making any changes.
@@ -101,7 +104,6 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 
 	ssmClient := ssm.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
-	asgClient := autoscaling.NewFromConfig(cfg)
 	cfnClient := cloudformation.NewFromConfig(cfg)
 	smClient := secretsmanager.NewFromConfig(cfg)
 	cwlogsClient := cloudwatchlogs.NewFromConfig(cfg)
@@ -179,25 +181,19 @@ func collectDeprovisionInventory(ctx context.Context, cfg aws.Config) (*deprovis
 		}
 	}
 
-	// ── ASG + warm pool ───────────────────────────────────────────────────────
-	groups, aerr := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
-		AutoScalingGroupNames: []string{asgName()},
-	})
-	if aerr == nil && len(groups.AutoScalingGroups) > 0 {
-		inv.asgExists = true
-		for _, inst := range groups.AutoScalingGroups[0].Instances {
-			if string(inst.LifecycleState) == "InService" {
-				inv.asgInstanceIDs = append(inv.asgInstanceIDs, aws.ToString(inst.InstanceId))
-			}
-		}
+	// ── DTN slots (controller-owned instances and Elastic IPs) ────────────────
+	slots, serr := listSlotInstances(ctx, ec2Client)
+	if serr != nil {
+		return nil, serr
 	}
-	wp, _ := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
-		AutoScalingGroupName: aws.String(asgName()),
-	})
-	if wp != nil {
-		for _, inst := range wp.Instances {
-			inv.warmInstanceIDs = append(inv.warmInstanceIDs, aws.ToString(inst.InstanceId))
-		}
+	inv.slots = slots
+	addrs, aerr := ec2Client.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{Filters: slotFilters()})
+	if aerr != nil {
+		return nil, fmt.Errorf("describe slot Elastic IPs: %w", aerr)
+	}
+	for _, a := range addrs.Addresses {
+		inv.slotEIPs = append(inv.slotEIPs, aws.ToString(a.AllocationId))
+		inv.slotEIPAddr = append(inv.slotEIPAddr, aws.ToString(a.PublicIp))
 	}
 
 	// ── CloudFormation stacks ────────────────────────────────────────────────
@@ -373,16 +369,17 @@ func printDeprovisionDryRun(inv *deprovisionInventory) {
 		fmt.Printf("  EC2 instances  %s (control, %s)\n", inv.controlNodeID, inv.controlState)
 		hasInstances = true
 	}
-	for _, id := range inv.asgInstanceIDs {
-		fmt.Printf("                 %s (DTN, InService)\n", id)
-		hasInstances = true
-	}
-	for _, id := range inv.warmInstanceIDs {
-		fmt.Printf("                 %s (DTN, Warmed:Stopped)\n", id)
+	for _, s := range inv.slots {
+		fmt.Printf("                 %s (DTN slot %d, %s)\n", s.ID, s.Slot, s.State)
 		hasInstances = true
 	}
 	if !hasInstances {
 		fmt.Printf("  EC2 instances  (none found)\n")
+	}
+	if len(inv.slotEIPs) > 0 {
+		fmt.Printf("  Elastic IPs    %d: %s (DTN slots)\n", len(inv.slotEIPs), strings.Join(inv.slotEIPAddr, "  "))
+	} else {
+		fmt.Printf("  Elastic IPs    (no DTN slot addresses)\n")
 	}
 
 	// CloudFormation stacks
@@ -450,7 +447,6 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 	printWarn := func(msg string) { yellow.Printf("  ⚠  %s\n", msg) }
 	printErr := func(err error) { red.Printf("  ✗  %s (continuing)\n", err) }
 
-	asgClient := autoscaling.NewFromConfig(cfg)
 	ssmClient := ssm.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
 	cfnClient := cloudformation.NewFromConfig(cfg)
@@ -468,54 +464,46 @@ func executeDeprovision(ctx context.Context, cfg aws.Config, inv *deprovisionInv
 		snapshotsDeleted   int
 	)
 
-	// ── Step 1: Scale to zero ─────────────────────────────────────────────────
-	printStep("Scale to zero and drain ASG...")
-	if !inv.asgExists {
-		printWarn("ASG not found, skipping")
+	// ── Step 1: Remove DTN slots ──────────────────────────────────────────────
+	// Slot instances and Elastic IPs belong to the slot controller, not to
+	// CloudFormation, and slot instances use the control stack's security group,
+	// so they must go before the stacks. desired-dtns=0 first, so the controller
+	// doesn't revive a slot while this runs.
+	printStep(fmt.Sprintf("Remove %d DTN slot instance(s) and %d slot Elastic IP(s)...", len(inv.slots), len(inv.slotEIPs)))
+	if len(inv.slots) == 0 && len(inv.slotEIPs) == 0 {
+		printWarn("no DTN slots found")
 	} else {
-		// Set min/max/desired to 0 and force-delete warm pool.
-		_, err1 := asgClient.UpdateAutoScalingGroup(ctx, &autoscaling.UpdateAutoScalingGroupInput{
-			AutoScalingGroupName: aws.String(asgName()),
-			MinSize:              aws.Int32(0),
-			MaxSize:              aws.Int32(0),
-			DesiredCapacity:      aws.Int32(0),
-		})
-		_, err2 := asgClient.DeleteWarmPool(ctx, &autoscaling.DeleteWarmPoolInput{
-			AutoScalingGroupName: aws.String(asgName()),
-			ForceDelete:          aws.Bool(true),
-		})
-		if err1 != nil {
-			printErr(fmt.Errorf("UpdateASG: %w", err1))
-		} else if err2 != nil {
-			printErr(fmt.Errorf("DeleteWarmPool: %w", err2))
-		} else {
-			// Poll until all instances drained (10 min timeout).
-			fmt.Printf("\n")
-			deadline := time.Now().Add(10 * time.Minute)
-			for time.Now().Before(deadline) {
-				time.Sleep(10 * time.Second)
-				g, gerr := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
-					AutoScalingGroupNames: []string{asgName()},
-				})
-				asgCount := 0
-				if gerr == nil && len(g.AutoScalingGroups) > 0 {
-					asgCount = len(g.AutoScalingGroups[0].Instances)
-				}
-				wpOut, _ := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
-					AutoScalingGroupName: aws.String(asgName()),
-				})
-				wpCount := 0
-				if wpOut != nil {
-					wpCount = len(wpOut.Instances)
-				}
-				fmt.Printf("\r  draining: %d ASG instance(s), %d warm pool instance(s)   ",
-					asgCount, wpCount)
-				if asgCount == 0 && wpCount == 0 {
-					break
-				}
+		fmt.Printf("\n")
+		if _, err := ssmClient.PutParameter(ctx, &ssm.PutParameterInput{
+			Name: aws.String(dep.Param(names.ParamDesiredDTNs)), Value: aws.String("0"),
+			Type: ssmtypes.ParameterTypeString, Overwrite: aws.Bool(true),
+		}); err != nil {
+			printErr(fmt.Errorf("set desired-dtns=0: %w", err))
+		}
+		var ids []string
+		for _, s := range inv.slots {
+			ids = append(ids, s.ID)
+		}
+		if len(ids) > 0 {
+			if _, err := ec2Client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: ids}); err != nil {
+				printErr(fmt.Errorf("terminate slot instances: %w", err))
+			} else if err := ec2.NewInstanceTerminatedWaiter(ec2Client).Wait(ctx,
+				&ec2.DescribeInstancesInput{InstanceIds: ids}, 10*time.Minute); err != nil {
+				printErr(fmt.Errorf("wait for slot instances to terminate: %w", err))
+			} else {
+				green.Printf("  ✓ %d slot instance(s) terminated\n", len(ids))
 			}
-			fmt.Printf("\n")
-			green.Printf("  ✓ ASG drained\n")
+		}
+		released := 0
+		for i, alloc := range inv.slotEIPs {
+			if _, err := ec2Client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{AllocationId: aws.String(alloc)}); err != nil {
+				printErr(fmt.Errorf("release %s: %w", inv.slotEIPAddr[i], err))
+			} else {
+				released++
+			}
+		}
+		if len(inv.slotEIPs) > 0 {
+			green.Printf("  ✓ %d slot Elastic IP(s) released\n", released)
 		}
 	}
 

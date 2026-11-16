@@ -7,11 +7,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
-	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -24,7 +22,7 @@ import (
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show system status (control node, DTN pool, GCS nodes, metrics, alarms)",
+		Short: "Show system status (control node, DTN slots, GCS nodes, active transfers)",
 		RunE:  runStatus,
 	}
 }
@@ -38,7 +36,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	ssmClient := ssm.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
-	asgClient := autoscaling.NewFromConfig(cfg)
 	cwClient := cloudwatch.NewFromConfig(cfg)
 
 	// Control node + endpoint IDs from SSM
@@ -59,63 +56,19 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		controlState = instanceState(inst)
 	}
 
-	// ASG desired + in-service count
-	var desired, inService int
-	groups, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
-		AutoScalingGroupNames: []string{asgName()},
-	})
-	if err == nil && len(groups.AutoScalingGroups) > 0 {
-		desired = int(aws.ToInt32(groups.AutoScalingGroups[0].DesiredCapacity))
-		for _, inst := range groups.AutoScalingGroups[0].Instances {
-			if string(inst.LifecycleState) == "InService" {
-				inService++
-			}
-		}
+	// Slot controller: desired-dtns and the live slot instances (#65).
+	desired := desiredDTNs(ctx, ssmClient)
+	slots, err := listSlotInstances(ctx, ec2Client)
+	if err != nil {
+		return err
 	}
-
-	// Warm pool instances with slot + node ID tags
-	type dtnInfo struct {
-		instanceID, slot, state, nodeID string
-	}
-	var dtnNodes []dtnInfo
-	wp, err := asgClient.DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
-		AutoScalingGroupName: aws.String(asgName()),
-	})
-	if err == nil && len(wp.Instances) > 0 {
-		var warmIDs []string
-		stateByID := make(map[string]string)
-		for _, inst := range wp.Instances {
-			id := aws.ToString(inst.InstanceId)
-			warmIDs = append(warmIDs, id)
-			stateByID[id] = string(inst.LifecycleState)
-		}
-		// Tags are best-effort: on error the slot and node columns are blank.
-		tagsByID := make(map[string][]ec2types.Tag)
-		ec2Out, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
-			InstanceIds: warmIDs,
-		})
-		if err == nil {
-			for _, r := range ec2Out.Reservations {
-				for _, i := range r.Instances {
-					tagsByID[aws.ToString(i.InstanceId)] = i.Tags
-				}
-			}
-		}
-		for _, id := range warmIDs {
-			info := dtnInfo{instanceID: id, state: stateByID[id]}
-			for _, tag := range tagsByID[id] {
-				switch aws.ToString(tag.Key) {
-				case names.TagSlot:
-					info.slot = aws.ToString(tag.Value)
-				case names.TagGCSNodeID:
-					v := aws.ToString(tag.Value)
-					if len(v) > 8 {
-						v = v[:8]
-					}
-					info.nodeID = v
-				}
-			}
-			dtnNodes = append(dtnNodes, info)
+	var serving, warm int
+	for _, s := range slots {
+		switch {
+		case s.State == "running" && s.Phase == "":
+			serving++
+		case s.State == "stopped":
+			warm++
 		}
 	}
 
@@ -145,28 +98,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Alarm states
-	alarmNames := []string{
-		dep.Resource("scaleout"),
-		dep.Resource("scaleout-throughput"),
-		dep.Resource("scalein"),
-		dep.Resource("version-drift"),
-	}
-	alarmStates := make(map[string]string)
-	alarmsOut, err := cwClient.DescribeAlarms(ctx, &cloudwatch.DescribeAlarmsInput{
-		AlarmNames: alarmNames,
-	})
-	if err == nil {
-		for _, a := range alarmsOut.MetricAlarms {
-			alarmStates[aws.ToString(a.AlarmName)] = string(a.StateValue)
-		}
-	}
-
 	// ── Render ────────────────────────────────────────────────────────────────
 	bold := color.New(color.Bold)
 	green := color.New(color.FgGreen)
 	red := color.New(color.FgRed)
-	yellow := color.New(color.FgYellow)
 	dim := color.New(color.Faint)
 
 	bold.Printf("\nElastic GCS — %s\n", dep.ID())
@@ -186,12 +121,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 
-	// DTN pool
-	bold.Printf("DTN Pool       ")
-	fmt.Printf("desired=%-3d  in-service=%-3d  warm=%d\n", desired, inService, len(dtnNodes))
-	for _, d := range dtnNodes {
-		fmt.Printf("  %-24s  slot=%-3s  %-22s  node=%s\n",
-			d.instanceID, d.slot, d.state, d.nodeID)
+	// DTN slots
+	bold.Printf("DTN Slots      ")
+	fmt.Printf("desired=%-3d  serving=%-3d  warm=%d\n", desired, serving, warm)
+	for _, s := range slots {
+		phase := s.Phase
+		if phase == "" {
+			phase = "-"
+		}
+		fmt.Printf("  slot %-3d  %-20s  %-14s  phase=%-10s  %s\n", s.Slot, s.ID, s.State, phase, s.IP)
 	}
 
 	fmt.Println()
@@ -220,40 +158,5 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Println()
 	fmt.Printf("Active Transfers (5 min):  %.0f\n", activeTransfers)
-
-	// Alarms line
-	fmt.Printf("Alarms:")
-	for _, name := range alarmNames {
-		short := alarmShortName(name)
-		state := alarmStates[name]
-		switch state {
-		case "OK":
-			fmt.Printf("  %s ", short)
-			green.Printf("○ OK")
-		case "ALARM":
-			fmt.Printf("  %s ", short)
-			red.Printf("● ALARM")
-		default:
-			fmt.Printf("  %s ", short)
-			yellow.Printf("? %s", state)
-		}
-	}
-	fmt.Println()
 	return nil
-}
-
-// alarmShortName returns the label printed for an alarm on the status line:
-// the kind after the "elastic-gcs-" prefix (scaleout, scalein, version-drift).
-// Names with an unexpected shape are printed whole rather than indexed past
-// their end.
-func alarmShortName(name string) string {
-	parts := strings.Split(name, "-")
-	if len(parts) < 3 {
-		return name
-	}
-	short := parts[2] // scaleout / scalein / version
-	if short == "version" && len(parts) > 3 {
-		short = "version-drift"
-	}
-	return short
 }

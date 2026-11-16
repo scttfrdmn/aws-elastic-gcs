@@ -1,67 +1,69 @@
 # Configuration Reference
 
-## CDK Context (`cdk.json`)
+Per-deployment settings live in `config/regions.yaml` (copy
+`config/regions.example.yaml`); deployment-wide defaults and Globus identity
+settings live in `cdk.json` context. `config.Resolve` applies the defaults and
+validates everything, so the control and DTN pool stacks always agree (#49).
 
-All parameters live under `context` in `cdk.json`. Region-specific values are nested under the region key.
+## `config/regions.yaml`
 
-```json
-{
-  "context": {
-    "elastic-gcs:regions": ["us-east-1"],
+Each entry is one deployment (an independent Globus endpoint):
 
-    "elastic-gcs:us-east-1": {
-      "dtnInstanceType":  "c8in.2xlarge",
-      "maxDTNs":          4,
-      "warmPoolSize":     2,
-      "totalSlots":       6,
-      "cooldownMinutes":  15,
-      "cacheEvictionTTL": 72,
-      "useSpot":          false,
-      "spotMaxPrice":     ""
-    }
-  }
-}
+```yaml
+regions:
+  - name: us-west-2
+    deployment: src             # 1-12 lowercase letters/digits; default "default"
+    control_instance: t3a.large
+    dtn_instance: c8in.2xlarge
+    max_dtns: 8
+    # cost_profile: balanced    # or minimal
+    # warm_slots: 2
 ```
-
-### Parameter Reference
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `dtnInstanceType` | string | `c8in.2xlarge` | EC2 instance type for DTN nodes. Sustained internet-gateway throughput is the bottleneck; see [Instance Sizing](instance-sizing.md). |
-| `maxDTNs` | int | `4` | Maximum number of simultaneously InService DTN instances. Scale-out Lambda caps at this value. |
-| `warmPoolSize` | int | `2` | Number of stopped instances maintained in the warm pool. Higher = faster scale-out, higher EBS cost. Set to 0 to disable warm pool (cold-start only). |
-| `totalSlots` | int | `maxDTNs + warmPoolSize` | Total node slot identities to pre-create in Secrets Manager. Must be ≥ `maxDTNs + warmPoolSize`. |
-| `cooldownMinutes` | int | `15` | Minutes of zero active transfers before scale-in fires. |
-| `cacheEvictionTTL` | int | `72` | Hours a warm pool instance can remain stopped before the cache eviction Lambda terminates it. |
-| `useSpot` | bool | `false` | Use Spot instances for DTNs. Saves ~60–80% on compute but disables warm pool (AWS constraint). Spot DTNs cold-start (2–3 min). |
-| `spotMaxPrice` | string | `""` | Maximum Spot price per hour (e.g. `"0.10"`). Empty = up to on-demand price. |
-
-### Slot controller and cost (`regions.yaml`, #65)
-
-The slot controller replaces the Auto Scaling group and warm pool when `pool: slots` is set. Each slot is a persistent node identity, instance and Elastic IP, in one of three tiers:
-
-- **hot:** running and serving;
-- **warm:** stopped, keeps its address, resumes in about 1.5 minutes;
-- **cold:** no instance and no address; reviving it runs `node setup` again.
 
 | Setting | Default | Description |
 |---|---|---|
-| `pool` | `asg` | `asg` (Auto Scaling group + warm pool) or `slots` (slot controller) |
+| `name` | — | AWS region |
+| `deployment` | `default` | Deployment name; see [Multiple deployments per region](#multiple-deployments-per-region) |
+| `control_instance` | `t3a.large` | Control node type. GCS needs 8 GB and x86-64 |
+| `dtn_instance` | `c8in.2xlarge` | DTN type. Sustained internet-gateway throughput is the bottleneck; see [Instance Sizing](instance-sizing.md) |
+| `max_dtns` | context `elastic-gcs:maxDTNs`, else `4` | Number of DTN slots (1..`max_dtns`), and so the most DTNs serving at once. The control node pre-creates one node identity per slot |
+| `throughput_scaleout_mbps` | ~70% of `dtn_instance`'s sustained throughput | Throughput one DTN is expected to carry. demand_monitor asks for ceil(total ACTIVE throughput / this) DTNs |
+| `key_pair_name` | `""` | EC2 key pair for the control node and DTNs |
+| `network_use` | derived from `max_dtns` | See [Network use](#network-use-regionsyaml-network_use) |
+
+### Slot controller and cost (#65)
+
+Each DTN slot is a persistent node identity, Elastic IP and (unless COLD) EC2
+instance, in one of three tiers:
+
+- **hot:** running and serving;
+- **warm:** stopped, keeps its address, resumes in about 1.5 minutes;
+- **cold:** no instance; reviving it launches from the AMI and runs `node setup` (about 1 minute).
+
+| Setting | Default | Description |
+|---|---|---|
+| `pool` | `slots` | Optional. `slots` is the only pool since the ASG pool was removed (#133); any other value is an error |
 | `cost_profile` | `balanced` | Preset for the idle-cost settings below. Any setting given explicitly wins |
-| `warm_slots` | profile (`balanced`: 2, `minimal`: 0) | Slots kept warm when idle. The rest go cold after `cold_ttl`. Each warm slot costs about $3.65/month (Elastic IP) plus about $1.60 (EBS) |
+| `warm_slots` | profile (`balanced`: 2, `minimal`: 0), at most `max_dtns` | Slots kept warm when idle. The rest go cold after `cold_ttl`. Each warm slot costs about $3.65/month (Elastic IP) plus about $1.60 (EBS) |
 | `cold_ttl` | profile (`balanced`: 72h, `minimal`: 24h) | How long an extra warm slot stays stopped before going cold. The legacy `elastic-gcs:cacheEvictionHours` context value also sets it |
-| `drain_timeout` | `10m` | Scale-in: maximum wait for a disabled node's GridFTP data connections before stopping it. Globus retries interrupted files on other nodes |
+| `drain_timeout` | `10m` | Scale-in: maximum wait for a disabled node's GridFTP data connections before stopping it. Sessions finish on the draining node (#141); Globus retries anything still in flight on other nodes |
 | `scale_in_idle` | `15m` | No active transfers for this long scales the pool to 0 |
-| `unhealthy_after` | `5m` | A running slot that isn't active in GCS (or not answering SSM) this long is restarted |
+| `unhealthy_after` | `5m` | A running slot that isn't healthy (SSM online, in endpoint DNS, GCS services active) this long is restarted |
 | `max_restarts` | `2` | Restarts before an unhealthy slot is rebuilt (cold, then revived) |
 | `instance_types` | `[dtn_instance]` | DTN types in fallback order, used when EC2 reports no capacity for the first. `dtn_instance` is always first |
-| `control_node` | profile (`balanced`: `always`, `minimal`: `none`) | `always`, `on_demand` (started for management, stopped when idle) or `none` (management runs through an active DTN) |
-| `dashboard` | profile (`balanced`: `true`, `minimal`: `false`) | The CloudWatch dashboard costs $3/month beyond the account's three free ones |
+| `control_node` | profile (`balanced`: `always`, `minimal`: `none`) | `always`, `on_demand` or `none` (#130). Transfer rejects submissions to an endpoint with zero serving nodes, so `on_demand` and `none` need an explicit wake before the first transfer |
+| `dashboard` | profile (`balanced`: `true`, `minimal`: `false`) | Not built for slots yet (#144) |
 
 **Cost profiles:**
 
 - **`balanced`:** two warm slots and an always-on control node. The first transfer is served by the control node at once, and DTNs join within about 1.5 minutes.
-- **`minimal`:** scales to about $0–1/month idle. The trade-off is that the first transfer after an idle period waits for a cold revival (a few minutes of `node setup`), and the endpoint shows as offline until then.
+- **`minimal`:** scales to about $0–1/month idle. The first transfer after an idle period waits for a cold revival, and the endpoint shows as offline until then.
+
+**Removed settings.** These belonged to the Auto Scaling group pool and are
+rejected with a pointer to their replacement (#133): `warm_pool_size` (use
+`warm_slots`), `use_spot` and `spot_max_price` (Spot isn't supported on slots
+yet), `idle_shutdown_minutes` and `min_uptime_minutes` (see `control_node`,
+#130).
 
 ### Network use (`regions.yaml` `network_use`)
 
@@ -78,12 +80,20 @@ setup applies them once the service account has its role. For existing
 endpoints, use `aws-elastic-gcs-ctl endpoint network-use --apply`. See
 [operator tuning](performance/operator-guide.md).
 
-### Access and alerts
+## CDK context (`cdk.json`)
 
 | Context key | Default | Description |
 |---|---|---|
-| `adminCIDR` | `""` | Opens SSH (22) to this CIDR on the control node and DTNs. Empty means no SSH ingress; use SSM Session Manager (`aws ssm start-session --target <instance-id>`). |
-| `elastic-gcs:operatorEmail` | `""` | Subscribes this address to the deployment's operator alert topic (`elastic-gcs-operator-<region>-<deployment>`), which receives the GCS version-drift alarm. Confirm the subscription from the email AWS sends. The topic ARN is a stack output either way. |
+| `globus:subscriptionId` | — | Globus subscription the endpoint is managed under |
+| `globus:endpointOwner` | — | Endpoint owner identity |
+| `globus:endpointDisplayName` | — | Display name; the deployment ID is appended |
+| `globus:organizationName` | — | Endpoint organization |
+| `globus:gcsVersion` | `5.4.101` | Exact GCS version on every node; also keys the DTN AMI |
+| `elastic-gcs:maxDTNs` | `4` | Default `max_dtns` for deployments that don't set it |
+| `elastic-gcs:cacheEvictionHours` | — | Legacy: default `cold_ttl` in hours |
+| `elastic-gcs:throughputScaleOutMBps` | — | Overrides `throughput_scaleout_mbps` for every deployment |
+| `adminCIDR` | `""` | Opens SSH (22) to this CIDR on the control node and DTNs. Empty means no SSH ingress; use SSM Session Manager (`aws ssm start-session --target <instance-id>`) |
+| `elastic-gcs:operatorEmail` | `""` | Operator alert email. The slots stack has no alert topic yet (#144) |
 
 ### DTN Instance Type Selection
 
@@ -104,7 +114,7 @@ All secrets are under the prefix `elastic-gcs/{region}/{deployment}/` (see [Mult
 | Key | Description |
 |-----|-------------|
 | `elastic-gcs/{region}/{deployment}/deployment-key` | GCS deployment key JSON (`deployment-key.json`). Generated by `globus-connect-server endpoint setup`. Guard carefully — losing this requires Globus support to recover. |
-| `elastic-gcs/{region}/{deployment}/node-slot-{N}` | Pre-created GCS node identity JSON for slot N. Generated by `globus-connect-server node create --export-node`. |
+| `elastic-gcs/{region}/{deployment}/node-slot-{N}` | Pre-created GCS node identity JSON for slot N. Generated by `globus-connect-server node create --export-node`. Only the setup role can read it, and only during a slot's node setup |
 | `elastic-gcs/{region}/{deployment}/globus-client-id` | Globus automation client ID. Used by Lambdas and `aws-elastic-gcs-ctl` to authenticate GCS CLI commands. |
 | `elastic-gcs/{region}/{deployment}/globus-client-secret` | Globus automation client secret. |
 
@@ -128,50 +138,34 @@ The automation client authenticates Lambda functions and CLI commands to the GCS
 |------|-------------|
 | `/elastic-gcs/{region}/{deployment}/control-node-id` | EC2 instance ID of the control node. Written by control node UserData. |
 | `/elastic-gcs/{region}/{deployment}/endpoint-id` | Globus endpoint UUID. Written by control node UserData after `endpoint setup`. |
+| `/elastic-gcs/{region}/{deployment}/desired-dtns` | DTNs the slot controller converges to. Written by demand_monitor (and `aws-elastic-gcs-ctl scale`) |
+| `/elastic-gcs/{region}/{deployment}/last-active` | Last time demand_monitor saw an active transfer; `scale_in_idle` counts from it |
+| `/elastic-gcs/{region}/{deployment}/controller-lock` | Held by the running slot-controller execution, so only one runs at a time |
+| `/elastic-gcs/{region}/{deployment}/endpoint-domain` | The endpoint's DNS name, recorded at the first slot setup; used for health checks |
 | `/elastic-gcs/{region}/dtn-ami/gcs-{version}` | DTN AMI for a GCS version, shared by every deployment in the region. Written by `build-ami`; resolved by the DTN pool stack at deploy time. |
-| `/elastic-gcs/{region}/{deployment}/slot-lock/{N}` | Slot lock for slot N. Value = EC2 instance ID of the current holder. Written atomically by DTN boot script; deleted by lifecycle Lambda on termination. |
 
 ## Lambda Environment Variables
 
-These are set by CDK and are not typically modified directly, but are documented here for reference.
-
-### scaleout / scalein
-| Variable | Description |
-|----------|-------------|
-| `ASG_NAME` | Auto Scaling Group name |
-| `MAX_DTNS` | Maximum InService DTN count |
-| `REGION` | AWS region |
-
-### lifecycle
-| Variable | Description |
-|----------|-------------|
-| `ASG_NAME` | Auto Scaling Group name |
-| `REGION` | AWS region |
-| `CONTROL_NODE_ID_PARAM` | SSM parameter path for control node instance ID |
+These are set by CDK and are not typically modified directly, but are documented here for reference. Every Lambda also gets `DEPLOYMENT` and `SSM_LOG_GROUP`.
 
 ### demand_monitor
 | Variable | Description |
 |----------|-------------|
-| `REGION` | AWS region |
+| `SECRETS_PREFIX` | Secrets Manager prefix for the Globus client credentials |
 | `ENDPOINT_ID_PARAM` | SSM parameter path for Globus endpoint UUID |
-| `GLOBUS_CLIENT_ID_SECRET` | Secrets Manager key for Globus client ID |
-| `GLOBUS_CLIENT_SECRET_SECRET` | Secrets Manager key for Globus client secret |
+| `METRIC_NAMESPACE` | CloudWatch namespace (`ElasticGCS`) |
+| `MAX_DTNS` | Upper bound for desired-dtns |
+| `THROUGHPUT_THRESHOLD_BPS` | Throughput one DTN is expected to carry |
+| `SCALE_IN_IDLE` | No active transfers this long sets desired-dtns to 0 |
 
-### cache_eviction
+### slot_controller
 | Variable | Description |
 |----------|-------------|
-| `ASG_NAME` | Auto Scaling Group name |
-| `REGION` | AWS region |
-| `CACHE_TTL_HOURS` | Cache eviction TTL (hours) |
-| `CONTROL_NODE_ID_PARAM` | SSM parameter path for control node instance ID |
-| `TOTAL_SLOTS` | Total slot count (for orphan node sweep) |
-
-### version_check
-| Variable | Description |
-|----------|-------------|
-| `ASG_NAME` | Auto Scaling Group name |
-| `REGION` | AWS region |
-| `CONTROL_NODE_ID_PARAM` | SSM parameter path for control node instance ID |
+| `MAX_DTNS`, `WARM_SLOTS`, `DRAIN_TIMEOUT`, `COLD_TTL`, `UNHEALTHY_AFTER`, `MAX_RESTARTS` | The resolved slot settings above |
+| `LAUNCH_TEMPLATE_ID` | DTN launch template |
+| `INSTANCE_TYPES` | DTN types in fallback order |
+| `SUBNET_IDS` | Public subnets; slot N uses subnet (N-1) mod count |
+| `RUNTIME_PROFILE`, `SETUP_PROFILE`, `SETUP_ROLE` | Instance profiles and the setup role whose sessions are revoked after node setup |
 
 ## Multiple deployments per region
 
@@ -187,18 +181,19 @@ Every name is derived from the deployment (`internal/names`). For deployment
 | Resource | Name |
 |----------|------|
 | Stacks | `ElasticGCS-Control-us-west-2-src`, `ElasticGCS-DTNPool-us-west-2-src` |
-| ASG, launch template, DTN role | `elastic-gcs-dtn-us-west-2-src` |
-| Lambdas, alarms, SNS topics | `elastic-gcs-<kind>-us-west-2-src` |
+| DTN launch template | `elastic-gcs-dtn-us-west-2-src` |
+| DTN instance profiles and roles | `elastic-gcs-dtn-runtime-us-west-2-src`, `elastic-gcs-dtn-setup-us-west-2-src` |
+| Lambdas, EventBridge rules | `elastic-gcs-<kind>-us-west-2-src` |
 | Secrets | `elastic-gcs/us-west-2/src/...` |
 | SSM parameters | `/elastic-gcs/us-west-2/src/...` |
-| Dashboard | `ElasticGCS-us-west-2-src` |
 | Globus endpoint display name | `<globus:endpointDisplayName> (us-west-2-src)` |
 | Metrics | namespace `ElasticGCS`, dimensions `Region` + `Deployment` |
 
 IAM policies are scoped to the deployment's own secrets and parameters, so one
 deployment's instances can't read another's. Every resource is tagged
 `elastic-gcs:deployment=<region>-<deployment>`, which can be activated as a
-cost allocation tag to track spend per deployment.
+cost allocation tag to track spend per deployment. Slot instances and Elastic
+IPs also carry `elastic-gcs:pool=slots` and `elastic-gcs:slot=<N>`.
 
 The DTN AMI is shared: it is named only by GCS version, so every deployment in
 the region running that version uses it. `make ami REGION=us-west-2
@@ -210,27 +205,9 @@ unless they list `deployments: [src]`.
 The CLI, Makefile and tests take the deployment as `--deployment`,
 `DEPLOYMENT=` and `ELASTIC_GCS_DEPLOYMENT` respectively.
 
-## config/regions.yaml
-
-Per-region configuration file. Example:
-
-```yaml
-regions:
-  us-east-1:
-    dtnInstanceType: c8in.2xlarge
-    maxDTNs: 4
-    warmPoolSize: 2
-    useSpot: false
-    spotMaxPrice: ""
-    cacheEvictionTTL: 72
-    cooldownMinutes: 15
-```
-
-Values here are read by CDK context and override `cdk.json` defaults. At minimum, set the target region(s) and instance type.
-
 ## S3 Bucket Configuration
 
-S3 buckets are added as GCS storage gateways on the control node. There is no CDK configuration for this — storage gateways are created by `control_node_init.sh` or manually via the GCS CLI.
+S3 buckets are added as GCS storage gateways on the control node. There is no CDK configuration for this — storage gateways are created by `aws-elastic-gcs-ctl collections setup` or manually via the GCS CLI.
 
 ### Public Buckets (no auth required)
 ```bash

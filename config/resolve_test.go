@@ -18,19 +18,15 @@ func TestResolve(t *testing.T) {
 		wantErr bool
 	}{
 		{"defaults", RegionConfig{Name: "us-west-2"}, Defaults{}, func(r Resolved) bool {
-			return r.WarmPoolSize == 2 && r.MaxDTNs == 3 && r.TotalSlots == 5 && r.CacheEvictionHours == 72 &&
+			return r.MaxDTNs == 4 && r.TotalSlots == 4 &&
 				r.DTNInstance == "c8in.2xlarge" && r.ControlInstance == "t3a.large" && r.GCSVersion == "5.4.101" &&
 				r.ThroughputThresholdBps == 1_093_750_000 && !r.ThroughputDerivedFallback
 		}, false},
-		{"regions.yaml max_dtns wins over context (#49)", RegionConfig{MaxDTNs: 8, WarmPoolSize: 8}, Defaults{MaxDTNs: 4}, func(r Resolved) bool {
-			return r.MaxDTNs == 8 && r.TotalSlots == 16
+		{"regions.yaml max_dtns wins over context (#49)", RegionConfig{MaxDTNs: 8}, Defaults{MaxDTNs: 4}, func(r Resolved) bool {
+			return r.MaxDTNs == 8 && r.TotalSlots == 8
 		}, false},
-		{"context max_dtns when unset", RegionConfig{}, Defaults{MaxDTNs: 4}, func(r Resolved) bool { return r.MaxDTNs == 4 && r.TotalSlots == 6 }, false},
-		{"spot drops the warm pool", RegionConfig{UseSpot: true, MaxDTNs: 3}, Defaults{}, func(r Resolved) bool {
-			return r.WarmPoolSize == 0 && r.TotalSlots == 3
-		}, false},
-		{"spot with nothing set still has one DTN", RegionConfig{UseSpot: true}, Defaults{}, func(r Resolved) bool { return r.MaxDTNs == 1 }, false},
-		{"idle shutdown gets min uptime", RegionConfig{IdleShutdownMinutes: 20}, Defaults{}, func(r Resolved) bool { return r.MinUptimeMinutes == 30 }, false},
+		{"context max_dtns when unset", RegionConfig{}, Defaults{MaxDTNs: 6}, func(r Resolved) bool { return r.MaxDTNs == 6 && r.TotalSlots == 6 }, false},
+		{"pool: slots is accepted", RegionConfig{Pool: "slots"}, Defaults{}, nil, false},
 		{"context throughput wins", RegionConfig{ThroughputScaleOutMBps: 900}, Defaults{ThroughputMBps: 800}, func(r Resolved) bool {
 			return r.ThroughputThresholdBps == 800_000_000
 		}, false},
@@ -53,7 +49,7 @@ func TestResolve(t *testing.T) {
 		{"network use over 128", RegionConfig{NetworkUse: NetworkUse{MaxConcurrency: 256}}, Defaults{}, nil, true},
 		{"preferred over max", RegionConfig{NetworkUse: NetworkUse{PreferredConcurrency: 64, MaxConcurrency: 32}}, Defaults{}, nil, true},
 		{"slot defaults (balanced)", RegionConfig{MaxDTNs: 8}, Defaults{}, func(r Resolved) bool {
-			return r.Pool == "asg" && r.CostProfile == "balanced" && r.WarmSlots == 2 && r.ControlNode == "always" && r.Dashboard &&
+			return r.CostProfile == "balanced" && r.WarmSlots == 2 && r.ControlNode == "always" && r.Dashboard &&
 				r.DrainTimeout == 10*time.Minute && r.ColdTTL == 72*time.Hour && r.UnhealthyAfter == 5*time.Minute &&
 				r.ScaleInIdle == 15*time.Minute && r.MaxRestarts == 2 && len(r.InstanceTypes) == 1 && r.InstanceTypes[0] == "c8in.2xlarge"
 		}, false},
@@ -70,6 +66,11 @@ func TestResolve(t *testing.T) {
 			return reflect.DeepEqual(r.InstanceTypes, []string{"c8in.2xlarge", "m8in.2xlarge", "c8in.4xlarge"})
 		}, false},
 		{"bad pool", RegionConfig{Pool: "k8s"}, Defaults{}, nil, true},
+		{"the asg pool was removed (#133)", RegionConfig{Pool: "asg"}, Defaults{}, nil, true},
+		{"warm_pool_size was removed", RegionConfig{WarmPoolSize: 8}, Defaults{}, nil, true},
+		{"spot was removed", RegionConfig{UseSpot: true}, Defaults{}, nil, true},
+		{"spot price was removed", RegionConfig{SpotMaxPrice: "0.2"}, Defaults{}, nil, true},
+		{"idle shutdown was removed", RegionConfig{IdleShutdownMinutes: 20}, Defaults{}, nil, true},
 		{"bad cost profile", RegionConfig{CostProfile: "cheap"}, Defaults{}, nil, true},
 		{"bad control node", RegionConfig{ControlNode: "sometimes"}, Defaults{}, nil, true},
 		{"warm slots over max", RegionConfig{MaxDTNs: 2, WarmSlots: ip(3)}, Defaults{}, nil, true},
@@ -77,8 +78,7 @@ func TestResolve(t *testing.T) {
 		{"bad gcs version", RegionConfig{}, Defaults{GCSVersion: "5.4"}, nil, true},
 		{"bad cidr", RegionConfig{}, Defaults{AdminCIDR: "10.0.0.0/33"}, nil, true},
 		{"world cidr", RegionConfig{}, Defaults{AdminCIDR: "0.0.0.0/0"}, nil, true},
-		{"negative", RegionConfig{WarmPoolSize: -1}, Defaults{}, nil, true},
-		{"bad spot price", RegionConfig{UseSpot: true, SpotMaxPrice: "cheap"}, Defaults{}, nil, true},
+		{"negative", RegionConfig{MaxDTNs: -1}, Defaults{}, nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

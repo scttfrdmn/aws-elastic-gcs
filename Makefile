@@ -6,10 +6,6 @@ build: build-lambdas build-ctl
 
 build-lambdas:
 	@echo "Building Lambda functions..."
-	GOOS=linux GOARCH=arm64 go build -o lambda/lifecycle/bootstrap ./lambda/lifecycle/
-	GOOS=linux GOARCH=arm64 go build -o lambda/scaleout/bootstrap ./lambda/scaleout/
-	GOOS=linux GOARCH=arm64 go build -o lambda/scalein/bootstrap ./lambda/scalein/
-	GOOS=linux GOARCH=arm64 go build -o lambda/cache_eviction/bootstrap ./lambda/cache_eviction/
 	GOOS=linux GOARCH=arm64 go build -o lambda/demand_monitor/bootstrap ./lambda/demand_monitor/
 	GOOS=linux GOARCH=arm64 go build -o lambda/version_check/bootstrap ./lambda/version_check/
 	GOOS=linux GOARCH=arm64 go build -o lambda/waker/bootstrap ./lambda/waker/
@@ -46,8 +42,7 @@ destroy:
 test:
 	go test ./... -v
 
-# Use ELASTIC_GCS_TEST_FULL_CYCLE=true for 2-round auto-scale test (~20min)
-# Use ELASTIC_GCS_TEST_SCALE_IN=true for automatic scale-in test (~20min)
+# TestSlotScaleOutIn drives the slot controller through one scale-out and scale-in (~20min).
 test-integration:
 	ELASTIC_GCS_REGION=$(REGION) ELASTIC_GCS_DEPLOYMENT=$(DEPLOYMENT) ELASTIC_GCS_ITERATIONS=$(ITERATIONS) \
 	  go test ./test/integration/ -v -tags=integration -timeout 90m \

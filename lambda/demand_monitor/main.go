@@ -11,7 +11,6 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -24,28 +23,27 @@ import (
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/logger"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/names"
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/scaling"
-	"github.com/scttfrdmn/aws-elastic-gcs/internal/warmpool"
 )
 
 // handler polls the Globus Transfer endpoint_manager API for the endpoint's
-// tasks, publishes demand metrics, and scales the DTN pool up when the active
-// load needs more DTNs than are desired (#26).
+// tasks, publishes demand metrics, and sets desired-dtns for the slot
+// controller (#26, #129).
 //
 // Triggered by: EventBridge schedule (every minute)
 //
 // Metrics (dimensions Region, Deployment):
-//   - ActiveTransfers    — ACTIVE tasks; the scale-out (0→1) and idle scale-in alarms use it
+//   - ActiveTransfers    — ACTIVE tasks
 //   - TransferThroughput — sum of effective_bytes_per_second over ACTIVE tasks
 //   - QueuedTransfers    — INACTIVE (suspended) tasks; observability only
 //
 // INACTIVE tasks are suspended and won't progress without intervention (expired
-// credentials, admin pause), so they no longer wake the endpoint (#29): a task
-// against an endpoint with no running nodes stays ACTIVE, and ActiveTransfers
-// already scales out DTNs, which serve without the control node.
+// credentials, admin pause), so they don't wake the endpoint (#29). Note that
+// Transfer rejects a submission outright when the endpoint has no serving node
+// at all (#130), so demand can't wake an endpoint from zero nodes.
 //
 // Scale-up: desired = DesiredDTNs(active, throughput, per-DTN threshold,
-// MAX_DTNS); the pool is only ever raised here. Scale-in stays with the idle
-// alarm, so a dip in throughput can't stop DTNs mid-transfer.
+// MAX_DTNS); it only rises while transfers are active, so a dip in throughput
+// can't stop DTNs mid-transfer. It drops to 0 after SCALE_IN_IDLE.
 func handler(ctx context.Context, _ interface{}) error {
 	metricNamespace := envOr("METRIC_NAMESPACE", names.MetricNamespace)
 	cfg, err := awsconfig.LoadDefaultConfig(ctx)
@@ -88,10 +86,7 @@ func handler(ctx context.Context, _ interface{}) error {
 		return fmt.Errorf("PutMetricData failed: %w", err)
 	}
 
-	if os.Getenv("POOL") == "slots" {
-		return setDesired(ctx, cfg, active)
-	}
-	return scaleUp(ctx, cfg, active)
+	return setDesired(ctx, cfg, active)
 }
 
 // setDesired drives the slot controller (#129): while transfers are active,
@@ -134,48 +129,6 @@ func setDesired(ctx context.Context, cfg aws.Config, active demand.Stats) error 
 	}
 	logger.Info("desired-dtns", "from", current, "to", next, "active", active.Count, "throughput_bytes_per_sec", active.TotalBytesPerSec)
 	return put(names.ParamDesiredDTNs, strconv.Itoa(next))
-}
-
-// scaleUp raises the ASG's desired capacity to what the active load needs.
-func scaleUp(ctx context.Context, cfg aws.Config, active demand.Stats) error {
-	asgName := os.Getenv("ASG_NAME")
-	maxDTNs, _ := strconv.Atoi(os.Getenv("MAX_DTNS"))
-	perDTN, _ := strconv.ParseInt(os.Getenv("THROUGHPUT_THRESHOLD_BPS"), 10, 64)
-	if asgName == "" || maxDTNs <= 0 || active.Count == 0 {
-		return nil
-	}
-	target := scaling.DesiredDTNs(active.Count, active.TotalBytesPerSec, perDTN, maxDTNs)
-
-	asgClient := autoscaling.NewFromConfig(cfg)
-	out, err := asgClient.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
-		AutoScalingGroupNames: []string{asgName},
-	})
-	if err != nil || len(out.AutoScalingGroups) == 0 {
-		return fmt.Errorf("describe ASG %s: %v", asgName, err)
-	}
-	current := int(aws.ToInt32(out.AutoScalingGroups[0].DesiredCapacity))
-	next, change := scaling.ScaleUp(current, target)
-	if !change {
-		return nil
-	}
-	logger.Info("scaling up for demand", "from", current, "to", next,
-		"active", active.Count, "throughput_bytes_per_sec", active.TotalBytesPerSec, "per_dtn_threshold", perDTN)
-	if _, err := asgClient.SetDesiredCapacity(ctx, &autoscaling.SetDesiredCapacityInput{
-		AutoScalingGroupName: aws.String(asgName),
-		DesiredCapacity:      aws.Int32(int32(next)),
-		HonorCooldown:        aws.Bool(false),
-	}); err != nil {
-		// ScalingActivityInProgress is common mid-scale-out; the next minute retries.
-		logger.Warn("SetDesiredCapacity failed; will retry next run", "error", err.Error())
-	}
-	// Put the warm pool back if cache eviction removed it (#33).
-	size, _ := strconv.Atoi(os.Getenv("WARM_POOL_SIZE"))
-	if made, err := warmpool.Ensure(ctx, asgClient, asgName, size); err != nil {
-		logger.Warn("could not restore warm pool", "error", err.Error())
-	} else if made {
-		logger.Info("warm pool restored after eviction", "size", size)
-	}
-	return nil
 }
 
 // Warm-invocation cache (#28): the endpoint ID and an auto-refreshing

@@ -109,6 +109,10 @@ Automating this toggle is part of the slot controller (#65).
 
 ## 5. Things that will bite you
 
+Rows mentioning the ASG or warm pool describe the campaign's Auto Scaling group
+pool, since replaced by the slot controller (#133): deploys no longer touch
+running DTNs, and slot setup runs one at a time.
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | `cdk deploy` kills running transfers | Before 0.12, `DesiredCapacity` in the template reset the ASG to 0 (#71) | Fixed: the template no longer sets it. Deploys can still replace warm-pool instances when the launch template changes, so avoid deploying during transfers |

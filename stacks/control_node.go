@@ -78,7 +78,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 	// Public subnets only — GCS instances need direct internet access for
 	// Globus service communication and GridFTP data channels. No NAT gateways
 	// needed (and no NAT cost) since all instances have public IPs.
-	// Two AZs for ASG spread in Phase 3.
+	// Two AZs: the slot controller spreads slots across their subnets.
 	// -------------------------------------------------------------------------
 	vpc := awsec2.NewVpc(stack, jsii.String("VPC"), &awsec2.VpcProps{
 		MaxAzs: jsii.Number(2),
@@ -339,8 +339,7 @@ func NewControlNodeStack(scope constructs.Construct, id string, props *ControlNo
 		jsii.String(fmt.Sprintf("export GLOBUS_OWNER_IDENTITY=%q", props.GlobusOwnerIdentity)),
 		jsii.String(fmt.Sprintf("export GLOBUS_SUBSCRIPTION_ID=%q", props.GlobusSubscriptionID)),
 		jsii.String(fmt.Sprintf("export GCS_VERSION=%q", props.Config.GCSVersion)),
-		jsii.String(fmt.Sprintf("export WARM_POOL_SIZE=%d", props.Config.WarmPoolSize)),
-		// TOTAL_SLOTS = maxDTNs + warmPoolSize: every EIP slot needs a node identity.
+		// TOTAL_SLOTS = max_dtns: every DTN slot needs a node identity.
 		jsii.String(fmt.Sprintf("export TOTAL_SLOTS=%d", props.Config.TotalSlots)),
 		// Endpoint network use (#56): set during setup when the service account has a role.
 		jsii.String(fmt.Sprintf("export NETWORK_USE_ARGS=%q", props.Config.NetworkUse.Args())),

@@ -2,33 +2,44 @@
 
 Elastic GCS deploys a [Globus Connect Server v5](https://docs.globus.org/globus-connect-server/) endpoint on AWS with automatic scaling from near-zero idle cost to multi-node high-throughput data transfer, then back to idle when transfers complete.
 
-## Three-Tier Caching Model
+## DTN slots and three tiers
 
-Instances exist in one of three tiers:
+A deployment has `max_dtns` DTN **slots**. A slot is a persistent GCS node
+identity (pre-created by the control node), an Elastic IP, and, when it isn't
+COLD, an EC2 instance. Each slot is in one of three tiers:
 
 ```
-COLD (terminated)          WARM (stopped)              HOT (running)
-  No EC2 cost               EBS + EIP cost only          Full compute cost
-  2–3 min scale-out         30–60 s scale-out             0 s (already serving)
+COLD (no instance)         WARM (stopped)              HOT (running)
+  No EC2 cost               EBS + Elastic IP only        Full compute cost
+  ~1 min to set up          ~1.5 min to serving          0 s (already serving)
        │                         │                              │
-       │  Launch from AMI        │  Resume + node enable        │  Already registered
-       │  + node setup           │                              │
+       │  Launch from AMI        │  Start + node enable         │  In endpoint DNS
+       │  + node setup           │  (boot unit)                 │
        ▼                         ▼                              ▼
-   ┌─────────┐  stop+hold   ┌─────────┐  scale out      ┌─────────┐
-   │  COLD   │ ──────────►  │  WARM   │ ─────────────►  │   HOT   │
-   └─────────┘              └─────────┘                 └─────────┘
-                                 ▲          cool-down         │
-                                 │          (15–30 min)       │
-                                 └───────────────────────────-┘
-                            cache eviction
-                            (72 h TTL) ──► TERMINATE
+   ┌─────────┐   revive     ┌─────────┐    start        ┌─────────┐
+   │  COLD   │ ──────────►  │   HOT   │ ◄────────────── │  WARM   │
+   └─────────┘              └─────────┘ ──────────────► └─────────┘
+        ▲                                drain + stop        │
+        │                                                    │
+        └──────────── evict after cold_ttl (beyond warm_slots)
 ```
 
-**Cold path** (new instance, never seen before): instance launches from DTN AMI, runs `node setup --import-node` with a pre-created node identity from Secrets Manager (~23 s), ASG marks it InService. Total: ~2–3 minutes.
+**Cold path (revive):** the controller launches an instance from the DTN AMI
+in the slot's subnet, attaches the slot's Elastic IP, swaps the instance to the
+setup profile, runs `node setup --import-node` with the slot's identity, swaps
+back to the runtime profile, and revokes setup-role sessions. Measured: 47 s
+from launch to node setup done; node setup itself ~18 s.
 
-**Warm path** (instance returning from stopped state): instance resumes, runs `node update --ip-address --enable` (~7 s), ASG marks it InService. Total: ~60 s wall-clock.
+**Warm path (start):** the controller starts a stopped slot; its boot unit runs
+`node enable` and waits for the slot's IP in endpoint DNS. Measured: ~95 s from
+desired-dtns rising to healthy and in DNS.
 
-**Hot path**: instance is already InService and active — 0 s additional latency.
+**Hot path:** the slot is already serving — 0 s additional latency.
+
+**Scale-in (drain):** the controller runs `node disable` on the slot (it leaves
+endpoint DNS, so new sessions go elsewhere), waits for its GridFTP data
+connections to reach 0 (or `drain_timeout`), then stops it. In-flight sessions
+finish on the draining node (see [GridFTP restarts](#gridftp-restarts)).
 
 ## Components
 
@@ -37,141 +48,159 @@ COLD (terminated)          WARM (stopped)              HOT (running)
 │                     AWS Region                                  │
 │                                                                 │
 │  ┌───────────────┐    ┌──────────────────────────────────────┐  │
-│  │ Control Node  │    │  ASG + Warm Pool                     │  │
-│  │ (t3a.large)   │    │  ┌──────────┐  ┌──────────┐         │  │
-│  │               │    │  │  DTN 1   │  │  DTN 2   │  ...    │  │
-│  │ • GCS endpoint│    │  │ (stopped)│  │ (stopped)│         │  │
-│  │ • Node idents │    │  └──────────┘  └──────────┘         │  │
-│  │ • GCS manager │    └──────────────────────────────────────┘  │
-│  └───────┬───────┘                                             │
+│  │ Control Node  │    │  DTN slots (owned by the controller)  │  │
+│  │ (t3a.large)   │    │  ┌──────────┐  ┌──────────┐          │  │
+│  │               │    │  │ slot 1   │  │ slot 2   │  ...     │  │
+│  │ • GCS endpoint│    │  │ HOT/WARM │  │  COLD    │          │  │
+│  │ • Node idents │    │  │ + EIP    │  │          │          │  │
+│  │ • GCS manager │    │  └──────────┘  └──────────┘          │  │
+│  └───────┬───────┘    └──────────────────────────────────────┘  │
 │          │                                                      │
 │  ┌───────▼──────────────────────────────────────────────────┐  │
 │  │  Lambda Functions                                         │  │
-│  │  • scaleout      — increments ASG desired                 │  │
-│  │  • scalein       — decrements ASG desired when idle       │  │
-│  │  • lifecycle     — node disable before instance stops     │  │
-│  │  • cache_eviction — removes the warm pool after 72h idle  │  │
-│  │  • demand_monitor — publishes ActiveTransfers metric       │  │
-│  │  • version_check — detects GCS version drift every 6h     │  │
+│  │  • demand_monitor  — sets desired-dtns from Transfer      │  │
+│  │  • slot_controller — durable function: converges slots    │  │
+│  │                      to desired-dtns                      │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                 │
 │  ┌───────────────────┐  ┌──────────────────────────────────┐   │
 │  │ SSM Parameter     │  │ Secrets Manager                  │   │
 │  │ • control-node-id │  │ • deployment-key                 │   │
 │  │ • endpoint-id     │  │ • node-slot-1..N                 │   │
-│  │ • slot locks      │  │ • globus-client-id/secret        │   │
-│  └───────────────────┘  └──────────────────────────────────┘   │
+│  │ • desired-dtns    │  │ • globus-client-id/secret        │   │
+│  │ • controller-lock │  └──────────────────────────────────┘   │
+│  └───────────────────┘                                          │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ### Control Node
 
-A single `t3a.large` EC2 instance (x86-64 required — GCS 5.4 has no aarch64 packages). Runs at all times. Responsible for:
+A single `t3a.large` EC2 instance (x86-64 required — GCS 5.4 has no aarch64
+packages) with its own Elastic IP. Responsible for:
 
 - Hosting the GCS endpoint (Globus Manager API, data channel)
-- Pre-creating DTN node identities (`globus-connect-server node create --export-node`)
+- Pre-creating DTN node identities (`globus-connect-server node create --export-node`), one per slot
 - Storing node identity JSON files in Secrets Manager
 - Running GCS CLI commands on behalf of `aws-elastic-gcs-ctl` via SSM Run Command
 
-### DTN Pool (ASG + Warm Pool)
+It enables itself on boot and disables itself on shutdown
+(`elastic-gcs-control.service`). `scripts/control_node_power.sh` stops it between
+sessions.
 
-Data Transfer Nodes handle actual transfer I/O. Configured via CDK context:
+### DTN slots
 
-- `maxDTNs`: maximum InService DTN count (default: 4)
-- `warmPoolSize`: number of pre-warmed stopped instances (default: 2)
-- `dtnInstanceType`: EC2 instance type (default: c8in.2xlarge; see [Instance Sizing](instance-sizing.md))
+Data Transfer Nodes handle the transfer I/O. Settings live in `regions.yaml`
+(see [Configuration](configuration.md)):
 
-AWS Auto Scaling warm pools keep `warmPoolSize` instances stopped (paying EBS + SSM only). On scale-out, ASG resumes a stopped instance rather than launching cold, cutting scale-out time from ~3 minutes to ~60 seconds.
+- `max_dtns`: number of slots (default 4)
+- `warm_slots`: WARM slots kept after `cold_ttl` (cost-profile default)
+- `dtn_instance` and `instance_types`: EC2 types in fallback order (default c8in.2xlarge; see [Instance Sizing](instance-sizing.md))
 
-### Node Slot Identity
+CloudFormation creates only the launch template, the roles and instance
+profiles, and the controller. Instances and Elastic IPs belong to the
+controller, tagged `elastic-gcs:pool=slots`, so a deploy never resizes or
+replaces them.
 
-Each DTN slot has a pre-created GCS node identity (UUID + encryption key) stored in Secrets Manager at `elastic-gcs/{region}/{deployment}/node-slot-{N}`. This decouples GCS registration from EC2 instance lifecycle:
+### Node identity delivery
 
-- AMIs are generic — no baked-in identity
-- Failed instances are replaced without creating orphaned GCS nodes
-- Slot locking uses `ssm:PutParameter` (atomic, fails if key exists) to prevent two instances from claiming the same slot
-
-Slot locks are held for the full instance lifetime and released by the lifecycle Lambda on permanent termination.
+Each slot has a pre-created GCS node identity (UUID + encryption key) in Secrets
+Manager at `elastic-gcs/{region}/{deployment}/node-slot-{N}`. A DTN's runtime
+role can't read secrets. For the one-time `node setup`, the controller swaps the
+instance to a setup profile that can, runs setup over SSM, swaps back, and
+revokes every setup-role session issued before the swap-back (verified live:
+copied credentials stop working about 5 s later).
 
 ### Lambda Functions
 
 | Function | Trigger | Action |
 |----------|---------|--------|
-| `scaleout` | SNS (CloudWatch alarm) | `SetDesiredCapacity += 1`, capped at `maxDTNs` |
-| `scalein` | SNS (CloudWatch alarm) | `SetDesiredCapacity -= 1`, guarded by `ActiveTransfers == 0` |
-| `lifecycle` | ASG lifecycle hook | SSM `node disable` before stop; releases slot lock on termination |
-| `demand_monitor` | EventBridge (1 min) | Polls Globus Transfer API, publishes `ElasticGCS/ActiveTransfers` |
-| `cache_eviction` | EventBridge (1 h) | When nothing is desired and every warm instance has been stopped > 72 h, deletes the warm pool (WARM → COLD); the next scale-out restores it. Sweeps orphaned GCS nodes |
-| `version_check` | EventBridge (6 h) | Runs `globus-connect-server --version` on all nodes via SSM, publishes `ElasticGCS/GCSVersionDrift` |
+| `demand_monitor` | EventBridge (1 min) | Polls Globus Transfer for the endpoint's ACTIVE tasks, publishes `ElasticGCS/ActiveTransfers`; raises `desired-dtns` while transfers are active and sets it to 0 after `scale_in_idle` |
+| `slot_controller` | EventBridge (1 min) and `desired-dtns` changes | Lambda durable function (via its `live` alias). Holds `controller-lock`; observes slots (instances, SSM health, endpoint DNS, GCS services, data connections), plans actions with `internal/slots`, and executes them |
 
-### Scaling Triggers
+### Controller rules
 
-```
-Globus Transfer API
-        │  (polled every 1 min by demand_monitor)
-        ▼
-ElasticGCS/ActiveTransfers (CloudWatch metric)
-        │
-        ├──► > 0 for 5 min  ──► scaleout alarm ──► SNS ──► scaleout Lambda
-        │
-        └──► == 0 for 15 min ──► scalein alarm  ──► SNS ──► scalein Lambda
-```
+`internal/slots.Plan` applies, in order: finish in-flight actions (stop drained
+slots); health (restart an unhealthy slot, rebuild after `max_restarts`, rebuild
+an abandoned revive); scale out (WARM slots first, one COLD revive at a time);
+scale in (one slot at a time, fewest data connections; never the last DTN unless
+the control node is serving — it starts the control node first); evict WARM
+slots beyond `warm_slots` after `cold_ttl`.
+
+A slot is healthy when it is running, its SSM agent is online, its IP is in
+endpoint DNS, and `gcs_manager` and `globus-gridftp-server` are active.
 
 ## Key Design Decisions
 
-### SSM Slot Locking (replaced EIPs)
+### Slots with Elastic IPs
 
-Originally DTN slots were assigned via Elastic IPs (one EIP per slot, discovered by tag). This cost ~$3.60/slot/month at idle and required EIP quota.
-
-Current design: each DTN claims a slot by calling `aws ssm put-parameter --name /elastic-gcs/{region}/{deployment}/slot-lock/{N} --value {instance-id}` without `--overwrite`. SSM rejects duplicate writes atomically. Slot locks are held for the instance lifetime and released by the lifecycle Lambda on termination.
-
-Node IP is fetched from IMDS at boot; `node update --ip-address` handles IP registration dynamically.
+Each slot keeps one Elastic IP for its lifetime, so a slot's node identity is
+always registered at the same address: a WARM start needs no `node update
+--ip-address`, and the endpoint never has a stale IP for a slot. An Elastic IP
+costs ~$3.60/month while allocated; evicting a slot releases it.
 
 ### Pre-Created Node Identities
 
-`globus-connect-server node create --export-node` generates a node UUID and encryption key without starting services. This file is stored in Secrets Manager and injected at instance boot. Benefits:
+`globus-connect-server node create --export-node` generates a node UUID and encryption key without starting services. This file is stored in Secrets Manager and injected at setup. Benefits:
 
 - AMIs are fully generic (no per-slot baking required)
 - Node identity survives instance replacement — same UUID, new EC2 instance
-- `node setup --import-node` (~23 s) is faster than full `node create` + `node setup`
+- `node setup --import-node` (~18 s) is faster than full `node create` + `node setup`
 
-### Warm Pool over Custom Stop/Start
+### Controller instead of an ASG and warm pool
 
-AWS Auto Scaling warm pools provide lifecycle hooks, health checks, and `InstanceReusePolicy` (scale-in goes to stopped rather than terminated) as native features. The alternative — managing EC2 stop/start with a custom state machine — would replicate this complexity without the operational benefits.
+The first design used an Auto Scaling group with a warm pool and lifecycle
+hooks. It was replaced (#65, removed in #133) because the ASG couldn't express
+what a GCS endpoint needs: per-slot identities and addresses, draining by data
+connections, never stopping the last serving node, one-at-a-time identity
+delivery, and deploys that never touch running DTNs.
 
-## Observed Timings (us-east-1, m6i.xlarge — measured before the c8in.2xlarge default)
+### GridFTP restarts
+
+GCS restarts `globus-gridftp-server` on every node whenever a node joins or
+leaves the endpoint, and on `node disable`. With the unit's default
+`KillMode=control-group` that killed every in-flight session. The DTN AMI and
+the control node install a `KillMode=process` drop-in
+(`scripts/configure_gridftp.sh`, #141): only the listener restarts, and
+sessions finish in their own processes.
+
+## Observed Timings (us-west-2, c8in.2xlarge, November 2026)
 
 | Phase | Time |
 |-------|------|
-| Cold boot: instance launch → AMI boot | ~90 s |
-| Cold boot: `node setup --import-node` | ~23 s |
-| Warm resume: instance start | ~30 s |
-| Warm resume: `node update --enable` | ~7 s |
-| **Warm scale-out: desired=1 → InService** | **~60 s** |
-| Scale-in: `node disable` via SSM | ~30 s |
+| Cold revive: launch → node setup done | ~47 s |
+| Cold revive: `node setup --import-node` | ~18 s |
+| Warm start: desired-dtns 0→1 → healthy and in DNS | ~95 s |
+| Demand: task submitted → slot launched (cold) | ~36 s |
+| Scale-in: drain (0 data connections) → stopped | ~60 s |
 | DNS propagation after `node enable/disable` | up to 2 min |
 
-## Metrics and Alarms
+## Metrics
 
-| Metric / Alarm | Namespace | Description |
-|----------------|-----------|-------------|
+| Metric | Namespace | Description |
+|--------|-----------|-------------|
 | `ActiveTransfers` | `ElasticGCS` | Active Globus tasks touching this endpoint |
-| `GCSVersionDrift` | `ElasticGCS` | Distinct GCS versions across nodes minus 1 (0 = healthy) |
-| `scaleout` alarm | CloudWatch | ActiveTransfers > 0 for 5 min |
-| `scalein` alarm | CloudWatch | ActiveTransfers == 0 for 15 min |
-| `version-drift` alarm | CloudWatch | GCSVersionDrift > 0 |
+| `TransferThroughput` | `ElasticGCS` | Sum of effective bytes/s over ACTIVE tasks |
+| `QueuedTransfers` | `ElasticGCS` | INACTIVE (suspended) tasks; observability only |
 
-All alarms route through SNS. The `scalein` alarm fires at idle (desired=0) as a known false positive — it is functionally correct but cosmetically noisy; the scalein Lambda is a no-op when desired is already 0.
+Alarms, the operator alert topic and the dashboard aren't built for slots yet
+(#144).
+
+## Zero nodes
+
+Globus Transfer rejects a task submission outright when the endpoint has no
+serving node (`502 ExternalError … Error validating login`), so no task exists
+for demand to see. With `control_node: always` the control node accepts
+submissions; `on_demand` and `none` need an explicit wake first (#130).
 
 ## Cost Model
 
 | State | Components | Approx. monthly cost |
 |-------|-----------|---------------------|
 | Fully idle | Control node (t3a.large) + EIP | ~$59/mo |
-| Idle + warm pool (2) | Above + 2× stopped DTN EBS (20 GiB gp3 each) | ~$62/mo |
-| 1 DTN always on | Above + 1× c8in.2xlarge on-demand | ~$459/mo |
-| Elastic, 1 DTN 40 h/month | Idle + warm pool + 40 h × $0.544 | ~$84/mo |
+| Idle + 2 WARM slots | Above + 2× stopped DTN EBS (20 GiB gp3) + 2× EIP | ~$70/mo |
+| 1 DTN always on | Above + 1× c8in.2xlarge on-demand | ~$467/mo |
+| Elastic, 1 DTN 40 h/month | Idle + 2 WARM slots + 40 h × $0.544 | ~$92/mo |
 
 Internet egress ($50–90/TB) dominates the cost of any transfer; see
-[Instance Sizing](instance-sizing.md). Warm pool provides faster scale-out
-(30–60 s vs 2–3 min cold) at the cost of ~$3/mo for EBS storage. Whether to use warm pool vs cold-start is a latency/cost trade-off. Spot instances are incompatible with warm pools (AWS constraint) — choose one or the other.
+[Instance Sizing](instance-sizing.md). WARM slots trade ~$5/month each (EBS +
+Elastic IP) for a faster first transfer than a COLD revive.
