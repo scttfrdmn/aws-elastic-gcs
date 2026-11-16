@@ -172,10 +172,16 @@ func (p *dtnPool) slotUserData(role awsiam.Role) awsec2.UserData {
 	asset.GrantRead(role)
 	ud := awsec2.UserData_ForLinux(nil)
 	ud.AddCommands(jsii.String("set -euo pipefail"), jsii.String("systemctl enable --now amazon-ssm-agent || true"))
-	local := ud.AddS3DownloadCommand(&awsec2.S3DownloadOptions{
-		Bucket: asset.Bucket(), BucketKey: asset.S3ObjectKey(),
-		LocalFile: jsii.String("/opt/elastic-gcs/scripts/node_boot.sh"), Region: jsii.String(p.dep.Region),
-	})
+	// Retry the download: on a slot's first boot soon after its role was
+	// created, IAM may not have propagated yet (a transient 403 left src slot 1
+	// without its node unit, #146). revive also checks the unit is installed.
+	local := jsii.String("/opt/elastic-gcs/scripts/node_boot.sh")
+	ud.AddCommands(jsii.String(fmt.Sprintf(`mkdir -p /opt/elastic-gcs/scripts
+for i in $(seq 1 30); do
+  aws s3 cp 's3://%s/%s' '%s' --region %s && break
+  echo "node_boot.sh download failed (attempt $i/30); retrying in 10s" >&2; sleep 10
+done
+test -s '%s'`, *asset.S3BucketName(), *asset.S3ObjectKey(), *local, p.dep.Region, *local)))
 	unit := `[Unit]
 Description=Elastic GCS slot node lifecycle (node enable on boot, disable on shutdown)
 After=network-online.target

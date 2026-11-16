@@ -400,6 +400,14 @@ func (c *Controller) revive(ctx context.Context, slot int) error {
 	if err := c.waitSSM(ctx, id, 10*time.Minute); err != nil {
 		return err
 	}
+	// First-boot UserData installs the node unit that enables the node on every
+	// later start. Without it the slot works once (node setup enables it) and
+	// breaks on its first stop/start, so a failed boot is relaunched instead.
+	if _, err := ssmexec.RunOK(ctx, c.SSM, id, bootCheckScript,
+		ssmexec.Options{Wait: 6 * time.Minute, Comment: "elastic-gcs: check first-boot setup"}); err != nil {
+		_, _ = c.EC2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}})
+		return fmt.Errorf("slot %d: first boot incomplete, instance terminated for a fresh revive: %w", slot, err)
+	}
 	pfx := c.Env.Dep.SecretsPrefix()
 	region := c.Env.Dep.Region
 	setup := fmt.Sprintf(`set -euo pipefail
@@ -424,6 +432,10 @@ jq -r '.domain_name' /var/lib/globus-connect-server/info.json`, pfx, region, slo
 	}
 	return nil
 }
+
+// bootCheckScript waits for cloud-init and requires the node unit it installs.
+const bootCheckScript = `cloud-init status --wait >/dev/null 2>&1; s=$(cloud-init status 2>/dev/null | awk '{print $2}')
+systemctl is-enabled --quiet elastic-gcs-node || { echo "elastic-gcs-node not installed (cloud-init: $s)" >&2; exit 1; }`
 
 // slotEIP returns the slot's Elastic IP, allocating one (tagged) if needed.
 func (c *Controller) slotEIP(ctx context.Context, slot int) (ip, allocationID string, err error) {

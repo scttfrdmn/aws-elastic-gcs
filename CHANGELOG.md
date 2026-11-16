@@ -83,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A control node stopped on purpose stays stopped.
 
 ### Fixed
+- **A transient first-boot failure no longer leaves a slot broken (#146).** On a
+  new deployment's first revive, IAM hadn't propagated the new runtime role
+  yet. The UserData download of the node unit's script got a 403, and the slot
+  worked once (node setup enables the node) but never came back after a stop.
+  - The download now retries.
+  - Revive waits for cloud-init and requires the node unit to be installed;
+    otherwise it terminates the instance and revives a fresh one.
+  - The restart → rebuild path also healed it live.
 - **Slot controller, from the first live run on dst (#132):**
   - EventBridge targets a `live` alias. Durable functions reject unqualified
     invokes, and CDK grants no invoke permission for `$LATEST`.
