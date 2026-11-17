@@ -390,9 +390,13 @@ def _resolve_dataset(plan, ref):
     pl = synth.build_plan(spec)
     sizes = [o["size"] for o in pl["ops"]]
     tops = sorted({o["key"][len(pl["prefix"]) + 1:].split("/")[0] for o in pl["ops"]})
-    return {"name": ref, "prefix": pl["prefix"], "dir": pl["prefix"].split("/", 1)[1], "files": len(sizes),
-            "bytes": sum(sizes), "mean_size": sum(sizes) / max(len(sizes), 1), "top_dirs": tops,
-            "spec_hash": pl["spec_hash"]}
+    # The target is part of the spec hash, so the POSIX copy (synth.py create
+    # --target posix) lives under a different directory name than the S3 one.
+    pspec = {**spec, "target": "posix"}
+    posix_dir = synth.build_plan(pspec)["prefix"].split("/", 1)[1]
+    return {"name": ref, "prefix": pl["prefix"], "dir": pl["prefix"].split("/", 1)[1], "posix_dir": posix_dir,
+            "files": len(sizes), "bytes": sum(sizes), "mean_size": sum(sizes) / max(len(sizes), 1),
+            "top_dirs": tops, "spec_hash": pl["spec_hash"]}
 
 
 _SPEC_CACHE = {}
@@ -408,7 +412,9 @@ def resolve_route(plan, f, ds, env, uid):
     """Collections, items and cleanup targets for one point."""
     route = plan["routes"][f["route"]]
     ctx = {**env, "campaign": plan["campaign"], "uid": uid,
-           "dataset_prefix": ds.get("prefix", ""), "dataset_dir": ds.get("dir", "")}
+           "dataset_prefix": ds.get("prefix", ""),
+           # {dataset_dir} names a dataset on a DTN volume: the POSIX copy.
+           "dataset_dir": ds.get("posix_dir") or ds.get("dir", "")}
     fmt = lambda s: s.format(**ctx) if isinstance(s, str) else s  # noqa: E731
     src_col = env.get(ds.get("src_col") or route["src"], ds.get("src_col") or route["src"])
     dst_col = env.get(route["dst"], route["dst"])

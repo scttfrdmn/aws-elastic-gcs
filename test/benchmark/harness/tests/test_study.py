@@ -173,7 +173,7 @@ class TestRoutes(unittest.TestCase):
         ds = study.resolve_dataset(plan, "F1M")
         rt = study.resolve_route(plan, study.normalize_factors({"dataset": "F1M", "route": "posix_to_s3"}), ds,
                                  self.env, "u")
-        self.assertEqual(rt["src_path"], f"/data/{ds['dir']}/")
+        self.assertEqual(rt["src_path"], f"/data/{ds['posix_dir']}/")
         self.assertEqual(rt["drop_caches"], "src")
         rt = study.resolve_route(plan, study.normalize_factors({"dataset": "F1M", "route": "s3_to_posix"}), ds,
                                  self.env, "u")
@@ -409,3 +409,14 @@ class TestRunPoint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PosixDatasetDir(unittest.TestCase):
+    """Regression (#151 P1): POSIX routes must use the POSIX copy's directory."""
+
+    def test_posix_dir_differs_and_is_used(self):
+        ds = study.resolve_dataset({"datasets": {}}, "F1G")
+        self.assertNotEqual(ds["posix_dir"], ds["dir"])
+        import synth
+        spec = {**synth.load_ref("F1G"), "target": "posix"}
+        self.assertEqual(ds["posix_dir"], synth.build_plan(spec)["prefix"].split("/", 1)[1])
