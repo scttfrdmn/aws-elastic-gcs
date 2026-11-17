@@ -417,7 +417,9 @@ def runner_command(region, run_id, label, src_col, dst_col, items, env=None):
     envs = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in sorted(env.items()))
     args = " ".join(shlex.quote(a) for a in [src_col, dst_col, label, *items])
     log = f"{BENCH_DIR}/runs/{shlex.quote(run_id)}.jsonl"
-    return (f"mkdir -p {BENCH_DIR}/runs; "
+    # A re-measured point reuses its run id: clear any cancel marker left by an
+    # earlier attempt, or the new task is cancelled the moment it starts.
+    return (f"mkdir -p {BENCH_DIR}/runs; rm -f {shlex.quote(env['CANCEL_FILE'])}; "
             f"export GLOBUS_CLIENT_ID={_secret(region, 'src', 'globus-client-id')}; "
             f"export GLOBUS_CLIENT_SECRET={_secret(region, 'src', 'globus-client-secret')}; "
             f"{envs} nohup {BENCH_DIR}/venv/bin/python {BENCH_DIR}/bench_transfer.py {args} > {log} 2>&1 & "

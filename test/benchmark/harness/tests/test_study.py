@@ -420,3 +420,12 @@ class PosixDatasetDir(unittest.TestCase):
         import synth
         spec = {**synth.load_ref("F1G"), "target": "posix"}
         self.assertEqual(ds["posix_dir"], synth.build_plan(spec)["prefix"].split("/", 1)[1])
+
+
+class StaleCancelMarker(unittest.TestCase):
+    """Regression (#151 P1): a re-run must not inherit an earlier attempt's cancel marker."""
+
+    def test_runner_clears_cancel_file_before_start(self):
+        cmd = hlib.runner_command("us-west-2", "abc-r0", "l", "s", "d", ["a=>b"])
+        rm = cmd.index("rm -f /opt/elastic-gcs/bench/runs/abc-r0.cancel")
+        self.assertLess(rm, cmd.index("bench_transfer.py"))
