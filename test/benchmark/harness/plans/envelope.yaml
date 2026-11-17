@@ -35,7 +35,7 @@ refine: {threshold: 0.10, max_rounds: 6}
 
 # Prior throughput model, used only by --dry-run estimates:
 # per-file r(s) = s / (t0 + s / b); T = min(k * min(c, 128) * r, n * node_frac * NIC).
-prior: {t0_s: 0.3, b_gbps: 0.35, node_frac: 0.75, ramp_s: 40, noise_cv: 0.04}
+prior: {t0_s: 0.09, b_gbps: 0.72, node_frac: 0.75, ramp_s: 40, noise_cv: 0.04}   # measured in P1 (s3_to_s3 fit)
 
 routes:
   s3_to_s3:                         # read S3 (src synth bucket) -> write S3 (dst bench bucket)
