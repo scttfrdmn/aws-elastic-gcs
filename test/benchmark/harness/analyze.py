@@ -115,11 +115,21 @@ def _fixed(curve):
 
 
 def fit_rs(sizes_bytes, rates_gbps):
-    """r(s) = s / (t0 + s / b): OLS of time per file on size (Gb). Returns t0 (s), b (Gbps), r2."""
+    """r(s) = s / (t0 + s / b): least squares of time per file on size (Gb).
+
+    Weighted by 1/t (i.e. relative error), so a 16 GiB file's ~200 s doesn't
+    swamp a 1 MiB file's ~0.1 s and leave t0 unconstrained; t0 is constrained
+    to >= 0 (if the unconstrained fit is negative, t0 = 0 and b is refit).
+    Returns t0 (s), b (Gbps), r2 (on time, unweighted).
+    """
     xs = [8 * s / 1e9 for s in sizes_bytes]
     ts = [x / r for x, r in zip(xs, rates_gbps)]
-    beta = lstsq([[1.0, x] for x in xs], ts)
+    w = [1.0 / t for t in ts]
+    beta = lstsq([[wi, wi * x] for wi, x in zip(w, xs)], [wi * t for wi, t in zip(w, ts)])
     t0, inv_b = beta
+    if t0 < 0:
+        t0 = 0.0
+        inv_b = sum((wi * x) * (wi * t) for wi, x, t in zip(w, xs, ts)) / sum((wi * x) ** 2 for wi, x in zip(w, xs))
     pred = [t0 + x * inv_b for x in xs]
     mt = sum(ts) / len(ts)
     sst = sum((t - mt) ** 2 for t in ts)
@@ -359,10 +369,13 @@ def fits(curves, recs, seed):
     # r(s): one point per (route, size) from the c = 1 runs' per-file medians, else steady / c.
     pts = {}
     for r in recs:
-        if r.get("phase") != "P1" or r.get("status") not in ("ok", "no_steady"):
+        if r.get("phase") != "P1" or r.get("status") != "ok":
             continue
         f = r["factors"]
-        g = ((r.get("gridftp") or {}).get("send") or {}).get("rate_gbps_median")
+        # The slower side binds: for writes the sender only reads local disk.
+        gg = [((r.get("gridftp") or {}).get(side) or {}).get("rate_gbps_median") for side in ("send", "recv")]
+        gg = [x for x in gg if x]
+        g = min(gg) if gg else None
         if g is None and f.get("c") == 1:
             g = (r.get("metrics") or {}).get("steady_gbps")
         size = r.get("dataset_mean_size") or _size_of(f.get("dataset"))

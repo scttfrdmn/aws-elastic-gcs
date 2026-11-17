@@ -288,24 +288,35 @@ def join(points, recs, slack=30.0):
 # ---------------------------------------------------------------- fetch
 
 
-def fetch(log_bucket, log_prefix, start, end, out, region="us-west-2", lag_h=6):
-    """Download simple-format log objects (<prefix>YYYY-mm-dd-HH-MM-SS-<id>) for [start, end + lag]."""
+def fetch(log_bucket, log_prefix, start, end, out, region="us-west-2", lag_h=6, workers=32):
+    """Download log objects for [start, end + lag].
+
+    Handles both key formats S3 can write: simple (<prefix>YYYY-mm-dd-HH-MM-SS-<id>)
+    and partitioned (<prefix><account>/<region>/<bucket>/YYYY/MM/DD/YYYY-mm-dd-HH-MM-SS-<id>).
+    The object's file name starts with its timestamp in both, so filter on that.
+    """
+    import concurrent.futures as cf  # noqa: PLC0415
     import hlib  # noqa: PLC0415
     s3 = hlib.boto3_client("s3", region)
     t0 = time.strftime("%Y-%m-%d-%H-%M-%S", time.gmtime(start))
     t1 = time.strftime("%Y-%m-%d-%H-%M-%S", time.gmtime(end + lag_h * 3600))
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=log_bucket, Prefix=log_prefix,
-                                                            StartAfter=log_prefix + t0):
+    keys = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=log_bucket, Prefix=log_prefix):
         for o in page.get("Contents", []):
-            name = o["Key"][len(log_prefix):]
-            if name[:19] > t1:
-                return n
-            s3.download_file(log_bucket, o["Key"], str(out / name.replace("/", "_")))
-            n += 1
-    return n
+            name = o["Key"].rsplit("/", 1)[-1]
+            if t0 <= name[:19] <= t1:
+                keys.append(o["Key"])
+
+    def get(key):
+        dest = out / key[len(log_prefix):].replace("/", "_")
+        if not dest.exists():
+            s3.download_file(log_bucket, key, str(dest))
+
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(get, keys))
+    return len(keys)
 
 
 def _epoch(v):
