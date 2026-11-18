@@ -1,0 +1,9 @@
+# 64 MiB x 4,096 (256 GiB): the base point's size (#151 section 5)
+name: F64M
+description: "64 MiB x 4,096 (256 GiB): the base point's size"
+size: 64MiB
+count: 4096
+naming: hashed
+fanout: 16
+depth: 1
+target: s3

@@ -1,0 +1,9 @@
+# 1 MiB x 16,384 (16 GiB) (#151 section 5)
+name: F1M
+description: "1 MiB x 16,384 (16 GiB)"
+size: 1MiB
+count: 16384
+naming: hashed
+fanout: 16
+depth: 1
+target: s3

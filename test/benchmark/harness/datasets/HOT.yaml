@@ -1,0 +1,10 @@
+# F64M under one sequential prefix (#151 section 5): lexicographically adjacent
+# keys concentrate requests on one S3 partition (the H7 hot-prefix case).
+name: HOT
+description: "F64M with a sequential hot prefix (256 GiB)"
+size: 64MiB
+count: 4096
+naming: sequential
+fanout: 1
+depth: 1
+target: s3

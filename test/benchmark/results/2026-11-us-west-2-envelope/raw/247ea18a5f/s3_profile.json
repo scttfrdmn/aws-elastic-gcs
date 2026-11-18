@@ -1,0 +1,51 @@
+{
+ "read": {
+  "records": 955,
+  "objects": 325,
+  "ops": {
+   "REST.GET.BUCKET": 17,
+   "REST.GET.OBJECT": 300,
+   "REST.HEAD.OBJECT": 638
+  },
+  "requests_per_object": 2.83,
+  "heads": 638,
+  "lists": 17,
+  "directory_markers": 0,
+  "throttled_503": 0,
+  "errors_5xx": 0,
+  "retries": 0,
+  "backoff_s": null,
+  "throttle_first_t": null,
+  "get": {
+   "objects": 300,
+   "gets_per_object": {
+    "n": 300,
+    "min": 1,
+    "median": 1,
+    "max": 1,
+    "mean": 1.0
+   },
+   "range_bytes": {
+    "n": 300,
+    "min": 720588,
+    "median": 67108864,
+    "max": 67108864,
+    "mean": 66541182.42666667
+   },
+   "inflight_peak_per_object": {
+    "n": 300,
+    "min": 1,
+    "median": 1,
+    "max": 1,
+    "mean": 1.0
+   },
+   "first_byte_ms": {
+    "n": 300,
+    "min": 55,
+    "median": 103,
+    "max": 247,
+    "mean": 106.47333333333333
+   }
+  }
+ }
+}

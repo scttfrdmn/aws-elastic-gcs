@@ -1,0 +1,4 @@
+[312012] Tue Nov 17 03:59:06 2026 :: Forcefully terminating process. No exit after control stop.
+[315451] Tue Nov 17 04:00:04 2026 :: force_close:
+Handle not in the proper state
+

@@ -1,0 +1,9 @@
+# Bulky per-point artifacts stay out of git; the full raw set is archived
+# separately (see #151, reproducibility). Kept in git: points.jsonl,
+# schedule-*.jsonl, per-point s3_profile.json, p0/, p0b/, analysis/.
+raw/**/s3_objects.jsonl
+raw/**/*.gridftp*.log
+raw/**/*.nic
+raw/**/*.proc
+raw/**/*.ss.txt
+raw/**/*-t*.jsonl
