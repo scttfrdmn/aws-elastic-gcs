@@ -45,6 +45,7 @@ nav:
   - Home: index.md
   - Performance:
       - Overview: performance/README.md
+      - Why Globus and S3 are slow: performance/why-s3-is-slow.md
       - Getting maximum performance: performance/user-guide.md
       - Operator tuning: performance/operator-guide.md
       - Throughput model: performance/throughput-model.md
