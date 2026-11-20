@@ -54,7 +54,11 @@ the same instances carry many flows far faster (11.9 Gbps on c8in.2xlarge,
 or buffer limit (1 ms RTT needs only ~0.6 MB of window). It doesn't bind the
 stock connector (0.6 Gbps per file), but it will bind any faster one: a file at
 15–20 Gbps needs at least 4–5 GridFTP streams. Placement groups (10 Gbps per
-flow) and ENA Express (25 Gbps, same AZ) don't apply to remote endpoints.
+flow) and ENA Express (25 Gbps, same AZ) don't apply to remote endpoints. Between
+instances on private IPs we also measured about 9.5 Gbps per flow for some pairs
+(2 of 3 c7i.8xlarge and c8in.2xlarge pairs) without a placement group, presumably
+from placement: undocumented, not guaranteed, and never seen on the public path
+(4.78 Gbps on every pair).
 
 ### 5. Most instances get only 5 Gbps *in total* to the internet
 
@@ -94,9 +98,11 @@ The limits are hard: repeats agree to three significant figures. AWS's wording
 Instances of 4xlarge and below are rated "up to" a bandwidth they can burst to
 for "typically from 5 to 60 minutes", then fall to their baseline (same AWS
 page). And a network interface sits on one network card: c8in.96xlarge's
-600 Gbps is two 300 Gbps cards, so a single-interface DTN can use at most 300.
-(Our public-IP measurements plateau at 171–193 Gbps on 32xlarge and up; whether
-that is AWS or our test tool is open, #151.)
+600 Gbps is two 300 Gbps cards. Measured (#151): through the internet gateway a
+single interface reaches **290 Gbps** on both c8in.48xlarge and c8in.96xlarge
+(~97% of one card), and only with an interface on each card did a 96xlarge move
+**586 Gbps** (301 + 285, private). A GCS node advertises one data-interface IP,
+so **one GCS node can use about one network card**.
 
 ### 7. Small files hit S3 request rates and per-file overhead
 
