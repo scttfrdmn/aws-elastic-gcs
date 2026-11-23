@@ -31,12 +31,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Read Globus and deployment configuration from CDK context.
-	// Set these in cdk.json or pass via: cdk deploy -c key=value
-	globusSubscriptionID := ctxString(app, "globus:subscriptionId")
-	globusOwnerIdentity := ctxString(app, "globus:endpointOwner")
-	endpointDisplayName := ctxString(app, "globus:endpointDisplayName")
-	orgName := ctxString(app, "globus:organizationName")
+	// Globus endpoint settings: per deployment in regions.yaml
+	// (globus_endpoint_owner, globus_subscription_id, ...), optionally a
+	// site-wide value via -c globus:...; owner and subscription are required
+	// and have no defaults (#162).
 	adminCIDR := ctxString(app, "adminCIDR")
 	operatorEmail := ctxString(app, "elastic-gcs:operatorEmail")
 	// GCS package version pinned on every node. All nodes in an endpoint must
@@ -44,7 +42,9 @@ func main() {
 	// (scripts/build_ami.sh) all key off this one value.
 	// Deployment-wide defaults from CDK context; per-deployment settings in
 	// regions.yaml win. config.Resolve validates everything (#49).
-	defaults := config.Defaults{GCSVersion: ctxString(app, "globus:gcsVersion"), AdminCIDR: adminCIDR}
+	defaults := config.Defaults{GCSVersion: ctxString(app, "globus:gcsVersion"), AdminCIDR: adminCIDR,
+		GlobusEndpointOwner: ctxString(app, "globus:endpointOwner"), GlobusSubscriptionID: ctxString(app, "globus:subscriptionId"),
+		GlobusEndpointName: ctxString(app, "globus:endpointDisplayName"), GlobusOrganization: ctxString(app, "globus:organizationName")}
 	for key, dst := range map[string]*int{
 		"elastic-gcs:maxDTNs":                &defaults.MaxDTNs,
 		"elastic-gcs:cacheEvictionHours":     &defaults.CacheEvictionHours,
@@ -100,10 +100,10 @@ func main() {
 			Deployment:           dep,
 			Config:               cfg,
 			OpenDataBuckets:      regionBuckets,
-			GlobusSubscriptionID: globusSubscriptionID,
-			GlobusOwnerIdentity:  globusOwnerIdentity,
-			EndpointDisplayName:  endpointDisplayName,
-			OrganizationName:     orgName,
+			GlobusSubscriptionID: cfg.GlobusSubscriptionID,
+			GlobusOwnerIdentity:  cfg.GlobusEndpointOwner,
+			EndpointDisplayName:  cfg.GlobusEndpointName,
+			OrganizationName:     cfg.GlobusOrganization,
 		})
 		dtnStackName := dep.Stack("DTNPool")
 		stacks.NewDTNPoolStack(app, dtnStackName, &stacks.DTNPoolStackProps{

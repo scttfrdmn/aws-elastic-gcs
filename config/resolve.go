@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
 )
 
 // Defaults are deployment-wide settings from CDK context (cdk.json or -c).
@@ -17,6 +19,12 @@ type Defaults struct {
 	ThroughputMBps     int
 	GCSVersion         string
 	AdminCIDR          string
+	// Site-wide Globus settings from CDK context (-c globus:...); a
+	// deployment's regions.yaml values win. Empty in the shipped cdk.json.
+	GlobusEndpointOwner  string
+	GlobusSubscriptionID string
+	GlobusEndpointName   string
+	GlobusOrganization   string
 }
 
 // Resolved is every derived per-deployment value, computed once so the control
@@ -24,6 +32,12 @@ type Defaults struct {
 type Resolved struct {
 	ControlInstance string
 	DTNInstance     string
+
+	// The Globus endpoint: owner and subscription are required (#162).
+	GlobusEndpointOwner  string
+	GlobusSubscriptionID string
+	GlobusEndpointName   string
+	GlobusOrganization   string
 
 	// MaxDTNs is the number of DTN slots (1..MaxDTNs), and so the most DTNs
 	// serving at once.
@@ -122,6 +136,21 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 	}
 	var errs []string
 	bad := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
+
+	r.GlobusEndpointOwner = or(rc.GlobusEndpointOwner, d.GlobusEndpointOwner)
+	r.GlobusSubscriptionID = or(rc.GlobusSubscriptionID, d.GlobusSubscriptionID)
+	r.GlobusEndpointName = or(rc.GlobusEndpointName, or(d.GlobusEndpointName, "Elastic GCS "+rc.Name+"-"+or(rc.Deployment, "default")))
+	r.GlobusOrganization = or(rc.GlobusOrganization, or(d.GlobusOrganization, "Elastic GCS"))
+	if r.GlobusEndpointOwner == "" {
+		bad("globus_endpoint_owner is required: the Globus username that will own the endpoint, e.g. you@globusid.org")
+	} else if !strings.Contains(r.GlobusEndpointOwner, "@") {
+		bad("globus_endpoint_owner %q: want a Globus username like you@globusid.org", r.GlobusEndpointOwner)
+	}
+	if r.GlobusSubscriptionID == "" {
+		bad("globus_subscription_id is required: your Globus subscription's ID (multi-node endpoints and the S3 connector need one)")
+	} else if err := gcsid.Validate(r.GlobusSubscriptionID); err != nil {
+		bad("globus_subscription_id %q: %v", r.GlobusSubscriptionID, err)
+	}
 
 	// Settings of the removed ASG pool (#133): fail loudly rather than deploy
 	// something other than what the file asks for.

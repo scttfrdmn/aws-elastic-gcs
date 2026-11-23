@@ -7,6 +7,12 @@
 regions:
   - name: us-east-1
     deployment: default
+    # REQUIRED (#162): the Globus endpoint this deployment creates. There are
+    # no defaults, so synth fails until both are set.
+    globus_endpoint_owner: ""          # Globus username that owns the endpoint, e.g. you@globusid.org
+    globus_subscription_id: ""         # your Globus subscription's ID (multi-node endpoints and the S3 connector need one)
+    # globus_endpoint_name: "Elastic GCS us-east-1-default"   # optional display name
+    # globus_organization: "Elastic GCS"                      # optional organization
     control_instance: t3a.large       # 2 vCPU, 8GB, x86-64 — GCS minimum (no aarch64 GCS packages)
     dtn_instance: c8in.2xlarge         # 8 vCPU, 16GB, 12.5 Gbps sustained to the internet (docs/instance-sizing.md)
     max_dtns: 4                        # DTN slots 1..4

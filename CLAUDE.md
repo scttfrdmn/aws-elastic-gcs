@@ -292,8 +292,11 @@ See `docs/configuration.md`. In short:
   `scale_in_idle`, `unhealthy_after`, `max_restarts`, `instance_types`,
   `control_node`)
 - `open_data_buckets.yaml`: Open Data bucket list per region
-- `cdk.json` context: Globus subscription ID, endpoint owner, GCS version,
-  default `max_dtns`
+- Globus endpoint owner and subscription: **required per deployment** in
+  `regions.yaml` (`globus_endpoint_owner`, `globus_subscription_id`; #162). The
+  maintainer's values live in the local, gitignored `regions.yaml`, not in
+  `cdk.json`
+- `cdk.json` context: GCS version, default `max_dtns`
 
 ## Testing Strategy
 

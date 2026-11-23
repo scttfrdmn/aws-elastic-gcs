@@ -90,6 +90,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - At +100 ms and 0.1% loss: 0.97 Gbps with BBR against 0.16 Gbps with
     `cubic` (`docs/performance/methodology.md`).
 
+### Changed
+- **The Globus endpoint owner and subscription are required per deployment
+  (#162).**
+  - Set `globus_endpoint_owner` and `globus_subscription_id` in
+    `regions.yaml`, plus the optional `globus_endpoint_name` and
+    `globus_organization`. A site-wide value can also come from
+    `-c globus:...`.
+  - There are no defaults, and synth fails with a clear message until both are
+    set.
+  - `cdk.json` no longer carries the maintainer's subscription and owner, so
+    nobody deploys under someone else's.
+
 ### Fixed
 - **CLI: `wake` and `nodes version-check` work on slot deployments (#155).**
   Both invoked Lambdas that the slots stack doesn't deploy, so they failed.

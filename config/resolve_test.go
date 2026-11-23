@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,9 +90,24 @@ func TestResolve(t *testing.T) {
 		{"bad cidr", RegionConfig{}, Defaults{AdminCIDR: "10.0.0.0/33"}, nil, true},
 		{"world cidr", RegionConfig{}, Defaults{AdminCIDR: "0.0.0.0/0"}, nil, true},
 		{"negative", RegionConfig{MaxDTNs: -1}, Defaults{}, nil, true},
+		// Globus endpoint settings (#162): owner and subscription required, no defaults.
+		{"globus: owner missing", RegionConfig{GlobusSubscriptionID: testSub}, Defaults{}, nil, true},
+		{"globus: subscription missing", RegionConfig{GlobusEndpointOwner: testOwner}, Defaults{}, nil, true},
+		{"globus: owner not a username", RegionConfig{GlobusEndpointOwner: "scott", GlobusSubscriptionID: testSub}, Defaults{}, nil, true},
+		{"globus: subscription not a UUID", RegionConfig{GlobusEndpointOwner: testOwner, GlobusSubscriptionID: "abc"}, Defaults{}, nil, true},
+		{"globus: regions.yaml wins over context", RegionConfig{Name: "us-east-2", Deployment: "beta", GlobusEndpointOwner: testOwner, GlobusSubscriptionID: testSub},
+			Defaults{GlobusEndpointOwner: "other@globusid.org", GlobusSubscriptionID: "00000000-0000-4000-8000-000000000002"}, func(r Resolved) bool {
+				return r.GlobusEndpointOwner == testOwner && r.GlobusSubscriptionID == testSub &&
+					r.GlobusEndpointName == "Elastic GCS us-east-2-beta" && r.GlobusOrganization == "Elastic GCS"
+			}, false},
+		{"globus: context values apply", RegionConfig{}, Defaults{GlobusEndpointOwner: testOwner, GlobusSubscriptionID: testSub, GlobusEndpointName: "Site"},
+			func(r Resolved) bool { return r.GlobusEndpointOwner == testOwner && r.GlobusEndpointName == "Site" }, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if !strings.HasPrefix(c.name, "globus:") {
+				c.d = withGlobus(c.d)
+			}
 			r, err := Resolve(c.rc, c.d)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
@@ -123,8 +139,25 @@ func TestExampleRegionsResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rc := range r.Regions {
-		if _, err := Resolve(rc, Defaults{}); err != nil {
+		if _, err := Resolve(rc, withGlobus(Defaults{})); err != nil {
 			t.Errorf("regions.example.yaml: %v", err)
 		}
 	}
+}
+
+const (
+	testOwner = "tester@globusid.org"
+	testSub   = "00000000-0000-4000-8000-000000000001"
+)
+
+// withGlobus fills the required Globus endpoint settings (#162) for cases
+// that aren't about them.
+func withGlobus(d Defaults) Defaults {
+	if d.GlobusEndpointOwner == "" {
+		d.GlobusEndpointOwner = testOwner
+	}
+	if d.GlobusSubscriptionID == "" {
+		d.GlobusSubscriptionID = testSub
+	}
+	return d
 }

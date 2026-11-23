@@ -20,6 +20,8 @@ Edit `config/regions.yaml` for your deployment:
 regions:
   - name: us-east-1
     deployment: default
+    globus_endpoint_owner: you@globusid.org                         # required
+    globus_subscription_id: 00000000-0000-0000-0000-000000000000    # required: your subscription
     dtn_instance: c8in.2xlarge   # or m8in.xlarge / c8in.4xlarge; see instance-sizing.md
     max_dtns: 4                  # DTN slots
     # cost_profile: balanced     # 2 warm slots, control node always on
