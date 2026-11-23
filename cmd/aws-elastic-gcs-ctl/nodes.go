@@ -6,19 +6,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go-v2/service/lambda"
-	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/scttfrdmn/aws-elastic-gcs/internal/gcsid"
+	"github.com/scttfrdmn/aws-elastic-gcs/internal/ssmexec"
 )
 
 func nodesCmd() *cobra.Command {
@@ -127,108 +126,126 @@ func runNodesDelete(cmd *cobra.Command, args []string) error {
 }
 
 func nodesVersionCheckCmd() *cobra.Command {
-	return &cobra.Command{
+	var expect string
+	cmd := &cobra.Command{
 		Use:   "version-check",
-		Short: "Invoke the version drift check Lambda and display results",
-		RunE:  runNodesVersionCheck,
+		Short: "Check that the control node and every running DTN run the same GCS version",
+		// Drift is a result, not a usage error.
+		SilenceUsage: true,
+		Long: `All nodes in an endpoint must run the same GCS version. Reads the installed
+globus-connect-server54 package version over SSM on the control node and on
+every running slot DTN, and reports any drift. The expected version comes
+from --expect, else from cdk.json (globus:gcsVersion) when run in the repo.
+Exits non-zero on drift, so it can gate a release or an upgrade.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runNodesVersionCheck(cmd.Context(), expect)
+		},
 	}
+	cmd.Flags().StringVar(&expect, "expect", "", "Expected GCS version, e.g. 5.4.101 (default: cdk.json globus:gcsVersion if present)")
+	return cmd
 }
 
-func runNodesVersionCheck(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
+// versionReport compares per-node versions against an expected version (if
+// any) and against each other. It returns the nodes that drift and whether
+// all nodes agree.
+func versionReport(versions map[string]string, expect string) (drift []string, agree bool) {
+	seen := map[string]bool{}
+	for id, v := range versions {
+		seen[v] = true
+		if v == "" || v == "unknown" || (expect != "" && v != expect) {
+			drift = append(drift, id)
+		}
+	}
+	sort.Strings(drift)
+	return drift, len(seen) <= 1 && len(drift) == 0
+}
+
+// expectedGCSVersion reads globus:gcsVersion from cdk.json in the current
+// directory or a parent, if there is one.
+func expectedGCSVersion() string {
+	dir, _ := os.Getwd()
+	for i := 0; i < 6 && dir != ""; i++ {
+		b, err := os.ReadFile(filepath.Join(dir, "cdk.json"))
+		if err == nil {
+			var c struct {
+				Context map[string]any `json:"context"`
+			}
+			if json.Unmarshal(b, &c) == nil {
+				if v, ok := c.Context["globus:gcsVersion"].(string); ok {
+					return v
+				}
+			}
+			return ""
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func runNodesVersionCheck(ctx context.Context, expect string) error {
 	cfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		return err
 	}
-	lambdaClient := lambda.NewFromConfig(cfg)
-	logsClient := cloudwatchlogs.NewFromConfig(cfg)
-
-	fnName := dep.Resource("version-check")
-	logGroup := fmt.Sprintf("/aws/lambda/%s", fnName)
-	fmt.Printf("Invoking %s...\n", fnName)
-
-	invokeStart := time.Now()
-	result, err := lambdaClient.Invoke(ctx, &lambda.InvokeInput{
-		FunctionName:   aws.String(fnName),
-		InvocationType: lambdatypes.InvocationTypeRequestResponse,
-	})
+	ssmc, ec2c := ssm.NewFromConfig(cfg), ec2.NewFromConfig(cfg)
+	if expect == "" {
+		expect = expectedGCSVersion()
+	}
+	nodes := map[string]string{} // instance ID -> role label
+	if id, err := getSSMParam(ctx, ssmc, controlNodeIDParamPath()); err == nil {
+		nodes[id] = "control"
+	}
+	slots, err := listSlotInstances(ctx, ec2c)
 	if err != nil {
-		return fmt.Errorf("Lambda invoke failed: %w", err)
+		return err
 	}
-
-	if result.FunctionError != nil {
-		color.Red("Function error: %s\n", aws.ToString(result.FunctionError))
-		if len(result.Payload) > 0 {
-			fmt.Printf("Payload: %s\n", string(result.Payload))
+	for _, s := range slots {
+		if s.State == "running" {
+			nodes[s.ID] = fmt.Sprintf("slot %d", s.Slot)
 		}
-		return nil
 	}
-
-	// Lambda completed successfully. Pull the structured log lines from this
-	// invocation so we can show actual version data rather than just "check the metric".
-	// Retry for up to 15s to allow CloudWatch Logs to flush.
-	type logLine struct {
-		Msg      string            `json:"msg"`
-		Versions map[string]string `json:"versions"`
-		Distinct int               `json:"distinct_versions"`
-		Drift    int               `json:"drift_count"`
-	}
-
-	startMS := invokeStart.UnixMilli()
-	var summary *logLine
-	for attempt := 0; attempt < 5; attempt++ {
-		time.Sleep(3 * time.Second)
-		filterOut, ferr := logsClient.FilterLogEvents(ctx, &cloudwatchlogs.FilterLogEventsInput{
-			LogGroupName:  aws.String(logGroup),
-			StartTime:     aws.Int64(startMS),
-			FilterPattern: aws.String("version check complete"),
-		})
-		if ferr != nil {
-			break
-		}
-		for _, ev := range filterOut.Events {
-			var ll logLine
-			if json.Unmarshal([]byte(aws.ToString(ev.Message)), &ll) == nil &&
-				ll.Msg == "version check complete" {
-				summary = &ll
+	versions := map[string]string{}
+	for id, role := range nodes {
+		res, err := ssmexec.RunOK(ctx, ssmc, id, "rpm -q --qf '%{VERSION}' globus-connect-server54",
+			ssmexec.Options{Wait: 60 * time.Second, Comment: "elastic-gcs: version check"})
+		v := strings.TrimSpace(res.Stdout)
+		if err != nil || v == "" {
+			v = "unknown"
+			if err != nil {
+				color.Yellow("  %s (%s): %v\n", id, role, err)
 			}
 		}
-		if summary != nil {
-			break
-		}
+		versions[id] = v
+	}
+	if len(versions) == 0 {
+		return fmt.Errorf("no running nodes to check (control node and DTNs are stopped; try 'wake')")
 	}
 
-	if summary == nil {
-		color.Green("Version check completed.\n")
-		fmt.Println("(Log output not yet available — run `./aws-elastic-gcs-ctl logs version-check --since 5m` to see results)")
-		return nil
+	fmt.Printf("  %-22s  %-9s  %s\n", "Instance", "Role", "GCS version")
+	ids := make([]string, 0, len(versions))
+	for id := range versions {
+		ids = append(ids, id)
 	}
-
-	fmt.Println()
-	if summary.Drift == 0 {
-		color.Green("GCSVersionDrift = 0  (all nodes agree)\n")
-	} else {
-		color.Red("GCSVersionDrift = %d  (VERSION DRIFT DETECTED)\n", summary.Drift)
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Printf("  %-22s  %-9s  %s\n", id, nodes[id], versions[id])
 	}
 	fmt.Println()
-
-	// Print per-instance version table.
-	fmt.Printf("  %-22s  %s\n", "Instance", "GCS Version")
-	fmt.Printf("  %-22s  %s\n", strings.Repeat("─", 22), strings.Repeat("─", 12))
-	// Sort instances for stable output.
-	instances := make([]string, 0, len(summary.Versions))
-	for id := range summary.Versions {
-		instances = append(instances, id)
-	}
-	sort.Strings(instances)
-	for _, id := range instances {
-		ver := summary.Versions[id]
-		if ver == "unknown" {
-			color.Yellow("  %-22s  %s\n", id, ver)
+	drift, agree := versionReport(versions, expect)
+	switch {
+	case agree:
+		if expect != "" {
+			color.Green("All %d running nodes run GCS %s, as expected.\n", len(versions), expect)
 		} else {
-			fmt.Printf("  %-22s  %s\n", id, ver)
+			color.Green("All %d running nodes run the same GCS version (no expected version given).\n", len(versions))
 		}
+		return nil
+	default:
+		color.Red("GCS version drift on %d node(s): %s (expected %q)\n", len(drift), strings.Join(drift, ", "), expect)
+		return fmt.Errorf("GCS version drift")
 	}
-	fmt.Println()
-	return nil
 }

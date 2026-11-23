@@ -143,12 +143,12 @@ Commands:
 | Command | Description |
 |---------|-------------|
 | `status` | System overview: control node, DTN slots, GCS nodes, active transfers |
-| `wake [--scale-out]` | Start the control node through the waker Lambda (not deployed by the slots stack yet, #130) |
+| `wake [--scale-out]` | Start the control node, enable it and wait until it's in endpoint DNS (an endpoint with no serving node rejects transfers); `--scale-out` also asks for one DTN |
 | `scale up [--to N] [--watch]` | Raise desired-dtns (held for `scale_in_idle`) |
 | `scale down [--to N] [--watch]` | Lower desired-dtns |
 | `nodes list` | List all GCS nodes with status |
 | `nodes delete <id>` | Delete a GCS node registration (accepts 8-char prefix) |
-| `nodes version-check` | Invoke version drift Lambda, show per-instance versions |
+| `nodes version-check [--expect V]` | GCS version on the control node and every running DTN (over SSM); exits non-zero on drift |
 | `collections list` | List storage gateways and mapped collections |
 | `collections setup --config config/open_data_buckets.yaml` | Idempotently create gateways and collections |
 | `logs <lambda> [--since 1h] [--tail] [--json]` | Stream or fetch Lambda logs |

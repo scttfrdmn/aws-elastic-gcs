@@ -171,7 +171,7 @@ operator alert topic, a dashboard or the GCS version-drift check yet (#144).
 ./bin/aws-elastic-gcs-ctl logs demand-monitor --since 2h --json --region us-east-1 | jq .
 ```
 
-Deployed Lambdas: `slot-controller`, `demand-monitor`. (`version-check`, `waker` and `idle-shutdown` return with #144 and #130.)
+Deployed Lambdas: `slot-controller`, `demand-monitor`. `wake` and `nodes version-check` run locally with your AWS credentials (EC2, SSM); the `version-check`, `waker` and `idle-shutdown` Lambdas return with #144 and #130.
 
 ### GCS Version Upgrade
 
