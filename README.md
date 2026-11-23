@@ -87,9 +87,10 @@ See [docs/architecture.md](docs/architecture.md) for full details.
 git clone https://github.com/scttfrdmn/aws-elastic-gcs
 cd aws-elastic-gcs
 
-# 2. Configure region
+# 2. Configure your deployment
 cp config/regions.example.yaml config/regions.yaml
-# Edit config/regions.yaml — set your region, instance type, pool sizes
+# Edit config/regions.yaml: your region, DTN instance type, max_dtns, and the
+# REQUIRED globus_endpoint_owner (you@globusid.org) and globus_subscription_id
 
 # 3. Store Globus credentials (names are elastic-gcs/<region>/<deployment>/...)
 aws secretsmanager create-secret \

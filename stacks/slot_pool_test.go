@@ -24,7 +24,7 @@ func TestSlotPoolStack(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 
 	dep, _ := names.New("us-west-2", "tst")
-	cfg, err := config.Resolve(config.RegionConfig{Name: "us-west-2", Deployment: "tst", Pool: "slots", MaxDTNs: 4}, config.Defaults{})
+	cfg, err := config.Resolve(config.RegionConfig{Name: "us-west-2", Deployment: "tst", Pool: "slots", MaxDTNs: 4}, config.Defaults{GlobusEndpointOwner: "tester@globusid.org", GlobusSubscriptionID: "00000000-0000-4000-8000-000000000001"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,11 +13,18 @@ type RegionConfig struct {
 	// Deployment distinguishes independent endpoints in the same region
 	// (1-12 lowercase letters/digits; default "default"). Every resource name,
 	// secret, SSM path and metric dimension includes it; see internal/names.
-	Deployment      string `yaml:"deployment"`
-	ControlInstance string `yaml:"control_instance"`
-	DTNInstance     string `yaml:"dtn_instance"`
-	MaxDTNs         int    `yaml:"max_dtns"`
-	KeyPairName     string `yaml:"key_pair_name"`
+	Deployment string `yaml:"deployment"`
+	// The Globus endpoint this deployment creates (#162). Owner and
+	// subscription are required: there are no defaults, so nobody deploys
+	// under someone else's subscription or ownership.
+	GlobusEndpointOwner  string `yaml:"globus_endpoint_owner"`  // Globus username, e.g. you@globusid.org
+	GlobusSubscriptionID string `yaml:"globus_subscription_id"` // subscription UUID (multi-node endpoints, S3 connector)
+	GlobusEndpointName   string `yaml:"globus_endpoint_name"`   // display name (default "Elastic GCS <region>-<deployment>")
+	GlobusOrganization   string `yaml:"globus_organization"`    // organization shown on the endpoint (default "Elastic GCS")
+	ControlInstance      string `yaml:"control_instance"`
+	DTNInstance          string `yaml:"dtn_instance"`
+	MaxDTNs              int    `yaml:"max_dtns"`
+	KeyPairName          string `yaml:"key_pair_name"`
 
 	// ThroughputScaleOutMBps: aggregate throughput (MB/s) per DTN. demand_monitor
 	// sets desired-dtns to ceil(total throughput of ACTIVE tasks / threshold).
