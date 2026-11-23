@@ -143,14 +143,12 @@ func instanceState(inst ec2types.Instance) string {
 }
 
 // lambdaFunctionBases maps the short Lambda names accepted by `logs` and
-// reported by `metrics` to their function-name prefix. version-check, waker
-// and idle-shutdown aren't deployed by the slots stack yet (#144, #130).
+// reported by `metrics` to their function-name prefix: the Lambdas the slots
+// stack deploys. (version-check, waker and idle-shutdown come back with #144
+// and #130; until then 'nodes version-check' and 'wake' run locally.)
 var lambdaFunctionBases = map[string]string{
 	"slot-controller": "elastic-gcs-slot-controller",
 	"demand-monitor":  "elastic-gcs-demand-monitor",
-	"version-check":   "elastic-gcs-version-check",
-	"waker":           "elastic-gcs-waker",
-	"idle-shutdown":   "elastic-gcs-idle-shutdown",
 }
 
 func sortedLambdaNames() []string {

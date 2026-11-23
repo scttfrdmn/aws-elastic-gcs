@@ -91,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cubic` (`docs/performance/methodology.md`).
 
 ### Fixed
+- **CLI: `wake` and `nodes version-check` work on slot deployments (#155).**
+  Both invoked Lambdas that the slots stack doesn't deploy, so they failed.
+  - `wake` now starts the control node itself, waits for SSM, enables its GCS
+    node and waits until it's in endpoint DNS. `--scale-out` sets
+    desired-dtns = 1.
+  - `nodes version-check` reads the installed GCS package version on the
+    control node and every running slot over SSM. It compares the versions
+    against `--expect` (or `cdk.json`) and exits non-zero on drift.
+  - `logs` and `metrics` list only the deployed Lambdas.
 - **No more pointless GridFTP restarts on node join and leave (#141, from Globus
   support).**
   - The cause is a GCS bug: the manager resets the GridFTP config's ownership
