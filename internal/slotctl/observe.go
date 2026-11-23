@@ -93,7 +93,12 @@ func SlotFromInstance(inst ec2types.Instance, p Probe, now time.Time) (slots.Slo
 			s.Phase = slots.Stable // stop finished
 		}
 		s.StoppedFor = since(t[TagStoppedAt], now)
-	default: // shutting-down, terminated
+	case "shutting-down":
+		// Still terminating (Rebuild, Evict): COLD but in flight, so Plan
+		// won't revive the slot until the old instance is gone. Two instances
+		// must never run the same node identity at once (Globus, #151).
+		return slots.Slot{N: n, Tier: slots.Cold, Phase: slots.Evicting}, true
+	default: // terminated
 		return slots.Slot{}, false
 	}
 	return s, true

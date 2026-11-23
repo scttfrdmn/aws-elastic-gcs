@@ -26,7 +26,7 @@ regions:
 | `deployment` | `default` | Deployment name; see [Multiple deployments per region](#multiple-deployments-per-region) |
 | `control_instance` | `t3a.large` | Control node type. GCS needs 8 GB and x86-64 |
 | `dtn_instance` | `c8in.2xlarge` | DTN type. Sustained internet-gateway throughput is the bottleneck; see [Instance Sizing](instance-sizing.md) |
-| `max_dtns` | context `elastic-gcs:maxDTNs`, else `4` | Number of DTN slots (1..`max_dtns`), and so the most DTNs serving at once. The control node pre-creates one node identity per slot |
+| `max_dtns` | context `elastic-gcs:maxDTNs`, else `4` | Number of DTN slots (1..`max_dtns`), and so the most DTNs serving at once. The control node pre-creates one node identity per slot. At most **63**: Globus allows 64 node keys per endpoint, and the control node holds one |
 | `throughput_scaleout_mbps` | ~70% of `dtn_instance`'s sustained throughput | Throughput one DTN is expected to carry. demand_monitor asks for ceil(total ACTIVE throughput / this) DTNs |
 | `key_pair_name` | `""` | EC2 key pair for the control node and DTNs |
 | `network_use` | derived from `max_dtns` | See [Network use](#network-use-regionsyaml-network_use) |

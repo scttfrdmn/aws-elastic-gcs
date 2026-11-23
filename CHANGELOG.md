@@ -91,6 +91,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cubic` (`docs/performance/methodology.md`).
 
 ### Fixed
+- **No more pointless GridFTP restarts on node join and leave (#141, from Globus
+  support).**
+  - The cause is a GCS bug: the manager resets the GridFTP config's ownership
+    even when its contents are unchanged, and the ctime change fires
+    `gridftp-server-restarter`.
+  - `configure_gridftp.sh` now also installs Globus's interim workaround: an
+    `ExecCondition` that restarts GridFTP only when a SHA-256 of the config
+    contents changed.
+  - Verified live: across a DTN join, a control-node demotion and the DTN
+    leaving, the control node's GridFTP PID was unchanged and every restart
+    was skipped, while a node without the override restarted 3 times.
+  - Remove the drop-in once GCS ships the fix.
+- **A slot is never revived while its old instance is still shutting down.**
+  Globus requires that two instances never run the same node identity at once.
+  The controller used to treat a `shutting-down` instance as a COLD slot.
+  It's now in flight until terminated.
+- **`max_dtns` is limited to 63:** Globus allows 64 node keys per endpoint, and
+  the control node holds one.
 - **A transient first-boot failure no longer leaves a slot broken (#146).** On a
   new deployment's first revive, IAM hadn't propagated the new runtime role
   yet. The UserData download of the node unit's script got a 403, and the slot
