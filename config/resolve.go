@@ -81,6 +81,10 @@ const (
 	DefaultControlInstance = "t3a.large"
 	DefaultDTNInstance     = "c8in.2xlarge"
 	DefaultMaxDTNs         = 4
+	// MaxNodeKeysPerEndpoint is Globus's limit on node keys per GCS endpoint
+	// (Globus support, 2026-11): every `node create` adds one; reusing an
+	// identity adds none.
+	MaxNodeKeysPerEndpoint = 64
 	DefaultGCSVersion      = "5.4.101"
 	fallbackThresholdBps   = 500_000_000
 	// MaxTransferConcurrency is the most concurrent files Transfer allows per task.
@@ -142,6 +146,12 @@ func Resolve(rc RegionConfig, d Defaults) (Resolved, error) {
 	}
 	if r.MaxDTNs == 0 {
 		r.MaxDTNs = DefaultMaxDTNs
+	}
+	// Globus: at most 64 node keys per endpoint. Each slot pre-creates one
+	// identity and the control node holds one more.
+	if r.MaxDTNs > MaxNodeKeysPerEndpoint-1 {
+		bad("max_dtns %d: an endpoint holds at most %d node keys (one per slot plus the control node), so max_dtns <= %d",
+			r.MaxDTNs, MaxNodeKeysPerEndpoint, MaxNodeKeysPerEndpoint-1)
 	}
 	r.TotalSlots = r.MaxDTNs
 

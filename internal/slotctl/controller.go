@@ -165,7 +165,10 @@ func (c *Controller) slotInstances(ctx context.Context) ([]ec2types.Instance, er
 	p := ec2.NewDescribeInstancesPaginator(c.EC2, &ec2.DescribeInstancesInput{Filters: []ec2types.Filter{
 		{Name: aws.String("tag:" + names.TagDeployment), Values: []string{c.Env.Dep.ID()}},
 		{Name: aws.String("tag:" + TagPool), Values: []string{"slots"}},
-		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped"}},
+		// shutting-down is included so a slot whose instance is still
+		// terminating isn't mistaken for COLD and revived: Globus requires that
+		// two instances never hold the same node identity at once.
+		{Name: aws.String("instance-state-name"), Values: []string{"pending", "running", "stopping", "stopped", "shutting-down"}},
 	}})
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)

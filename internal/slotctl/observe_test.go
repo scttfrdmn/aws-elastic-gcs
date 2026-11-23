@@ -47,6 +47,7 @@ func TestSlotFromInstance(t *testing.T) {
 		{"stopping is warm, in flight", inst("i-1", "3", "stopping"), Probe{}, slots.Slot{N: 3, Tier: slots.Warm, Phase: slots.Stopping}, true},
 		{"in DNS but GCS not running is unhealthy", inst("i-1", "1", "running"), Probe{SSMOnline: true, InDNS: true},
 			slots.Slot{N: 1, Tier: slots.Hot}, true},
+		{"shutting-down is cold and in flight", inst("i-1", "4", "shutting-down"), Probe{}, slots.Slot{N: 4, Tier: slots.Cold, Phase: slots.Evicting}, true},
 		{"terminated is ignored", inst("i-1", "4", "terminated"), Probe{}, slots.Slot{}, false},
 		{"no slot tag is ignored", ec2types.Instance{InstanceId: aws.String("i-9"), State: &ec2types.InstanceState{Name: "running"}}, Probe{}, slots.Slot{}, false},
 		{"future timestamps count as zero", inst("i-1", "1", "running", TagUnhealthySince, now.Add(time.Hour).Format(time.RFC3339)), Probe{},

@@ -34,6 +34,8 @@ func TestPlan(t *testing.T) {
 			Observed{Slots: []Slot{warm(1), warm(2), warm(3), cold(4)}}, 2, []string{"start:1", "start:2"}},
 		{"then revives one cold slot at a time",
 			Observed{Slots: []Slot{hot(1, 0), warm(2), cold(3), cold(4)}}, 4, []string{"start:2", "revive:3"}},
+		{"a slot whose old instance is still terminating isn't revived; the next one is",
+			Observed{Slots: []Slot{hot(1, 0), {N: 2, Tier: Cold, Phase: Evicting}, cold(3), cold(4)}}, 2, []string{"revive:3"}},
 		{"no second revive while one is in flight",
 			Observed{Slots: []Slot{hot(1, 0), hot(2, 0), {N: 3, Tier: Cold, Phase: Reviving}, cold(4)}}, 4, []string{}},
 		{"desired is capped at max_dtns",

@@ -60,6 +60,8 @@ func TestResolve(t *testing.T) {
 		{"control demotion after 5m", RegionConfig{MaxDTNs: 4, ControlDemoteAfter: "5m"}, Defaults{}, func(r Resolved) bool {
 			return r.ControlDemoteAfter == 5*time.Minute
 		}, false},
+		{"max_dtns at the node-key limit", RegionConfig{MaxDTNs: 63}, Defaults{}, func(r Resolved) bool { return r.MaxDTNs == 63 }, false},
+		{"max_dtns over the node-key limit", RegionConfig{MaxDTNs: 64}, Defaults{}, nil, true},
 		{"control demotion bad value", RegionConfig{MaxDTNs: 4, ControlDemoteAfter: "soon"}, Defaults{}, nil, true},
 		{"minimal profile", RegionConfig{MaxDTNs: 4, CostProfile: "minimal"}, Defaults{}, func(r Resolved) bool {
 			return r.WarmSlots == 0 && r.ControlNode == "none" && !r.Dashboard && r.ColdTTL == 24*time.Hour
