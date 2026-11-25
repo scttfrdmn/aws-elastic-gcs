@@ -1,0 +1,9 @@
+# 1 GiB x 512 (512 GiB) (#151 section 5)
+name: F1G
+description: "1 GiB x 512 (512 GiB)"
+size: 1GiB
+count: 512
+naming: hashed
+fanout: 16
+depth: 1
+target: s3

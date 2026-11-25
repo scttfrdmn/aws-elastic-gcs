@@ -1,0 +1,35 @@
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "net", "flows": 1, "procs": 1, "gbps": 4.783, "t": 1794858476.8846757}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "net", "flows": 256, "procs": 16, "gbps": 179.651, "t": 1794858483.000397}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "net", "flows": 512, "procs": 32, "gbps": 165.895, "t": 1794858489.3816955}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 1, "rep": 0, "objects": 2, "errors": 0, "agg_gbps": 0.788, "per_object_gbps_mean": 0.789, "t": 1794858511.178515}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 1, "rep": 1, "objects": 2, "errors": 0, "agg_gbps": 0.769, "per_object_gbps_mean": 0.77, "t": 1794858533.5072215}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 1, "rep": 2, "objects": 2, "errors": 0, "agg_gbps": 0.74, "per_object_gbps_mean": 0.744, "t": 1794858556.722866}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 8, "rep": 0, "objects": 16, "errors": 0, "agg_gbps": 4.936, "per_object_gbps_mean": 0.725, "t": 1794858584.5660348}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 32, "rep": 0, "objects": 32, "errors": 0, "agg_gbps": 8.091, "per_object_gbps_mean": 0.631, "t": 1794858618.5400703}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 128, "rep": 0, "objects": 128, "errors": 0, "agg_gbps": 39.358, "per_object_gbps_mean": 0.654, "t": 1794858646.476879}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 1073741824, "inflight": 256, "rep": 0, "objects": 256, "errors": 0, "agg_gbps": 60.793, "per_object_gbps_mean": 0.659, "t": 1794858682.6499965}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 1, "rep": 0, "objects": 2, "errors": 0, "agg_gbps": 0.658, "per_object_gbps_mean": 0.681, "t": 1794858684.2809105}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 1, "rep": 1, "objects": 2, "errors": 0, "agg_gbps": 0.716, "per_object_gbps_mean": 0.728, "t": 1794858685.780914}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 1, "rep": 2, "objects": 2, "errors": 0, "agg_gbps": 0.776, "per_object_gbps_mean": 0.784, "t": 1794858687.1650732}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 32, "rep": 0, "objects": 32, "errors": 0, "agg_gbps": 8.512, "per_object_gbps_mean": 0.575, "t": 1794858689.1836863}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 128, "rep": 0, "objects": 128, "errors": 0, "agg_gbps": 31.499, "per_object_gbps_mean": 0.616, "t": 1794858691.365948}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1", "object": 67108864, "inflight": 256, "rep": 0, "objects": 256, "errors": 0, "agg_gbps": 75.952, "per_object_gbps_mean": 0.73, "t": 1794858693.1763837}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 4294967296, "inflight": 1, "rep": 0, "rc": 0, "gbps": 17.088, "t": 1794858695.1874082}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 4294967296, "inflight": 1, "rep": 1, "rc": 0, "gbps": 24.359, "t": 1794858696.598163}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 4294967296, "inflight": 1, "rep": 2, "rc": 0, "gbps": 22.52, "t": 1794858698.1241238}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 1, "rep": 0, "rc": 0, "gbps": 3.956, "t": 1794858700.2959676}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 1, "rep": 1, "rc": 0, "gbps": 5.453, "t": 1794858701.8715515}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 1, "rep": 2, "rc": 0, "gbps": 6.892, "t": 1794858703.1180634}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 8, "objects": 16, "errors": 0, "agg_gbps": 29.34, "t": 1794858707.802887}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 32, "objects": 64, "errors": 3, "agg_gbps": 70.435, "t": 1794858715.6088827}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 64, "objects": 128, "errors": 12, "agg_gbps": 87.708, "t": 1794858728.1455424}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "getcrt", "object": 1073741824, "inflight": 128, "objects": 256, "errors": 71, "agg_gbps": 108.52, "t": 1794858748.4103835}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 1, "rep": 0, "errors": 0, "agg_gbps": 4.687, "t": 1794858750.2433398}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 1, "rep": 1, "errors": 0, "agg_gbps": 5.136, "t": 1794858751.916112}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 1, "rep": 2, "errors": 0, "agg_gbps": 5.293, "t": 1794858753.539192}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 8, "rep": 0, "errors": 0, "agg_gbps": 31.597, "t": 1794858755.7144287}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 32, "rep": 0, "errors": 4, "agg_gbps": 76.154, "t": 1794858759.324453}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "putcrt", "object": 1073741824, "inflight": 64, "rep": 0, "errors": 10, "agg_gbps": 65.171, "t": 1794858767.760537}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1_sustained", "object": 1073741824, "inflight": 128, "bin_s": 10, "gbps_bins": [0.0, 105.66, 96.21, 95.35, 86.76, 94.49, 91.05, 79.89, 87.62, 92.77, 94.49, 88.48, 83.32, 92.77, 90.19, 92.77, 87.62, 84.18], "t": 1794858974.8887012}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "get1_sustained", "object": 1073741824, "inflight": 256, "bin_s": 10, "gbps_bins": [0.0, 213.89, 188.12, 189.84, 177.81, 184.68, 184.68, 168.36, 171.8, 172.66, 177.81, 184.68, 174.38, 182.11, 182.11, 184.68, 178.67, 173.52], "t": 1794859195.0888827}
+{"label": "c8in.48xlarge", "vcpu": 192, "test": "done", "t": 1794859195.089046}

@@ -1,0 +1,27 @@
+{"role": "read", "key": "synth/F16G-f09df7e7/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/01/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/01/4f48f7e8735ae911.bin", "requests": 2, "ops": {"REST.HEAD.OBJECT": 1, "REST.GET.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0, "get": {"n": 1, "ranged": 1, "range_bytes": {"n": 1, "min": 6297252364, "median": 6297252364, "max": 6297252364, "mean": 6297252364.0}, "inflight_peak": 1, "inflight_mean": 1.0, "first_byte_ms": {"n": 1, "min": 108, "median": 108, "max": 108, "mean": 108.0}, "span_s": 91.481}}
+{"role": "read", "key": "synth/F16G-f09df7e7/01/c92398c366c3c32a.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/02/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/02/6e39886dc4f64f87.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/06/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/06/975b42755927cdc5.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/07/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/07/0efc4303955271ba.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/07/e9c6adfbea7d6d38.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/08/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/08/7e99972471939bda.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/08/f4bae1a23a6201aa.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/09/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/09/2789488f13460f05.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/09/9a041e67b3ceff6f.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0a/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/0a/9e09e290fab71558.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0b/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/0b/c2d3c4d1a0c3ba03.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0d/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/0d/1ac9d10bc587747f.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0d/661d66657ffe3faa.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0d/94304131c925be62.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}
+{"role": "read", "key": "synth/F16G-f09df7e7/0e/", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": null, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 1}
+{"role": "read", "key": "synth/F16G-f09df7e7/0e/8a1c45de5c77fefc.bin", "requests": 1, "ops": {"REST.HEAD.OBJECT": 1}, "object_size": 17179869184, "throttled_503": 0, "errors_5xx": 0, "errors_4xx": 0}

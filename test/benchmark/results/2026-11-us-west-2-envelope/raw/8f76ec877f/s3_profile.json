@@ -1,0 +1,16 @@
+{
+ "write": {
+  "records": 0,
+  "objects": 0,
+  "ops": {},
+  "requests_per_object": 0.0,
+  "heads": 0,
+  "lists": 0,
+  "directory_markers": 0,
+  "throttled_503": 0,
+  "errors_5xx": 0,
+  "retries": 0,
+  "backoff_s": null,
+  "throttle_first_t": null
+ }
+}

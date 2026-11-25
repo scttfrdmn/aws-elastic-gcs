@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Envelope-study harness** (#151) in `test/benchmark/harness/`, for stock
+  GCS 5.4 transfers to and from S3:
+  - `synth.py` and `datasets/*.yaml` generate parametric synthetic datasets,
+    with seeds written in-region and server-side fan-out;
+  - `study.py` and `plans/envelope.yaml` run a study plan: randomized order,
+    repeats, adaptive knee refinement and resumable JSONL records;
+  - `steady.py` detects steady state statistically;
+  - `gridftp_log.py` and `s3_access_logs.py` parse GridFTP and S3 access logs;
+  - `analyze.py` produces tables with CIs, the r(s), min and USL fits with
+    hold-out validation, figures and an attribution template;
+  - offline tests cover all of the above.
+
+  `netem.sh` gains loss and a choice of side. `bench_transfer.py` gains
+  `ENCRYPT_DATA`, a cancel file and logging of the negotiated `STARTED`
+  events.
 - **Slot-controller and cost settings** in `regions.yaml` (#126).
   - New settings: `pool`, `cost_profile` (`balanced` | `minimal`), `warm_slots`,
     `cold_ttl`, `drain_timeout`, `scale_in_idle`, `unhealthy_after`,

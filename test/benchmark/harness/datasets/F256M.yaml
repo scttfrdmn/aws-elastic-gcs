@@ -1,0 +1,9 @@
+# 256 MiB x 1,024 (256 GiB) (#151 section 5)
+name: F256M
+description: "256 MiB x 1,024 (256 GiB)"
+size: 256MiB
+count: 1024
+naming: hashed
+fanout: 16
+depth: 1
+target: s3
